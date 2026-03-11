@@ -1,0 +1,13 @@
+# 忽略敏感配置文件和 Cookie
+config.yaml
+cookies.json
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略临时测试文件
+test_*.py
+
+my_papers.csv
+logs/
