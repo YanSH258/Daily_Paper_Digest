@@ -1,20 +1,31 @@
-# 忽略敏感配置文件和 Cookie
-config/config.yaml
-cookies.json
-
-# 忽略数据库文件
-chem_daily.db
-data/db/chem_daily.db
-
-# 忽略 Python 缓存
+# Python bytecode / cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# 忽略临时测试文件（根目录下的临时脚本）
-/test_*.py
+# Virtual environments
+.venv/
+venv/
+env/
 
-# 不忽略正式测试目录
-!tests/
+# Test artifacts & pytest cache
+.pytest_cache/
 
-my_papers.csv
-logs/
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Runtime / generated outputs
+output/
+data/output/
+
+# Local databases or other artifacts
+*.db
+data/db/*.db
+
+# Build / dist
+*.egg-info/
+dist/
+build/
