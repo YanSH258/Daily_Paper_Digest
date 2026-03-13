@@ -15,6 +15,7 @@ import sys
 import time
 import logging
 import argparse
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 
@@ -94,16 +95,30 @@ def run_once(config: dict, date_str: str = None):
     # ── Step 3: 第一阶段 - 用摘要快速过滤相关性 ──────────────
     logger.info(f"Step 3: LLM 相关性过滤-第一阶段 (阈值={threshold}, 使用摘要)")
     candidate_articles = []
+    scores = [None] * len(new_articles)
+
+    def _score_one(idx_article):
+        idx, article = idx_article
+        logger.info(f"  [{idx+1}/{len(new_articles)}] 评分: {article['title'][:60]}...")
+        try:
+            score = analyzer.filter_relevance(article)
+            scores[idx] = score
+        except Exception as e:
+            logger.error(f"  评分失败 (idx={idx}): {e}")
+            scores[idx] = -1
+
+    llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
+        list(executor.map(_score_one, enumerate(new_articles)))
+
     for i, article in enumerate(new_articles):
-        logger.info(f"  [{i+1}/{len(new_articles)}] 评分: {article['title'][:60]}...")
-        score = analyzer.filter_relevance(article)
+        score = scores[i] if scores[i] is not None else -1
         article["relevance"] = score
         if score >= threshold:
             candidate_articles.append(article)
-            logger.info(f"    ✓ 入选 (score={score:.1f})")
+            logger.info(f"    ✓ 入选: {article['title'][:60]} (score={score:.1f})")
         else:
-            logger.info(f"    ✗ 过滤 (score={score:.1f})")
-        time.sleep(0.5)
+            logger.info(f"    ✗ 过滤: {article['title'][:60]} (score={score:.1f})")
 
     logger.info(f"  初筛通过: {len(candidate_articles)} 篇")
 
@@ -112,64 +127,94 @@ def run_once(config: dict, date_str: str = None):
     use_fulltext = config.get("fetcher", {}).get("use_fulltext", True)
 
     if use_fulltext and candidate_articles:
+        # 筛选需要抓取全文的文章
+        articles_to_fetch = [
+            (i, a) for i, a in enumerate(candidate_articles)
+            if a.get("publisher", "DEFAULT") not in RSS_ONLY_PUBLISHERS
+        ]
+
+        # 并发批量获取全文
+        if articles_to_fetch:
+            only_articles = [a for _, a in articles_to_fetch]
+            perf_cfg = config.get("performance", {})
+            concurrency = perf_cfg.get("concurrency", 5)
+
+            logger.info(f"  并发全文获取（并发度={concurrency}，共 {len(only_articles)} 篇）")
+            fetch_results = fetcher.fetch_fulltext_batch(only_articles)
+
+            for (orig_idx, article), fetch_result in zip(articles_to_fetch, fetch_results):
+                i = candidate_articles.index(article)
+                logger.info(
+                    f"  [{orig_idx + 1}/{len(candidate_articles)}] 读取全文: "
+                    f"{article['title'][:55]}..."
+                )
+                if fetch_result is None:
+                    fetch_result = FetchResult()
+
+                article["fetch_status"] = fetch_result.fetch_status
+                article["best_available_format"] = fetch_result.best_available_format
+                article["network_mode"] = fetch_result.network_mode
+                article["access_path"] = fetch_result.access_path
+
+                if fetch_result.text and len(fetch_result.text) > len(article.get("abstract", "")):
+                    article["abstract"]     = fetch_result.text
+                    article["has_fulltext"] = True
+                    article["evidence_level"] = fetch_result.evidence_level
+                    logger.info(
+                        f"    ✓ 全文 {len(fetch_result.text)} 字"
+                        f" [{fetch_result.best_available_format},"
+                        f" {fetch_result.network_mode}/{fetch_result.access_path}]"
+                    )
+                else:
+                    article["has_fulltext"] = False
+                    article["evidence_level"] = "ABSTRACT_ONLY"
+                    if fetch_result.fetch_status == FetchStatus.WAITING_USER_UPLOAD:
+                        logger.warning(
+                            f"    ⚠ 全文获取失败 ({fetch_result.error_code})，"
+                            f"可运行: python -m src.fetchers.manual_upload "
+                            f"--file <文件路径> --doi {article.get('doi', '')}"
+                        )
+                    else:
+                        logger.info(
+                            f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
+                            f" [status={fetch_result.fetch_status}]"
+                        )
+
+        # 记录 RSS_ONLY 期刊
         for i, article in enumerate(candidate_articles):
-            publisher = article.get("publisher", "DEFAULT")
-            if publisher in RSS_ONLY_PUBLISHERS:
+            if article.get("publisher", "DEFAULT") in RSS_ONLY_PUBLISHERS:
                 logger.info(
                     f"  [{i+1}/{len(candidate_articles)}] {article['journal']}: "
                     f"RSS摘要已足够，跳过全文抓取"
                 )
-                continue
 
-            logger.info(
-                f"  [{i+1}/{len(candidate_articles)}] 读取全文: "
-                f"{article['title'][:55]}..."
-            )
-            fetch_result = fetcher.fetch_fulltext_with_status(article)
-            article["fetch_status"] = fetch_result.fetch_status
-            article["best_available_format"] = fetch_result.best_available_format
-            article["network_mode"] = fetch_result.network_mode
-            article["access_path"] = fetch_result.access_path
-
-            if fetch_result.text and len(fetch_result.text) > len(article.get("abstract", "")):
-                article["abstract"]     = fetch_result.text
-                article["has_fulltext"] = True
-                article["evidence_level"] = fetch_result.evidence_level
-                logger.info(
-                    f"    ✓ 全文 {len(fetch_result.text)} 字"
-                    f" [{fetch_result.best_available_format},"
-                    f" {fetch_result.network_mode}/{fetch_result.access_path}]"
-                )
-            else:
-                article["has_fulltext"] = False
-                article["evidence_level"] = "ABSTRACT_ONLY"
-                if fetch_result.fetch_status == FetchStatus.WAITING_USER_UPLOAD:
-                    logger.warning(
-                        f"    ⚠ 全文获取失败 ({fetch_result.error_code})，"
-                        f"可运行: python -m src.fetchers.manual_upload "
-                        f"--file <文件路径> --doi {article.get('doi', '')}"
-                    )
-                else:
-                    logger.info(
-                        f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
-                        f" [status={fetch_result.fetch_status}]"
-                    )
-            time.sleep(1.5)
+        # 打印请求统计
+        fetcher._request_manager.log_stats()
     else:
         logger.info("  全文抓取已关闭或无候选文章，跳过。")
 
     # ── Step 5: LLM 深度解读 ──────────────────────────────────
     logger.info("Step 5: LLM 深度解读")
     relevant_articles = candidate_articles
-    for i, article in enumerate(relevant_articles):
+
+    def _analyze_one(idx_article):
+        idx, article = idx_article
         src = "全文" if article.get("has_fulltext") else "摘要"
         logger.info(
-            f"  [{i+1}/{len(relevant_articles)}] 解读({src}): "
+            f"  [{idx+1}/{len(relevant_articles)}] 解读({src}): "
             f"{article['title'][:55]}..."
         )
-        result = analyzer.analyze_article(article)
-        article["analysis"] = result.get("analysis", "解读失败")
-        time.sleep(1)
+        try:
+            result = analyzer.analyze_article(article)
+            article["analysis"] = result.get("analysis", "解读失败")
+        except Exception as e:
+            logger.error(f"  解读失败 (idx={idx}): {e}")
+            article["analysis"] = f"解读失败: {e}"
+
+    # 并发 LLM 解读（受 API 速率限制，建议并发度 2-3）
+    llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
+        list(executor.map(_analyze_one, enumerate(relevant_articles)))
 
     # ── Step 6: 保存数据库记录 ────────────────────────────────
     logger.info("Step 6: 保存数据库记录")

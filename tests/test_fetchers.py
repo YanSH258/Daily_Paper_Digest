@@ -166,6 +166,7 @@ class TestFetchHtml(unittest.TestCase):
     def test_non_html_content_type_returns_fail(self):
         from fetchers.html_fetcher import fetch_html
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "application/pdf"}
         mock_resp.raise_for_status = MagicMock()
         mock_resp.text = "%PDF-1.4 fake"
@@ -185,6 +186,7 @@ class TestFetchHtml(unittest.TestCase):
             </article>
         </body></html>"""
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
         mock_resp.raise_for_status = MagicMock()
         mock_resp.text = html_body

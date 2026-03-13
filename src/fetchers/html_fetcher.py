@@ -2,19 +2,24 @@
 fetchers/html_fetcher.py - 轻量 HTTP 请求优先的 HTML 全文获取
 
 策略：
-  1. 使用 requests（轻量、支持代理、速度快）直接 GET 目标 URL
+  1. 使用调用方传入的 RequestManager（多层级降级 + UA 轮换 + 速率限制）GET 目标 URL
+     （如果未传入 RequestManager，则回退到直接 requests.get）
   2. 检查 Content-Type，确认为 HTML/XML
   3. 依次尝试：publisher 特定选择器 → 通用容器选择器 → 全页 <p> 回退
   4. 文本不足时返回 HTML_FETCH_FAIL（调用方可随后尝试浏览器 / PDF）
 """
 import re
 import logging
+from typing import TYPE_CHECKING
 
 import requests
 from bs4 import BeautifulSoup
 
 from .models import FetchResult, FetchStatus, BestFormat, MAX_FULLTEXT_CHARS, MIN_FULLTEXT_LEN, MIN_ABSTRACT_LEN
 from .network import get_network_info, DEFAULT_UA
+
+if TYPE_CHECKING:
+    from core.request_manager import RequestManager
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +43,20 @@ _GENERIC_CONTAINERS = [
 ]
 
 
-def fetch_html(url: str, timeout: int = 20, selectors: dict = None) -> FetchResult:
+def fetch_html(url: str, timeout: int = 20, selectors: dict = None,
+               request_manager: "RequestManager" = None) -> FetchResult:
     """
-    尝试用 requests 获取页面 HTML 全文（HTML 优先策略）。
+    尝试获取页面 HTML 全文。
+
+    优先使用传入的 RequestManager（带 UA 轮换 + 速率限制 + 多层降级），
+    否则回退到直接 requests.get。
 
     Args:
-        url:       目标 URL
-        timeout:   请求超时（秒）
-        selectors: publisher 特定 CSS 选择器，格式同 PUBLISHER_SELECTORS
-                   {"fulltext": [...], "abstract": [...]}
+        url:             目标 URL
+        timeout:         请求超时（秒）
+        selectors:       publisher 特定 CSS 选择器，格式同 PUBLISHER_SELECTORS
+                         {"fulltext": [...], "abstract": [...]}
+        request_manager: RequestManager 实例（可选），由调用方（JournalFetcher）传入
 
     Returns:
         FetchResult：包含 text、best_available_format、fetch_status、
@@ -58,6 +68,55 @@ def fetch_html(url: str, timeout: int = 20, selectors: dict = None) -> FetchResu
     net = get_network_info()
     proxies = net.get("proxies")
 
+    # 优先使用调用方传入的 RequestManager（带 UA 轮换和速率限制）
+    if request_manager is not None:
+        result = request_manager.get(url, proxies=proxies)
+        if not result.ok:
+            err = result.error or "HTTP_ERROR"
+            if result.response is not None:
+                code = result.response.status_code
+                logger.warning(f"  HTML 请求 HTTP 错误 {code}: {url}")
+                err = f"HTTP_{code}"
+            elif "TIMEOUT" in (result.error or ""):
+                logger.warning(f"  HTML 请求超时: {url}")
+                err = "HTML_TIMEOUT"
+            else:
+                logger.warning(f"  HTML 请求失败: {result.error}")
+            return FetchResult(
+                fetch_status=FetchStatus.HTML_FETCH_FAIL,
+                error_code=err,
+                network_mode=net["network_mode"],
+                access_path=net["access_path"],
+            )
+        resp = result.response
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "html" not in ctype and "xml" not in ctype:
+            logger.info(f"  非 HTML/XML 内容类型: {ctype}")
+            return FetchResult(
+                fetch_status=FetchStatus.HTML_FETCH_FAIL,
+                error_code=f"NOT_HTML:{ctype}",
+                network_mode=net["network_mode"],
+                access_path=net["access_path"],
+            )
+        text = _extract_text(resp.text, selectors or {})
+        if text:
+            logger.info(f"  HTML 全文提取成功 ({len(text)} 字, {net['network_mode']})")
+            return FetchResult(
+                text=text,
+                best_available_format=BestFormat.HTML_FULLTEXT,
+                fetch_status=FetchStatus.SUCCESS,
+                network_mode=net["network_mode"],
+                access_path=net["access_path"],
+            )
+        logger.info("  HTML 页面文本过短或需 JS 渲染，转交浏览器层处理")
+        return FetchResult(
+            fetch_status=FetchStatus.HTML_FETCH_FAIL,
+            error_code="HTML_TOO_SHORT_OR_JS_GATED",
+            network_mode=net["network_mode"],
+            access_path=net["access_path"],
+        )
+
+    # 降级：直接用 requests（无 RequestManager 时的兜底）
     try:
         resp = requests.get(
             url,

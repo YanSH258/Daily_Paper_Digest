@@ -229,3 +229,24 @@ scheduler:
 # ---------- 数据库 ----------
 database:
   path: "data/db/chem_daily.db"  # SQLite 数据库路径（用于去重）
+
+# ---------- 性能优化 ----------
+performance:
+  # 并发处理设置
+  concurrency: 5                # 全文抓取并发数（建议 3-10）
+  llm_concurrency: 3            # LLM 并发调用数（建议 2-5，受 API 限额影响）
+
+  # 速率限制
+  rate_limit:
+    global_rps: 5               # 全局每秒请求数上限
+    domain_limits:              # 针对特定域名的速率（每秒请求数）
+      "onlinelibrary.wiley.com": 1   # Wiley 限制严格
+      "pubs.acs.org": 2
+      "www.nature.com": 2
+      "pubs.rsc.org": 2
+
+  # 重试设置
+  retry:
+    max_attempts: 3              # 每层最大重试次数
+    backoff_factor: 1.5          # 指数退避系数（等待 backoff_factor^attempt 秒）
+    retry_status_codes: [403, 429, 500, 502, 503, 504]  # 触发重试的状态码
