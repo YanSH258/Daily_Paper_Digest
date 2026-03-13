@@ -2,7 +2,7 @@
 fetcher.py - RSS 抓取 + 分层全文获取模块
 
 全文获取优先级（HTML 优先策略）：
-  1. HTML/XML 轻量请求（requests，支持代理）
+  1. HTML/XML 轻量请求（RequestManager，支持 UA 轮换/速率限制/多层降级）
   2. 浏览器渲染（DrissionPage，应对 JS 动态页面）
   3. PDF 文本提取（PyMuPDF，可选）
   4. 手动上传兜底（见 fetchers/manual_upload.py）
@@ -14,6 +14,8 @@ import ssl
 import json
 import time
 import logging
+import threading
+import concurrent.futures
 import feedparser
 import requests
 import urllib.request
@@ -24,6 +26,7 @@ from bs4 import BeautifulSoup
 
 from fetchers import fetch_html, fetch_pdf_text, FetchResult, FetchStatus, BestFormat
 from fetchers.network import get_proxies
+from core.request_manager import RequestManager
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,16 @@ class JournalFetcher:
         self.date_filter_days = self.fetcher_cfg.get("date_filter_days", 2)
         self._page_cache: dict = {}
 
+        # 并发配置
+        perf_cfg = config.get("performance", {})
+        self.concurrency = perf_cfg.get("concurrency", 5)
+
+        # RequestManager（统一HTTP请求入口，UA轮换+速率限制+降级）
+        self._request_manager = RequestManager(config=config)
+
+        # DrissionPage 不是线程安全的，用锁保护浏览器操作
+        self._browser_lock = threading.Lock()
+
     def fetch_all(self) -> list:
         journals = self.config.get("journals", [])
         all_articles = []
@@ -187,7 +200,8 @@ class JournalFetcher:
         selectors = PUBLISHER_SELECTORS.get(publisher, {})
 
         # ── 1. HTML 轻量请求 ────────────────────────────────────
-        html_result = fetch_html(url, timeout=self.timeout, selectors=selectors)
+        html_result = fetch_html(url, timeout=self.timeout, selectors=selectors,
+                                 request_manager=self._request_manager)
         if html_result.fetch_status == FetchStatus.SUCCESS:
             return html_result
 
@@ -235,6 +249,42 @@ class JournalFetcher:
 
     def close(self):
         BrowserDriver.quit()
+
+    def fetch_fulltext_batch(self, articles: list) -> list:
+        """
+        并发批量获取多篇文章全文。
+
+        对 HTTP 请求使用线程池并发（受速率限制控制），
+        DrissionPage 浏览器操作通过锁串行执行（非线程安全）。
+
+        Args:
+            articles: 文章字典列表
+
+        Returns:
+            FetchResult 列表，顺序与输入对应
+        """
+        if not articles:
+            return []
+
+        results = [None] * len(articles)
+
+        def fetch_one(idx_article):
+            idx, article = idx_article
+            try:
+                result = self.fetch_fulltext_with_status(article)
+                results[idx] = result
+            except Exception as e:
+                logger.error(f"  并发全文获取异常: {e}")
+                results[idx] = FetchResult(
+                    fetch_status=FetchStatus.WAITING_USER_UPLOAD,
+                    error_code=f"CONCURRENT_FETCH_ERROR:{e}",
+                )
+
+        max_workers = min(self.concurrency, len(articles))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(fetch_one, enumerate(articles)))
+
+        return results
 
     def _fetch_journal(self, journal: dict) -> list:
         rss_url = journal["rss"]
@@ -289,66 +339,68 @@ class JournalFetcher:
         selectors = PUBLISHER_SELECTORS.get(publisher, {})
         if not selectors: return ""
 
-        for attempt in range(2):
-            try:
-                page = BrowserDriver.get()
-                page.get(url)
-                
-                BrowserDriver.inject_cookies_if_needed(page, url)
-                if attempt == 0: 
-                    page.refresh()
-                
-                wait_time = 0
-                while ("Just a moment" in page.title or "Cloudflare" in page.title) and wait_time < 15:
-                    time.sleep(1)
-                    wait_time += 1
-                
-                page.wait.load_start()
-                time.sleep(1)
-                
-                html_content = page.html
-                found_text = ""
-
-                # 干净的异常拦截日志
-                if "There was a problem providing the content you requested" in html_content:
-                    logger.warning("    ⚠ 触发 Elsevier DataDome 拦截，放弃获取全文")
-                elif "Just a moment" in page.title or "Cloudflare" in page.title:
-                    logger.warning("    ⚠ 触发 Cloudflare 盾拦截，放弃获取全文")
-                else:
-                    soup = BeautifulSoup(html_content, "html.parser")
+        # DrissionPage 不是线程安全的：用锁确保同一时刻只有一个线程操作浏览器
+        with self._browser_lock:
+            for attempt in range(2):
+                try:
+                    page = BrowserDriver.get()
+                    page.get(url)
                     
-                    # 尝试全文
-                    for sel in selectors.get("fulltext", []):
-                        paras = soup.select(sel)
-                        if len(paras) >= 3:
-                            text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
-                            if len(text) > 500:
-                                found_text = text[:MAX_FULLTEXT_CHARS]
-                                break
+                    BrowserDriver.inject_cookies_if_needed(page, url)
+                    if attempt == 0: 
+                        page.refresh()
+                    
+                    wait_time = 0
+                    while ("Just a moment" in page.title or "Cloudflare" in page.title) and wait_time < 15:
+                        time.sleep(1)
+                        wait_time += 1
+                    
+                    page.wait.load_start()
+                    time.sleep(1)
+                    
+                    html_content = page.html
+                    found_text = ""
 
-                    # 尝试摘要
-                    if not found_text:
-                        for sel in selectors.get("abstract", []):
+                    # 干净的异常拦截日志
+                    if "There was a problem providing the content you requested" in html_content:
+                        logger.warning("    ⚠ 触发 Elsevier DataDome 拦截，放弃获取全文")
+                    elif "Just a moment" in page.title or "Cloudflare" in page.title:
+                        logger.warning("    ⚠ 触发 Cloudflare 盾拦截，放弃获取全文")
+                    else:
+                        soup = BeautifulSoup(html_content, "html.parser")
+                        
+                        # 尝试全文
+                        for sel in selectors.get("fulltext", []):
                             paras = soup.select(sel)
-                            if paras:
+                            if len(paras) >= 3:
                                 text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
-                                if len(text) > 100:
-                                    found_text = text[:MAX_ABSTRACT_CHARS]
+                                if len(text) > 500:
+                                    found_text = text[:MAX_FULLTEXT_CHARS]
                                     break
 
-                if found_text:
-                    self._page_cache[url] = found_text
-                    return found_text
+                        # 尝试摘要
+                        if not found_text:
+                            for sel in selectors.get("abstract", []):
+                                paras = soup.select(sel)
+                                if paras:
+                                    text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
+                                    if len(text) > 100:
+                                        found_text = text[:MAX_ABSTRACT_CHARS]
+                                        break
 
-                # 没抓到文本直接跳出，不再抛出长串警告和截图
-                break
+                    if found_text:
+                        self._page_cache[url] = found_text
+                        return found_text
 
-            except Exception as e:
-                err_str = str(e)
-                if "timeout" in err_str.lower() or "断开" in err_str:
-                    logger.debug("浏览器加载超时，尝试重启驱动...")
-                    BrowserDriver.restart()
-                time.sleep(2)
+                    # 没抓到文本直接跳出，不再抛出长串警告和截图
+                    break
+
+                except Exception as e:
+                    err_str = str(e)
+                    if "timeout" in err_str.lower() or "断开" in err_str:
+                        logger.debug("浏览器加载超时，尝试重启驱动...")
+                        BrowserDriver.restart()
+                    time.sleep(2)
 
         self._page_cache[url] = ""
         return ""
