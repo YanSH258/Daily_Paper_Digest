@@ -6,8 +6,11 @@ cookies.json
 __pycache__/
 *.pyc
 
-# 忽略临时测试文件
-test_*.py
+# 忽略临时测试文件（根目录下的临时脚本）
+/test_*.py
+
+# 不忽略正式测试目录
+!tests/
 
 my_papers.csv
 logs/
