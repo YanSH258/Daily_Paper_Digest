@@ -32,11 +32,11 @@ jobs:
           CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
         run: |
-          python -c "import os; open('config.yaml', 'w', encoding='utf-8').write(os.environ.get('CONFIG_YAML', ''))"
+          python -c "import os; os.makedirs('config', exist_ok=True); open('config/config.yaml', 'w', encoding='utf-8').write(os.environ.get('CONFIG_YAML', ''))"
           python -c "import os; open('cookies.json', 'w', encoding='utf-8').write(os.environ.get('COOKIES_JSON', ''))"
 
       - name: 5. 🚀 运行每日文献抓取与解读
-        run: python main.py
+        run: python src/main.py
 
       - name: 6. 将更新后的数据库和报告保存回 GitHub 仓库
         run: |

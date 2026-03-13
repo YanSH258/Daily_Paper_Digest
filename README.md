@@ -11,6 +11,44 @@
 * **手动上传兜底**：自动获取失败时，支持通过 CLI 上传本地 PDF/HTML/TXT 文件进入同一解析流水线。
 * **防瞎编 & 数据大盘**：若遇版权墙仅有摘要，严格限制 AI 凭空捏造，并在解读结果中标注证据等级（FULLTEXT / ABSTRACT_ONLY）。内置 SQLite 数据库，一键统计热点趋势并支持 Excel 导出。
 
+## 📁 项目目录结构
+
+```
+Daily_Paper_Digest/
+├── src/                           # 源代码目录
+│   ├── main.py                    # 主入口
+│   ├── core/                      # 核心功能模块
+│   │   ├── fetcher.py             # RSS 抓取 + 分层全文获取
+│   │   ├── analyzer.py            # LLM 相关性过滤与深度解读
+│   │   ├── db.py                  # SQLite 数据库操作
+│   │   └── notifier.py            # 报告生成与推送
+│   ├── fetchers/                  # 具体的全文获取实现
+│   │   ├── html_fetcher.py        # HTML 轻量请求
+│   │   ├── pdf_fetcher.py         # PDF 文本提取
+│   │   ├── manual_upload.py       # 手动上传入口
+│   │   ├── network.py             # 代理检测
+│   │   └── models.py              # 数据模型与状态码
+│   └── utils/                     # 工具函数
+│       └── stat_db.py             # 数据库统计工具
+│
+├── data/                          # 数据目录
+│   ├── db/                        # 数据库文件（gitignore）
+│   └── output/                    # 生成的报告文件
+│
+├── config/                        # 配置文件目录
+│   ├── config_template.yaml       # 配置模板
+│   └── config.yaml                # 实际配置（gitignore，勿提交）
+│
+├── tests/                         # 测试目录
+│   └── test_fetchers.py
+│
+├── .github/workflows/             # GitHub Actions 工作流
+├── .gitignore
+├── README.md
+├── requirement.txt
+└── setup.py                       # 项目安装配置
+```
+
 ## 🚀 快速开始
 
 **1. 环境安装**
@@ -20,13 +58,13 @@ pip install -r requirement.txt
 ```
 
 **2. 配置秘钥**
-复制 `config_template.yaml` 并重命名为 `config.yaml`，填入你的大模型 API Key，并修改 `research_topics` 为你的研究方向。
+复制 `config/config_template.yaml` 到 `config/config.yaml`，填入你的大模型 API Key，并修改 `research_topics` 为你的研究方向。
 
 **3. 运行指令**
 
-* 运行抓取与推送：`python main.py`
-* 查看本地数据库大盘：`python stat_db.py`
-* 搜索并导出为 Excel：`python stat_db.py --search "关键字" --export my_papers.csv`
+* 运行抓取与推送：`python src/main.py`
+* 查看本地数据库大盘：`python src/utils/stat_db.py`
+* 搜索并导出为 Excel：`python src/utils/stat_db.py --search "关键字" --export my_papers.csv`
 
 ## 🌐 校园网 / 代理配置
 
@@ -78,13 +116,13 @@ LLM 解读结果中会同步标注 `evidence_level`（`FULLTEXT` / `ABSTRACT_ONL
 
 ```bash
 # 上传 PDF
-python -m fetchers.manual_upload --file /path/to/paper.pdf --doi 10.1021/jacs.xxxxx
+python -m src.fetchers.manual_upload --file /path/to/paper.pdf --doi 10.1021/jacs.xxxxx
 
 # 上传 HTML 文件
-python -m fetchers.manual_upload --file /path/to/paper.html
+python -m src.fetchers.manual_upload --file /path/to/paper.html
 
 # 上传纯文本
-python -m fetchers.manual_upload --file /path/to/paper.txt
+python -m src.fetchers.manual_upload --file /path/to/paper.txt
 ```
 
 支持格式：`.pdf`、`.html`、`.htm`、`.txt`（单文件上限 50 MB）。
@@ -94,8 +132,8 @@ python -m fetchers.manual_upload --file /path/to/paper.txt
 ## 🔒 进阶使用与部署
 
 * **突破知网/Elsevier拦截**：使用真实浏览器访问被墙期刊，导出 Cookie 并存为根目录的 `cookies.json`，爬虫即可免密抓取。
-* **GitHub Actions 云端部署**：支持全自动定时推送。⚠️ 注意：务必在 `.gitignore` 中忽略密码文件，绝对不要将 `config.yaml` 和 `cookies.json` 传到公共仓库，应将其配置在 GitHub Secrets 中！
-* **OCR 支持（可选）**：当 PDF 为扫描版时系统会返回 `OCR_NEEDED` 状态。如需自动 OCR，请额外安装 `ocrmypdf` 和 `tesseract`，并在 `fetchers/pdf_fetcher.py` 中接入 OCR 入口（已预留扩展点）。
+* **GitHub Actions 云端部署**：支持全自动定时推送。⚠️ 注意：务必在 `.gitignore` 中忽略密码文件，绝对不要将 `config/config.yaml` 和 `cookies.json` 传到公共仓库，应将其配置在 GitHub Secrets 中！
+* **OCR 支持（可选）**：当 PDF 为扫描版时系统会返回 `OCR_NEEDED` 状态。如需自动 OCR，请额外安装 `ocrmypdf` 和 `tesseract`，并在 `src/fetchers/pdf_fetcher.py` 中接入 OCR 入口（已预留扩展点）。
 
 ## ⚠️ 已知限制
 

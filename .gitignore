@@ -1,6 +1,10 @@
 # 忽略敏感配置文件和 Cookie
-config.yaml
+config/config.yaml
 cookies.json
+
+# 忽略数据库文件
+chem_daily.db
+data/db/chem_daily.db
 
 # 忽略 Python 缓存
 __pycache__/

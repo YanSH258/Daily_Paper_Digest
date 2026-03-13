@@ -2,16 +2,26 @@
 stat_db.py - 数据库文献统计与分析工具
 用于分析 chem_daily.db 中已抓取的历史文献分布情况
 支持统计大盘展示、关键字搜索以及导出为 CSV (Excel)
+
+用法：
+  python src/utils/stat_db.py
+  python src/utils/stat_db.py --search "关键字" --export my_papers.csv
 """
 import sqlite3
 import argparse
 import csv
+import sys
+from pathlib import Path
 from collections import Counter
-from notifier import classify_article
+
+# 将 src/ 目录加入模块搜索路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.notifier import classify_article
 
 def main():
     parser = argparse.ArgumentParser(description="统计和搜索数据库中的文献")
-    parser.add_argument("--db", default="chem_daily.db", help="数据库文件路径")
+    parser.add_argument("--db", default="data/db/chem_daily.db", help="数据库文件路径")
     parser.add_argument("--threshold", type=int, default=5, help="高相关性分数的阈值")
     parser.add_argument("--search", type=str, default="", help="搜索关键字（匹配标题/摘要/期刊/作者）")
     parser.add_argument("--export", type=str, default="", help="导出为 CSV 文件的路径（例如：data.csv）")

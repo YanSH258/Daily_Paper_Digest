@@ -6,9 +6,10 @@ main.py - 主入口
   3. 用全文做深度解读
 
 用法：
-  python main.py              # 立即运行一次
-  python main.py --schedule   # 按 config.yaml 中的时间每日定时运行
-  python main.py --date 2024-01-15  # 指定报告日期
+  python src/main.py                          # 立即运行一次
+  python src/main.py --schedule               # 按 config.yaml 中的时间每日定时运行
+  python src/main.py --date 2024-01-15        # 指定报告日期
+  python src/main.py --config config/config.yaml  # 指定配置文件路径
 """
 import sys
 import time
@@ -17,12 +18,15 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+# 将 src/ 目录加入模块搜索路径，确保相对模块可正常导入
+sys.path.insert(0, str(Path(__file__).parent))
+
 import yaml
 
-from db       import Database
-from fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
-from analyzer import LLMAnalyzer
-from notifier import Notifier
+from core.db       import Database
+from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
+from core.analyzer import LLMAnalyzer
+from core.notifier import Notifier
 from fetchers.models import FetchStatus
 
 # ── 日志配置 ──────────────────────────────────────────────────
@@ -45,7 +49,7 @@ logger = logging.getLogger("main")
 
 # ── 核心流程 ──────────────────────────────────────────────────
 
-def load_config(path: str = "config.yaml") -> dict:
+def load_config(path: str = "config/config.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -132,7 +136,7 @@ def run_once(config: dict, date_str: str = None):
                 if fetch_result.fetch_status == FetchStatus.WAITING_USER_UPLOAD:
                     logger.warning(
                         f"    ⚠ 全文获取失败 ({fetch_result.error_code})，"
-                        f"可运行: python -m fetchers.manual_upload "
+                        f"可运行: python -m src.fetchers.manual_upload "
                         f"--file <文件路径> --doi {article.get('doi', '')}"
                     )
                 else:
@@ -209,7 +213,7 @@ def run_scheduler(config: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="化学文献日报工具")
-    parser.add_argument("--config",   default="config.yaml", help="配置文件路径")
+    parser.add_argument("--config",   default="config/config.yaml", help="配置文件路径")
     parser.add_argument("--schedule", action="store_true",   help="开启每日定时模式")
     parser.add_argument("--date",     default=None,          help="指定报告日期 (YYYY-MM-DD)")
     args = parser.parse_args()
