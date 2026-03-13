@@ -1,6 +1,6 @@
 # ============================================================
 # chem-daily 配置模板
-# 使用前请将此文件重命名为 config.yaml，并填入你自己的 API Key
+# 使用前请将此文件复制到 config/config.yaml 并填入你自己的 API Key
 # ============================================================
 
 # ---------- LLM 配置 ----------
@@ -204,7 +204,7 @@ fetcher:
 # ---------- 输出与邮件推送设置 ----------
 output:
   formats: ["markdown", "html"]
-  output_dir: "output"
+  output_dir: "data/output"
   
   email:
     enabled: false # 如果需要邮件推送，请改为 true 并填写下方信息
@@ -228,4 +228,4 @@ scheduler:
 
 # ---------- 数据库 ----------
 database:
-  path: "chem_daily.db"          # SQLite 数据库路径（用于去重）
+  path: "data/db/chem_daily.db"  # SQLite 数据库路径（用于去重）

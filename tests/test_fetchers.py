@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-# 确保项目根目录在路径中
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 将 src/ 目录加入模块搜索路径
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from fetchers.models import FetchResult, FetchStatus, BestFormat, EvidenceLevel
 from fetchers.network import get_proxies, get_network_info
