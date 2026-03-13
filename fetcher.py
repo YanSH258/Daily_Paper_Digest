@@ -1,5 +1,13 @@
 """
-fetcher.py - RSS 抓取 + DrissionPage 全文获取模块 (精简生产环境版)
+fetcher.py - RSS 抓取 + 分层全文获取模块
+
+全文获取优先级（HTML 优先策略）：
+  1. HTML/XML 轻量请求（requests，支持代理）
+  2. 浏览器渲染（DrissionPage，应对 JS 动态页面）
+  3. PDF 文本提取（PyMuPDF，可选）
+  4. 手动上传兜底（见 fetchers/manual_upload.py）
+
+代理配置：通过环境变量 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 设置。
 """
 import re
 import ssl
@@ -13,6 +21,9 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 from bs4 import BeautifulSoup
+
+from fetchers import fetch_html, fetch_pdf_text, FetchResult, FetchStatus, BestFormat
+from fetchers.network import get_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -151,11 +162,76 @@ class JournalFetcher:
         return all_articles
 
     def fetch_fulltext(self, article: dict) -> str:
+        """向后兼容接口：返回全文文本（空字符串表示失败）"""
+        return self.fetch_fulltext_with_status(article).text
+
+    def fetch_fulltext_with_status(self, article: dict) -> FetchResult:
+        """
+        分层全文获取（HTML 优先策略），返回完整的 FetchResult。
+
+        回退顺序：
+          1. HTML 轻量请求（requests + 代理）
+          2. 浏览器渲染（DrissionPage，应对 JS 动态页面）
+          3. PDF 文本提取（若 article 中提供 pdf_url）
+          4. 全部失败 → WAITING_USER_UPLOAD
+        """
         publisher = article.get("publisher", "DEFAULT")
         url = article.get("url", "")
+
         if not url or publisher in RSS_ONLY_PUBLISHERS:
-            return ""
-        return self._fetch_page_content(url, publisher)
+            return FetchResult(
+                fetch_status=FetchStatus.NO_HTML_URL,
+                error_code="NO_HTML_URL",
+            )
+
+        selectors = PUBLISHER_SELECTORS.get(publisher, {})
+
+        # ── 1. HTML 轻量请求 ────────────────────────────────────
+        html_result = fetch_html(url, timeout=self.timeout, selectors=selectors)
+        if html_result.fetch_status == FetchStatus.SUCCESS:
+            return html_result
+
+        logger.debug(
+            f"  HTML 轻量请求失败 ({html_result.error_code})，"
+            f"尝试浏览器渲染..."
+        )
+
+        # ── 2. 浏览器渲染（DrissionPage） ─────────────────────
+        browser_text = self._fetch_page_content(url, publisher)
+        if browser_text:
+            return FetchResult(
+                text=browser_text,
+                best_available_format=BestFormat.HTML_FULLTEXT,
+                fetch_status=FetchStatus.SUCCESS,
+                network_mode=html_result.network_mode,
+                access_path=html_result.access_path,
+            )
+
+        logger.debug("  浏览器渲染无结果，尝试 PDF 提取...")
+
+        # ── 3. PDF 提取（可选，article 中需有 pdf_url） ────────
+        pdf_url = article.get("pdf_url", "")
+        if pdf_url:
+            pdf_result = fetch_pdf_text(pdf_url, timeout=self.timeout)
+            if pdf_result.fetch_status == FetchStatus.SUCCESS:
+                return pdf_result
+            if pdf_result.fetch_status == FetchStatus.OCR_NEEDED:
+                logger.info("  PDF 为扫描版，OCR 为可选扩展（当前未启用）")
+                return pdf_result
+
+        # ── 4. 全部失败 ─────────────────────────────────────────
+        logger.warning(
+            f"  全文获取全部失败（HTML: {html_result.error_code}），"
+            f"建议用户手动上传文献文件。\n"
+            f"  运行: python -m fetchers.manual_upload --file <文件路径> "
+            f"--doi {article.get('doi', '')}"
+        )
+        return FetchResult(
+            fetch_status=FetchStatus.WAITING_USER_UPLOAD,
+            error_code=f"ALL_METHODS_FAILED:{html_result.error_code}",
+            network_mode=html_result.network_mode,
+            access_path=html_result.access_path,
+        )
 
     def close(self):
         BrowserDriver.quit()
@@ -195,6 +271,9 @@ class JournalFetcher:
         h = WILEY_RSS_HEADERS if publisher == "Wiley" else (NATURE_RSS_HEADERS if publisher == "Nature" else RSS_HEADERS)
         session = requests.Session()
         session.headers.update(h)
+        proxies = get_proxies()
+        if proxies:
+            session.proxies.update(proxies)
         for attempt in range(self.retry):
             try:
                 resp = session.get(rss_url, timeout=self.timeout)

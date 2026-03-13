@@ -182,15 +182,18 @@ class LLMAnalyzer:
 
         try:
             analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
+            evidence_level = "FULLTEXT" if has_fulltext else "ABSTRACT_ONLY"
             return {
-                "success":  True,
-                "analysis": analysis,
+                "success":        True,
+                "analysis":       analysis,
+                "evidence_level": evidence_level,
             }
         except Exception as e:
             logger.error(f"文章解读失败: {e}")
             return {
-                "success":  False,
-                "analysis": f"解读失败: {e}",
+                "success":        False,
+                "analysis":       f"解读失败: {e}",
+                "evidence_level": "ABSTRACT_ONLY",
             }
 
     # ──────────────────────────────────────────────

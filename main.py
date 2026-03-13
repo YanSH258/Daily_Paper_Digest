@@ -23,6 +23,7 @@ from db       import Database
 from fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from analyzer import LLMAnalyzer
 from notifier import Notifier
+from fetchers.models import FetchStatus
 
 # ── 日志配置 ──────────────────────────────────────────────────
 LOG_DIR = Path("logs")
@@ -110,13 +111,35 @@ def run_once(config: dict, date_str: str = None):
                 f"  [{i+1}/{len(candidate_articles)}] 读取全文: "
                 f"{article['title'][:55]}..."
             )
-            fulltext = fetcher.fetch_fulltext(article)
-            if fulltext and len(fulltext) > len(article.get("abstract", "")):
-                article["abstract"]     = fulltext
+            fetch_result = fetcher.fetch_fulltext_with_status(article)
+            article["fetch_status"] = fetch_result.fetch_status
+            article["best_available_format"] = fetch_result.best_available_format
+            article["network_mode"] = fetch_result.network_mode
+            article["access_path"] = fetch_result.access_path
+
+            if fetch_result.text and len(fetch_result.text) > len(article.get("abstract", "")):
+                article["abstract"]     = fetch_result.text
                 article["has_fulltext"] = True
-                logger.info(f"    ✓ 全文 {len(fulltext)} 字")
+                article["evidence_level"] = fetch_result.evidence_level
+                logger.info(
+                    f"    ✓ 全文 {len(fetch_result.text)} 字"
+                    f" [{fetch_result.best_available_format},"
+                    f" {fetch_result.network_mode}/{fetch_result.access_path}]"
+                )
             else:
-                logger.info(f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)")
+                article["has_fulltext"] = False
+                article["evidence_level"] = "ABSTRACT_ONLY"
+                if fetch_result.fetch_status == FetchStatus.WAITING_USER_UPLOAD:
+                    logger.warning(
+                        f"    ⚠ 全文获取失败 ({fetch_result.error_code})，"
+                        f"可运行: python -m fetchers.manual_upload "
+                        f"--file <文件路径> --doi {article.get('doi', '')}"
+                    )
+                else:
+                    logger.info(
+                        f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
+                        f" [status={fetch_result.fetch_status}]"
+                    )
             time.sleep(1.5)
     else:
         logger.info("  全文抓取已关闭或无候选文章，跳过。")
