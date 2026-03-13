@@ -72,8 +72,18 @@ def run_once(config: dict, date_str: str = None):
 
     # ── Step 2: 数据库去重 ────────────────────────────────────
     logger.info("Step 2: 数据库去重")
-    new_articles = [a for a in raw_articles if not db.is_processed(a.get("doi", ""))]
-    logger.info(f"  去重后: {len(new_articles)} 篇新文章")
+    new_articles = []
+    skipped_count = 0
+    for a in raw_articles:
+        is_dup, reason = db.check_duplicate(a)
+        if is_dup:
+            logger.debug(f"  跳过重复: {reason}")
+            skipped_count += 1
+        else:
+            new_articles.append(a)
+    logger.info(
+        f"  去重后: {len(new_articles)} 篇新文章（跳过 {skipped_count} 篇重复）"
+    )
 
     if not new_articles:
         logger.info("没有新文章，流程结束。")
