@@ -28,4 +28,4 @@ data/db/*.db
 # Build / dist
 *.egg-info/
 dist/
-build/
+build/config/config.yaml
