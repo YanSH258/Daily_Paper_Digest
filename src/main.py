@@ -11,6 +11,7 @@ main.py - 主入口
   python src/main.py --date 2024-01-15        # 指定报告日期
   python src/main.py --config config/config.yaml  # 指定配置文件路径
 """
+import os
 import sys
 import time
 import logging
@@ -18,8 +19,8 @@ import argparse
 import concurrent.futures
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-# 将 src/ 目录加入模块搜索路径，确保相对模块可正常导入
 sys.path.insert(0, str(Path(__file__).parent))
 
 import yaml
@@ -28,10 +29,10 @@ from core.db       import Database
 from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from core.analyzer import LLMAnalyzer
 from core.notifier import Notifier
-from fetchers.models import FetchStatus
+from fetchers.models import FetchResult
 
 # ── 日志配置 ──────────────────────────────────────────────────
-LOG_DIR = Path("logs")
+LOG_DIR = Path("data/logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -52,10 +53,57 @@ logger = logging.getLogger("main")
 
 def load_config(path: str = "config/config.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg: dict = yaml.safe_load(f)
+
+    # ── 环境变量覆盖（适配 GitHub Actions Secrets）──────────────
+    # LLM API Key: 优先读取环境变量 DEEPSEEK_API_KEY / QWEN_API_KEY
+    provider = cfg.get("llm", {}).get("provider", "deepseek")
+    env_key_map = {"deepseek": "DEEPSEEK_API_KEY", "qwen": "QWEN_API_KEY"}
+    env_key_name = env_key_map.get(provider, f"{provider.upper()}_API_KEY")
+    env_api_key = os.environ.get(env_key_name)
+    if env_api_key:
+        cfg.setdefault("llm", {}).setdefault(provider, {})["api_key"] = env_api_key
+        logger.info("已从环境变量 %s 读取 API Key", env_key_name)
+
+    # Email 密码：优先读取环境变量 EMAIL_PASSWORD
+    env_email_pwd = os.environ.get("EMAIL_PASSWORD")
+    if env_email_pwd:
+        cfg.setdefault("email", {})["password"] = env_email_pwd
+
+    # Feishu Webhook：优先读取环境变量 FEISHU_WEBHOOK_URL
+    env_feishu = os.environ.get("FEISHU_WEBHOOK_URL")
+    if env_feishu:
+        cfg.setdefault("feishu", {})["webhook_url"] = env_feishu
+
+    return cfg
 
 
-def run_once(config: dict, date_str: str = None):
+def validate_config(config: dict) -> None:
+    """启动前校验必填配置项，缺失时 raise ValueError。"""
+    required_paths = [
+        ("database", "path"),
+        ("llm", "provider"),
+    ]
+    for keys in required_paths:
+        node = config
+        for k in keys:
+            if not isinstance(node, dict) or k not in node:
+                raise ValueError(
+                    f"配置缺失必填项: {' -> '.join(keys)}，请检查 config.yaml"
+                )
+            node = node[k]
+
+    # 校验 LLM provider 配置
+    provider = config["llm"]["provider"]
+    provider_cfg = config.get("llm", {}).get(provider, {})
+    if not provider_cfg.get("api_key"):
+        raise ValueError(
+            f"LLM provider '{provider}' 缺少 api_key，"
+            f"请在 config.yaml 或环境变量 {provider.upper()}_API_KEY 中配置"
+        )
+
+
+def run_once(config: dict, date_str: Optional[str] = None) -> None:
     date_str  = date_str or datetime.now().strftime("%Y-%m-%d")
     threshold = config.get("relevance_threshold", 5)
 
@@ -143,7 +191,6 @@ def run_once(config: dict, date_str: str = None):
             fetch_results = fetcher.fetch_fulltext_batch(only_articles)
 
             for (orig_idx, article), fetch_result in zip(articles_to_fetch, fetch_results):
-                i = candidate_articles.index(article)
                 logger.info(
                     f"  [{orig_idx + 1}/{len(candidate_articles)}] 读取全文: "
                     f"{article['title'][:55]}..."
@@ -151,7 +198,7 @@ def run_once(config: dict, date_str: str = None):
                 if fetch_result is None:
                     fetch_result = FetchResult()
 
-                article["fetch_status"] = fetch_result.fetch_status
+                article["fetch_status"]          = fetch_result.fetch_status
                 article["best_available_format"] = fetch_result.best_available_format
                 article["network_mode"] = fetch_result.network_mode
                 article["access_path"] = fetch_result.access_path
@@ -168,17 +215,10 @@ def run_once(config: dict, date_str: str = None):
                 else:
                     article["has_fulltext"] = False
                     article["evidence_level"] = "ABSTRACT_ONLY"
-                    if fetch_result.fetch_status == FetchStatus.WAITING_USER_UPLOAD:
-                        logger.warning(
-                            f"    ⚠ 全文获取失败 ({fetch_result.error_code})，"
-                            f"可运行: python -m src.fetchers.manual_upload "
-                            f"--file <文件路径> --doi {article.get('doi', '')}"
-                        )
-                    else:
-                        logger.info(
-                            f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
-                            f" [status={fetch_result.fetch_status}]"
-                        )
+                    logger.info(
+                        f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
+                        f" [status={fetch_result.fetch_status}]"
+                    )
 
         # 记录 RSS_ONLY 期刊
         for i, article in enumerate(candidate_articles):
@@ -197,11 +237,26 @@ def run_once(config: dict, date_str: str = None):
     logger.info("Step 5: LLM 深度解读")
     relevant_articles = candidate_articles
 
+    # 统计需要解读的文章数
+    fulltext_count = sum(1 for a in relevant_articles if a.get("has_fulltext", False))
+    abstract_only_count = len(relevant_articles) - fulltext_count
+    logger.info(
+        f"  全文解读: {fulltext_count} 篇，仅摘要(跳过解读): {abstract_only_count} 篇"
+    )
+
     def _analyze_one(idx_article):
         idx, article = idx_article
-        src = "全文" if article.get("has_fulltext") else "摘要"
+        # ★ 仅摘要文章跳过深度解读，直接标记 analysis 为 None
+        if not article.get("has_fulltext", False):
+            logger.info(
+                f"  [{idx+1}/{len(relevant_articles)}] 跳过解读(仅摘要): "
+                f"{article['title'][:55]}..."
+            )
+            article["analysis"] = None
+            return
+
         logger.info(
-            f"  [{idx+1}/{len(relevant_articles)}] 解读({src}): "
+            f"  [{idx+1}/{len(relevant_articles)}] 解读(全文): "
             f"{article['title'][:55]}..."
         )
         try:
@@ -218,8 +273,14 @@ def run_once(config: dict, date_str: str = None):
 
     # ── Step 6: 保存数据库记录 ────────────────────────────────
     logger.info("Step 6: 保存数据库记录")
+    # 把 analysis 挂到 new_articles 里对应的相关文章上
+    relevant_map = {a.get("doi") or a.get("url"): a for a in relevant_articles}
     for article in new_articles:
+        key = article.get("doi") or article.get("url")
+        if key and key in relevant_map:
+            article["analysis"] = relevant_map[key].get("analysis")
         db.save_article(article)
+
 
     # ── Step 7: 生成报告并推送 ────────────────────────────────
     logger.info("Step 7: 生成报告")
@@ -236,12 +297,20 @@ def run_once(config: dict, date_str: str = None):
         total_pushed=len(relevant_articles),
     )
 
+    # 自动更新 HTML 索引 ──────────────────────────────────────
+    try:
+        from utils.stat_db import build_html_index
+        _threshold = config.get("relevance_threshold", 5)
+        with db.get_connection() as conn:
+            build_html_index(conn, _threshold, "data/output/paper_index.html")
+    except Exception as e:
+        logger.warning(f"自动导出失败: {e}")
+
     logger.info(f"========== 完成！报告: {md_path} ==========")
     logger.info(
         f"  抓取: {len(raw_articles)} → 去重: {len(new_articles)} "
         f"→ 相关: {len(relevant_articles)}"
     )
-
 
 # ── 定时调度 ──────────────────────────────────────────────────
 
@@ -274,6 +343,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    validate_config(config)
 
     if args.schedule:
         run_scheduler(config)

@@ -1,0 +1,72 @@
+2026-03-16 08:00:02,926 [INFO] main: ========== 开始运行: 2026-03-16 ==========
+2026-03-16 08:00:02,927 [INFO] core.db: 数据库初始化完成: data/db/chem_daily.db
+2026-03-16 08:00:02,948 [INFO] core.analyzer: LLM 已初始化: provider=deepseek, model=deepseek-chat
+2026-03-16 08:00:02,948 [INFO] main: Step 1: 抓取期刊 RSS
+2026-03-16 08:00:02,948 [INFO] core.fetcher: 正在抓取: J. Chem. Theory Comput. (JCTC)
+2026-03-16 08:00:05,528 [INFO] core.fetcher: 正在抓取: J. Comput. Chem.
+2026-03-16 08:00:08,757 [INFO] core.fetcher: 正在抓取: Theor. Chem. Acc.
+2026-03-16 08:00:13,283 [INFO] core.fetcher: 正在抓取: WIREs Comput. Mol. Sci.
+2026-03-16 08:00:16,096 [INFO] core.fetcher: 正在抓取: J. Chem. Inf. Model. (JCIM)
+2026-03-16 08:00:18,568 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. A
+2026-03-16 08:00:21,016 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. C
+2026-03-16 08:00:23,512 [INFO] core.fetcher: 正在抓取: Phys. Chem. Chem. Phys. (PCCP)
+2026-03-16 08:00:41,514 [INFO] core.fetcher: 正在抓取: Chem. Phys. Lett.
+2026-03-16 08:00:43,903 [INFO] core.fetcher: 正在抓取: J. Chem. Phys. (JCP)
+2026-03-16 08:00:47,523 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. Letters (JPCL)
+2026-03-16 08:00:50,051 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. B
+2026-03-16 08:00:52,543 [INFO] core.fetcher: 正在抓取: ACS Catalysis
+2026-03-16 08:00:55,202 [INFO] core.fetcher: 正在抓取: J. Catalysis
+2026-03-16 08:00:57,561 [INFO] core.fetcher: 正在抓取: Applied Catalysis B: Env.
+2026-03-16 08:00:59,874 [INFO] core.fetcher: 正在抓取: Catalysis Sci. & Tech.
+2026-03-16 08:01:17,897 [INFO] core.fetcher: 正在抓取: ChemCatChem
+2026-03-16 08:01:20,811 [INFO] core.fetcher: 正在抓取: Chemistry of Materials
+2026-03-16 08:01:23,306 [INFO] core.fetcher: 正在抓取: J. Mater. Chem. A
+2026-03-16 08:01:40,805 [INFO] core.fetcher: 正在抓取: JACS
+2026-03-16 08:01:43,417 [INFO] core.fetcher: 正在抓取: Angew. Chem. Int. Ed.
+2026-03-16 08:01:46,182 [INFO] core.fetcher: 正在抓取: Chemical Science
+2026-03-16 08:02:03,752 [INFO] core.fetcher: 正在抓取: Nature Chemistry
+2026-03-16 08:02:06,100 [INFO] core.fetcher: 正在抓取: npj Comput. Materials
+2026-03-16 08:02:08,383 [INFO] core.fetcher: 正在抓取: Comput. Mater. Sci.
+2026-03-16 08:02:10,696 [INFO] core.fetcher: 正在抓取: Nature Comput. Sci.
+2026-03-16 08:02:14,720 [INFO] core.fetcher: 正在抓取: Machine Learning: Sci. Tech.
+2026-03-16 08:02:18,379 [INFO] core.fetcher: 正在抓取: Phys. Rev. Letters (PRL)
+2026-03-16 08:02:21,359 [INFO] core.fetcher: 正在抓取: Phys. Rev. B
+2026-03-16 08:02:23,929 [INFO] core.fetcher: 正在抓取: Phys. Rev. Materials
+2026-03-16 08:02:26,461 [INFO] core.fetcher: 正在抓取: npj Quantum Materials
+2026-03-16 08:02:28,785 [INFO] main:   共抓取: 338 篇原始文章
+2026-03-16 08:02:28,785 [INFO] main: Step 2: 数据库去重
+2026-03-16 08:02:29,663 [INFO] main:   去重后: 5 篇新文章（跳过 333 篇重复）
+2026-03-16 08:02:29,663 [INFO] main: Step 3: LLM 相关性过滤-第一阶段 (阈值=4, 使用摘要)
+2026-03-16 08:02:29,703 [INFO] main:   [1/5] 评分: In-situ electrodeposition of macroporous germanium on Cu foa...
+2026-03-16 08:02:29,704 [INFO] main:   [3/5] 评分: Tuning selectivity in Ni-Catalyzed hydrogenation of function...
+2026-03-16 08:02:29,703 [INFO] main:   [2/5] 评分: Biocatalytic mechanistic investigation of sulfur oxidation i...
+2026-03-16 08:02:32,899 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-16 08:02:32,904 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-16 08:02:32,907 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-16 08:02:35,096 [INFO] main:   [4/5] 评分: Fine modulating the D-band center of Co3N nanozyme for effic...
+2026-03-16 08:02:35,162 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-16 08:02:35,172 [INFO] main:   [5/5] 评分: Benchmarking an angular-dependent potential for uranium nitr...
+2026-03-16 08:02:35,238 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-16 08:02:37,711 [INFO] main:     ✗ 过滤: In-situ electrodeposition of macroporous germanium on Cu foa (score=3.0)
+2026-03-16 08:02:37,712 [INFO] main:     ✗ 过滤: Biocatalytic mechanistic investigation of sulfur oxidation i (score=3.0)
+2026-03-16 08:02:37,712 [INFO] main:     ✗ 过滤: Tuning selectivity in Ni-Catalyzed hydrogenation of function (score=3.0)
+2026-03-16 08:02:37,712 [INFO] main:     ✗ 过滤: Fine modulating the D-band center of Co3N nanozyme for effic (score=3.0)
+2026-03-16 08:02:37,712 [INFO] main:     ✓ 入选: Benchmarking an angular-dependent potential for uranium nitr (score=9.0)
+2026-03-16 08:02:37,712 [INFO] main:   初筛通过: 1 篇
+2026-03-16 08:02:37,712 [INFO] main: Step 4: 获取相关文章全文
+2026-03-16 08:02:37,712 [INFO] main:   并发全文获取（并发度=5，共 1 篇）
+2026-03-16 08:02:54,085 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-16 08:02:54,271 [INFO] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-16 08:02:54,272 [INFO] main:   [1/1] 读取全文: Benchmarking an angular-dependent potential for uranium...
+2026-03-16 08:02:54,272 [INFO] main:     ⚠ 保持摘要 (130 字) [status=HTML_FETCH_FAIL]
+2026-03-16 08:02:54,272 [INFO] core.request_manager: 请求统计: 总计=1, 成功=0 (0.0%), Tier2回退=0, Tier3回退=0, Tier4回退=0, 失败=1
+2026-03-16 08:02:54,272 [INFO] main: Step 5: LLM 深度解读
+2026-03-16 08:02:54,273 [INFO] main:   全文解读: 0 篇，仅摘要(跳过解读): 1 篇
+2026-03-16 08:02:54,273 [INFO] main:   [1/1] 跳过解读(仅摘要): Benchmarking an angular-dependent potential for uranium...
+2026-03-16 08:02:54,274 [INFO] main: Step 6: 保存数据库记录
+2026-03-16 08:02:55,187 [INFO] main: Step 7: 生成报告
+2026-03-16 08:02:55,188 [INFO] core.notifier: Markdown 报告已保存: data/output/2026-03-16.md
+2026-03-16 08:02:55,217 [INFO] core.notifier: HTML 报告已保存: data/output/2026-03-16.html
+2026-03-16 08:02:56,262 [INFO] core.notifier: 邮件推送成功 (格式: html)
+2026-03-16 08:02:56,356 [INFO] main: ========== 完成！报告: data/output/2026-03-16.md ==========
+2026-03-16 08:02:56,356 [INFO] main:   抓取: 338 → 去重: 5 → 相关: 1

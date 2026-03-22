@@ -1,0 +1,854 @@
+2026-03-22 13:36:45,460 [INFO] main: ========== 开始运行: 2026-03-22 ==========
+2026-03-22 13:36:45,487 [INFO] core.db: 数据库初始化完成: data/db/chem_daily.db
+2026-03-22 13:36:45,602 [INFO] core.analyzer: [LLM_INIT] LLM 已初始化: provider=deepseek, model=deepseek-chat
+2026-03-22 13:36:45,602 [INFO] main: Step 1: 抓取期刊 RSS
+2026-03-22 13:36:45,603 [INFO] core.fetcher: 正在抓取: J. Chem. Theory Comput. (JCTC)
+2026-03-22 13:36:48,071 [INFO] core.fetcher: 正在抓取: J. Comput. Chem.
+2026-03-22 13:36:50,669 [INFO] core.fetcher: 正在抓取: Theor. Chem. Acc.
+2026-03-22 13:36:54,517 [INFO] core.fetcher: 正在抓取: WIREs Comput. Mol. Sci.
+2026-03-22 13:36:56,922 [INFO] core.fetcher: 正在抓取: J. Chem. Inf. Model. (JCIM)
+2026-03-22 13:36:59,407 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. A
+2026-03-22 13:37:01,844 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. C
+2026-03-22 13:37:04,320 [INFO] core.fetcher: 正在抓取: Phys. Chem. Chem. Phys. (PCCP)
+2026-03-22 13:37:05,620 [WARNING] core.fetcher: RSS 获取失败 (尝试 1/3): https://pubs.rsc.org/en/journals/rss/cp - HTTP Error 404: Not Found
+2026-03-22 13:37:09,163 [WARNING] core.fetcher: RSS 获取失败 (尝试 2/3): https://pubs.rsc.org/en/journals/rss/cp - HTTP Error 404: Not Found
+2026-03-22 13:37:14,380 [WARNING] core.fetcher: RSS 获取失败 (尝试 3/3): https://pubs.rsc.org/en/journals/rss/cp - HTTP Error 404: Not Found
+2026-03-22 13:37:20,380 [WARNING] core.fetcher: RSS 获取全部重试失败，放弃: https://pubs.rsc.org/en/journals/rss/cp
+2026-03-22 13:37:22,380 [INFO] core.fetcher: 正在抓取: Chem. Phys. Lett.
+2026-03-22 13:37:24,862 [INFO] core.fetcher: 正在抓取: J. Chem. Phys. (JCP)
+2026-03-22 13:37:27,702 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. Letters (JPCL)
+2026-03-22 13:37:30,155 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. B
+2026-03-22 13:37:32,602 [INFO] core.fetcher: 正在抓取: ACS Catalysis
+2026-03-22 13:37:35,121 [INFO] core.fetcher: 正在抓取: J. Catalysis
+2026-03-22 13:37:37,595 [INFO] core.fetcher: 正在抓取: Applied Catalysis B: Env.
+2026-03-22 13:37:40,101 [INFO] core.fetcher: 正在抓取: Catalysis Sci. & Tech.
+2026-03-22 13:37:41,442 [WARNING] core.fetcher: RSS 获取失败 (尝试 1/3): https://pubs.rsc.org/en/journals/rss/cy - HTTP Error 404: Not Found
+2026-03-22 13:37:44,786 [WARNING] core.fetcher: RSS 获取失败 (尝试 2/3): https://pubs.rsc.org/en/journals/rss/cy - HTTP Error 404: Not Found
+2026-03-22 13:37:50,142 [WARNING] core.fetcher: RSS 获取失败 (尝试 3/3): https://pubs.rsc.org/en/journals/rss/cy - HTTP Error 404: Not Found
+2026-03-22 13:37:56,142 [WARNING] core.fetcher: RSS 获取全部重试失败，放弃: https://pubs.rsc.org/en/journals/rss/cy
+2026-03-22 13:37:58,143 [INFO] core.fetcher: 正在抓取: ChemCatChem
+2026-03-22 13:38:01,032 [INFO] core.fetcher: 正在抓取: Chemistry of Materials
+2026-03-22 13:38:03,520 [INFO] core.fetcher: 正在抓取: J. Mater. Chem. A
+2026-03-22 13:38:04,912 [WARNING] core.fetcher: RSS 获取失败 (尝试 1/3): https://pubs.rsc.org/en/journals/rss/ta - HTTP Error 404: Not Found
+2026-03-22 13:38:08,193 [WARNING] core.fetcher: RSS 获取失败 (尝试 2/3): https://pubs.rsc.org/en/journals/rss/ta - HTTP Error 404: Not Found
+2026-03-22 13:38:13,459 [WARNING] core.fetcher: RSS 获取失败 (尝试 3/3): https://pubs.rsc.org/en/journals/rss/ta - HTTP Error 404: Not Found
+2026-03-22 13:38:19,459 [WARNING] core.fetcher: RSS 获取全部重试失败，放弃: https://pubs.rsc.org/en/journals/rss/ta
+2026-03-22 13:38:21,459 [INFO] core.fetcher: 正在抓取: JACS
+2026-03-22 13:38:24,091 [INFO] core.fetcher: 正在抓取: Angew. Chem. Int. Ed.
+2026-03-22 13:38:26,934 [INFO] core.fetcher: 正在抓取: Chemical Science
+2026-03-22 13:38:28,241 [WARNING] core.fetcher: RSS 获取失败 (尝试 1/3): https://pubs.rsc.org/en/journals/rss/sc - HTTP Error 404: Not Found
+2026-03-22 13:38:32,117 [WARNING] core.fetcher: RSS 获取失败 (尝试 2/3): https://pubs.rsc.org/en/journals/rss/sc - HTTP Error 404: Not Found
+2026-03-22 13:38:37,404 [WARNING] core.fetcher: RSS 获取失败 (尝试 3/3): https://pubs.rsc.org/en/journals/rss/sc - HTTP Error 404: Not Found
+2026-03-22 13:38:43,406 [WARNING] core.fetcher: RSS 获取全部重试失败，放弃: https://pubs.rsc.org/en/journals/rss/sc
+2026-03-22 13:38:45,407 [INFO] core.fetcher: 正在抓取: Nature Chemistry
+2026-03-22 13:38:47,696 [INFO] core.fetcher: 正在抓取: npj Comput. Materials
+2026-03-22 13:38:49,957 [INFO] core.fetcher: 正在抓取: Comput. Mater. Sci.
+2026-03-22 13:38:52,390 [INFO] core.fetcher: 正在抓取: Nature Comput. Sci.
+2026-03-22 13:38:54,662 [INFO] core.fetcher: 正在抓取: Machine Learning: Sci. Tech.
+2026-03-22 13:38:57,674 [INFO] core.fetcher: 正在抓取: Phys. Rev. Letters (PRL)
+2026-03-22 13:39:00,132 [INFO] core.fetcher: 正在抓取: Phys. Rev. B
+2026-03-22 13:39:02,641 [INFO] core.fetcher: 正在抓取: Phys. Rev. Materials
+2026-03-22 13:39:05,141 [INFO] core.fetcher: 正在抓取: npj Quantum Materials
+2026-03-22 13:39:08,894 [INFO] main:   共抓取: 334 篇原始文章
+2026-03-22 13:39:08,894 [INFO] main: Step 2: 数据库去重
+2026-03-22 13:39:11,544 [INFO] main:   去重后: 60 篇新文章（跳过 274 篇重复）
+2026-03-22 13:39:11,544 [INFO] main: Step 3: LLM 相关性过滤-第一阶段 (阈值=7, 使用摘要)
+2026-03-22 13:39:11,544 [INFO] main:   [1/60] 评分: Molecular insight on ultra-confined ionic transport in wetti...
+2026-03-22 13:39:11,544 [INFO] main:   [2/60] 评分: Coarse-grained torsional potential of polypeptide backbone b...
+2026-03-22 13:39:11,545 [INFO] main:   [3/60] 评分: Aggregation of polyampholytes: Influence of salt concentrati...
+2026-03-22 13:39:12,233 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:12,284 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:12,425 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:14,587 [INFO] main:   [4/60] 评分: Influence of magnetic nanoparticle diameter on three-layer M...
+2026-03-22 13:39:14,917 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:15,032 [INFO] main:   [5/60] 评分: Mechanical and electrical anharmonicity in the infrared spec...
+2026-03-22 13:39:15,194 [INFO] main:   [6/60] 评分: Bath-induced stabilization of classical non-linear response ...
+2026-03-22 13:39:15,473 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:15,533 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:17,470 [INFO] main:   [7/60] 评分: Ab initio mixed polarizabilities responsible for the Raman-f...
+2026-03-22 13:39:17,843 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:18,097 [INFO] main:   [8/60] 评分: Accurate and robust analysis of molecular kinetics with rand...
+2026-03-22 13:39:18,274 [INFO] main:   [9/60] 评分: Correlation functions in heterodyne optical fiber dynamic li...
+2026-03-22 13:39:18,482 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:18,602 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:20,613 [INFO] main:   [10/60] 评分: New range-separated screened and full-range hybrid functiona...
+2026-03-22 13:39:20,621 [INFO] main:   [11/60] 评分: Lindblad theory for incoherently driven electron transport i...
+2026-03-22 13:39:20,949 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:20,973 [INFO] main:   [12/60] 评分: Stabilization of Al2O3 with Al-O-P structure in HF atmospher...
+2026-03-22 13:39:21,018 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:21,293 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:23,089 [INFO] main:   [13/60] 评分: Engineering bimetallic coordination sites in terephthalate f...
+2026-03-22 13:39:23,343 [INFO] main:   [14/60] 评分: cis‐Aziridines From Terminal Alkenes via Diastereoselective ...
+2026-03-22 13:39:23,374 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:23,648 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:23,674 [INFO] main:   [15/60] 评分: Role of arsenic speciation and aqueous environment in adsorp...
+2026-03-22 13:39:23,961 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:25,689 [INFO] main:   [16/60] 评分: Quantum Stroboscopy for Time Measurements...
+2026-03-22 13:39:25,915 [INFO] main:   [17/60] 评分: Channel Nonlocality under Decoherence...
+2026-03-22 13:39:25,984 [INFO] main:   [18/60] 评分: Experimental Quantum Channel Purification...
+2026-03-22 13:39:26,011 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:26,228 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:26,314 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:28,020 [INFO] main:   [19/60] 评分: Constant Overhead Entanglement Distillation via Scrambling...
+2026-03-22 13:39:28,176 [INFO] main:   [20/60] 评分: Uncertainty Relations between Quantum Fisher Information and...
+2026-03-22 13:39:28,327 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:28,484 [INFO] main:   [21/60] 评分: Maximal Parameter Space of Sterile Neutrino Dark Matter with...
+2026-03-22 13:39:28,498 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:28,807 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:30,660 [INFO] main:   [22/60] 评分: Understanding Large Localized $CP$ Violation in ${B}^{±}→{K}...
+2026-03-22 13:39:30,985 [INFO] main:   [23/60] 评分: Study of the Emergence of a Gluon Mass Scale from Center Vor...
+2026-03-22 13:39:31,006 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:31,100 [INFO] main:   [24/60] 评分: Observation of Resonant Monopole-Dipole Energy Transfer betw...
+2026-03-22 13:39:31,318 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:31,421 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:32,965 [INFO] main:   [25/60] 评分: Stratification-Dependent Enstrophy-Controlled Regime in Geos...
+2026-03-22 13:39:33,288 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:33,705 [INFO] main:   [26/60] 评分: Expansion-Driven Self-Magnetization of High-Energy-Density P...
+2026-03-22 13:39:33,989 [INFO] main:   [27/60] 评分: Revisiting Dissipation-Driven Phase Transition in a Josephso...
+2026-03-22 13:39:34,031 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:34,349 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:35,533 [INFO] main:   [28/60] 评分: Witnessing Spin-Orbital Entanglement Using Resonant Inelasti...
+2026-03-22 13:39:35,850 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:36,783 [INFO] main:   [29/60] 评分: Direct Raman Observation of the Quantum Metric in a Quantum ...
+2026-03-22 13:39:37,027 [INFO] main:   [30/60] 评分: Net and Compensated Altermagnetism from Staggered Orbital Or...
+2026-03-22 13:39:37,172 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:37,371 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:38,484 [INFO] main:   [31/60] 评分: Surface Acoustic Wave Driven Acoustic Spin Splitter in $d$-W...
+2026-03-22 13:39:38,774 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:39,748 [INFO] main:   [32/60] 评分: Exceptional Optical Phonon Coherence in Enriched Cubic Boron...
+2026-03-22 13:39:39,921 [INFO] main:   [33/60] 评分: Thermodynamic Constraints in Dynamic Random-Access Memory Ce...
+2026-03-22 13:39:40,100 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:40,261 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:40,975 [INFO] main:   [34/60] 评分: Cold Tracer in a Hot Bath: In and out of Equilibrium...
+2026-03-22 13:39:41,316 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:42,555 [INFO] main:   [35/60] 评分: Editorial: Introducing Perspectives...
+2026-03-22 13:39:42,664 [INFO] main:   [36/60] 评分: Two-stage ferroelastic transition of stishovite due to one-d...
+2026-03-22 13:39:42,877 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:42,957 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:44,123 [INFO] main:   [37/60] 评分: ${\mathrm{Cr}}^{3+}$ spin dynamics under the octahedral crys...
+2026-03-22 13:39:44,418 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:45,151 [INFO] main:   [38/60] 评分: Compact localized fermions and Ising anyons in a chiral spin...
+2026-03-22 13:39:45,468 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:45,472 [INFO] main:   [39/60] 评分: Linear magnetoresistance and anomalous Hall effect in the su...
+2026-03-22 13:39:45,798 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:46,648 [INFO] main:   [40/60] 评分: From quantum geometry to nonlinear optics and gerbes: Recent...
+2026-03-22 13:39:46,975 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:48,071 [INFO] main:   [41/60] 评分: High-pressure formation and characterization of a boron carb...
+2026-03-22 13:39:48,276 [INFO] main:   [42/60] 评分: Dynamical quantum phase transitions through the lens of mode...
+2026-03-22 13:39:48,417 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:48,600 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:49,383 [INFO] main:   [43/60] 评分: Unlocking doping effects on altermagnetism in MnTe: Emergenc...
+2026-03-22 13:39:49,708 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:50,477 [INFO] main:   [44/60] 评分: Twofold symmetric superconductivity in the bulk Ising superc...
+2026-03-22 13:39:50,750 [INFO] main:   [45/60] 评分: Surface versus bulk superconductivity in NbN thin films unde...
+2026-03-22 13:39:50,778 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:51,084 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:51,858 [INFO] main:   [46/60] 评分: Interfering trajectories in a ballistic Andreev cavity...
+2026-03-22 13:39:52,179 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:53,283 [INFO] main:   [47/60] 评分: Editorial: Introducing Perspectives...
+2026-03-22 13:39:53,875 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:54,038 [INFO] main:   [48/60] 评分: Probing the critical behavior of a sign-problematic model wi...
+2026-03-22 13:39:54,448 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:55,056 [INFO] main:   [49/60] 评分: Ideal nodal-sphere semimetal in the three-dimensional boron ...
+2026-03-22 13:39:55,361 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:55,688 [INFO] main:   [50/60] 评分: Study of exciton-photon coupling in CuCl semiconductor micro...
+2026-03-22 13:39:56,054 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:56,378 [INFO] main:   [51/60] 评分: Magnetotransport properties of an unconventional Rashba spin...
+2026-03-22 13:39:56,688 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:57,780 [INFO] main:   [52/60] 评分: Report on reproducibility in condensed matter physics...
+2026-03-22 13:39:58,068 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:58,303 [INFO] main:   [53/60] 评分: Bulk plasmons in elemental metals...
+2026-03-22 13:39:58,622 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:39:59,419 [INFO] main:   [54/60] 评分: Interplay of Rashba and valley Zeeman splittings in weak loc...
+2026-03-22 13:39:59,765 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:00,384 [INFO] main:   [55/60] 评分: Terahertz radiation induced attractive-repulsive Fermi polar...
+2026-03-22 13:40:00,709 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:00,971 [INFO] main:   [56/60] 评分: Universal classes of disorder scattering for the in-plane an...
+2026-03-22 13:40:01,272 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:02,102 [INFO] main:   [57/60] 评分: Chiral spin liquid and quantum phase transition in the trian...
+2026-03-22 13:40:02,469 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:03,348 [INFO] main:   [58/60] 评分: Quasi-one-dimensional Coulomb drag between spin-polarized qu...
+2026-03-22 13:40:03,724 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:04,039 [INFO] main:   [59/60] 评分: Microstructure-based modeling of material parameter calibrat...
+2026-03-22 13:40:04,361 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:04,565 [INFO] main:   [60/60] 评分: Scalable learning of macroscopic stochastic dynamics...
+2026-03-22 13:40:04,884 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: Molecular insight on ultra-confined ionic transport in wetti (score=9.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: Coarse-grained torsional potential of polypeptide backbone b (score=7.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: Aggregation of polyampholytes: Influence of salt concentrati (score=8.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✗ 过滤: Influence of magnetic nanoparticle diameter on three-layer M (score=2.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: Mechanical and electrical anharmonicity in the infrared spec (score=7.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✗ 过滤: Bath-induced stabilization of classical non-linear response  (score=6.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✗ 过滤: Ab initio mixed polarizabilities responsible for the Raman-f (score=6.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: Accurate and robust analysis of molecular kinetics with rand (score=7.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✗ 过滤: Correlation functions in heterodyne optical fiber dynamic li (score=2.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✓ 入选: New range-separated screened and full-range hybrid functiona (score=9.0)
+2026-03-22 13:40:07,482 [INFO] main:     ✗ 过滤: Lindblad theory for incoherently driven electron transport i (score=6.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Stabilization of Al2O3 with Al-O-P structure in HF atmospher (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Engineering bimetallic coordination sites in terephthalate f (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: cis‐Aziridines From Terminal Alkenes via Diastereoselective  (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✓ 入选: Role of arsenic speciation and aqueous environment in adsorp (score=8.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Quantum Stroboscopy for Time Measurements (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Channel Nonlocality under Decoherence (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Experimental Quantum Channel Purification (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Constant Overhead Entanglement Distillation via Scrambling (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Uncertainty Relations between Quantum Fisher Information and (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Maximal Parameter Space of Sterile Neutrino Dark Matter with (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Understanding Large Localized $CP$ Violation in ${B}^{±}→{K} (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Study of the Emergence of a Gluon Mass Scale from Center Vor (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Observation of Resonant Monopole-Dipole Energy Transfer betw (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Stratification-Dependent Enstrophy-Controlled Regime in Geos (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Expansion-Driven Self-Magnetization of High-Energy-Density P (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Revisiting Dissipation-Driven Phase Transition in a Josephso (score=1.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Witnessing Spin-Orbital Entanglement Using Resonant Inelasti (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Direct Raman Observation of the Quantum Metric in a Quantum  (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Net and Compensated Altermagnetism from Staggered Orbital Or (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Surface Acoustic Wave Driven Acoustic Spin Splitter in $d$-W (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Exceptional Optical Phonon Coherence in Enriched Cubic Boron (score=6.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Thermodynamic Constraints in Dynamic Random-Access Memory Ce (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Cold Tracer in a Hot Bath: In and out of Equilibrium (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Editorial: Introducing Perspectives (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Two-stage ferroelastic transition of stishovite due to one-d (score=6.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: ${\mathrm{Cr}}^{3+}$ spin dynamics under the octahedral crys (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Compact localized fermions and Ising anyons in a chiral spin (score=4.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Linear magnetoresistance and anomalous Hall effect in the su (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: From quantum geometry to nonlinear optics and gerbes: Recent (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✓ 入选: High-pressure formation and characterization of a boron carb (score=7.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Dynamical quantum phase transitions through the lens of mode (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✓ 入选: Unlocking doping effects on altermagnetism in MnTe: Emergenc (score=8.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Twofold symmetric superconductivity in the bulk Ising superc (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Surface versus bulk superconductivity in NbN thin films unde (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Interfering trajectories in a ballistic Andreev cavity (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Editorial: Introducing Perspectives (score=0.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Probing the critical behavior of a sign-problematic model wi (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Ideal nodal-sphere semimetal in the three-dimensional boron  (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Study of exciton-photon coupling in CuCl semiconductor micro (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Magnetotransport properties of an unconventional Rashba spin (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Report on reproducibility in condensed matter physics (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Bulk plasmons in elemental metals (score=6.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Interplay of Rashba and valley Zeeman splittings in weak loc (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Terahertz radiation induced attractive-repulsive Fermi polar (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Universal classes of disorder scattering for the in-plane an (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Chiral spin liquid and quantum phase transition in the trian (score=3.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Quasi-one-dimensional Coulomb drag between spin-polarized qu (score=2.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✗ 过滤: Microstructure-based modeling of material parameter calibrat (score=4.0)
+2026-03-22 13:40:07,483 [INFO] main:     ✓ 入选: Scalable learning of macroscopic stochastic dynamics (score=7.0)
+2026-03-22 13:40:07,483 [INFO] main:   初筛通过: 10 篇
+2026-03-22 13:40:07,483 [INFO] main: Step 4: 获取相关文章全文
+2026-03-22 13:40:07,483 [INFO] main:   并发全文获取（并发度=5，共 10 篇）
+2026-03-22 13:40:08,191 [INFO] core.fetcher:   Unpaywall 找到 OA 链接: https://doi.org/10.1063/5.0317585
+2026-03-22 13:40:29,995 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:29,997 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 13:40:30,000 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:30,001 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 13:40:30,079 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:30,080 [WARNING] core.fetcher:   Unpaywall OA 链接获取失败: https://doi.org/10.1063/5.0317585
+2026-03-22 13:40:31,047 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:31,050 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 13:40:31,092 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:31,094 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 13:40:33,779 [WARNING] core.fetcher: 浏览器渲染失败 [AIP]: Connection to remote host was lost.
+2026-03-22 13:40:33,779 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 13:40:51,812 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:51,813 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 13:40:55,794 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 13:40:55,795 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:04:51,718 [INFO] main: ========== 开始运行: 2026-03-22 ==========
+2026-03-22 14:04:51,718 [INFO] core.db: 数据库初始化完成: data/db/chem_daily.db
+2026-03-22 14:04:51,822 [INFO] core.analyzer: [LLM_INIT] LLM 已初始化: provider=deepseek, model=deepseek-chat
+2026-03-22 14:04:51,822 [INFO] main: Step 1: 抓取期刊 RSS
+2026-03-22 14:04:51,822 [INFO] core.fetcher: 正在抓取: J. Chem. Theory Comput. (JCTC)
+2026-03-22 14:04:54,315 [INFO] core.fetcher: 正在抓取: J. Comput. Chem.
+2026-03-22 14:04:56,559 [INFO] core.fetcher: 正在抓取: Theor. Chem. Acc.
+2026-03-22 14:05:00,326 [INFO] core.fetcher: 正在抓取: WIREs Comput. Mol. Sci.
+2026-03-22 14:05:02,595 [INFO] core.fetcher: 正在抓取: J. Chem. Inf. Model. (JCIM)
+2026-03-22 14:05:05,186 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. A
+2026-03-22 14:05:07,686 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. C
+2026-03-22 14:05:10,175 [INFO] core.fetcher: 正在抓取: Phys. Chem. Chem. Phys. (PCCP)
+2026-03-22 14:05:12,951 [INFO] core.fetcher: 正在抓取: Chem. Phys. Lett.
+2026-03-22 14:05:15,201 [INFO] core.fetcher: 正在抓取: J. Chem. Phys. (JCP)
+2026-03-22 14:05:18,035 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. Letters (JPCL)
+2026-03-22 14:05:20,459 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. B
+2026-03-22 14:05:22,913 [INFO] core.fetcher: 正在抓取: ACS Catalysis
+2026-03-22 14:05:25,439 [INFO] core.fetcher: 正在抓取: J. Catalysis
+2026-03-22 14:05:27,731 [INFO] core.fetcher: 正在抓取: Applied Catalysis B: Env.
+2026-03-22 14:05:29,987 [INFO] core.fetcher: 正在抓取: Catalysis Sci. & Tech.
+2026-03-22 14:05:32,755 [INFO] core.fetcher: 正在抓取: ChemCatChem
+2026-03-22 14:05:35,117 [INFO] core.fetcher: 正在抓取: Chemistry of Materials
+2026-03-22 14:05:37,615 [INFO] core.fetcher: 正在抓取: J. Mater. Chem. A
+2026-03-22 14:05:40,361 [INFO] core.fetcher: 正在抓取: JACS
+2026-03-22 14:05:42,952 [INFO] core.fetcher: 正在抓取: Angew. Chem. Int. Ed.
+2026-03-22 14:05:45,444 [INFO] core.fetcher: 正在抓取: Chemical Science
+2026-03-22 14:05:48,209 [INFO] core.fetcher: 正在抓取: Nature Chemistry
+2026-03-22 14:05:50,489 [INFO] core.fetcher: 正在抓取: npj Comput. Materials
+2026-03-22 14:05:52,740 [INFO] core.fetcher: 正在抓取: Comput. Mater. Sci.
+2026-03-22 14:05:55,012 [INFO] core.fetcher: 正在抓取: Nature Comput. Sci.
+2026-03-22 14:05:57,275 [INFO] core.fetcher: 正在抓取: Machine Learning: Sci. Tech.
+2026-03-22 14:06:00,248 [INFO] core.fetcher: 正在抓取: Phys. Rev. Letters (PRL)
+2026-03-22 14:06:02,729 [INFO] core.fetcher: 正在抓取: Phys. Rev. B
+2026-03-22 14:06:05,192 [INFO] core.fetcher: 正在抓取: Phys. Rev. Materials
+2026-03-22 14:06:07,688 [INFO] core.fetcher: 正在抓取: npj Quantum Materials
+2026-03-22 14:06:11,818 [INFO] main:   共抓取: 409 篇原始文章
+2026-03-22 14:06:11,818 [INFO] main: Step 2: 数据库去重
+2026-03-22 14:06:18,500 [INFO] main:   去重后: 135 篇新文章（跳过 274 篇重复）
+2026-03-22 14:06:18,500 [INFO] main: Step 3: LLM 相关性过滤-第一阶段 (阈值=7, 使用摘要)
+2026-03-22 14:06:18,501 [INFO] main:   [1/135] 评分: Influence of pH and salt on the ionization state and phase b...
+2026-03-22 14:06:18,501 [INFO] main:   [2/135] 评分: Borane carbene or not? A theoretical verification of Lewis A...
+2026-03-22 14:06:18,501 [INFO] main:   [3/135] 评分: Decoding episodes of past temperature spikes on the Martian ...
+2026-03-22 14:06:19,182 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:19,183 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:19,185 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:21,326 [INFO] main:   [4/135] 评分: Observation-time-induced crossover from fluctuating diffusiv...
+2026-03-22 14:06:21,648 [INFO] main:   [5/135] 评分: Proline-Mediated Conformational Rigidity Governs the Ice-Bin...
+2026-03-22 14:06:21,654 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:21,820 [INFO] main:   [6/135] 评分: BSA kinetically traps protein KH1 in unfolded state...
+2026-03-22 14:06:21,976 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:22,117 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:24,346 [INFO] main:   [7/135] 评分: Comparative Assessment of Composition-and Structure-Based Su...
+2026-03-22 14:06:24,518 [INFO] main:   [8/135] 评分: Sulfur-centered non-covalent interactions: Emerging themes a...
+2026-03-22 14:06:24,607 [INFO] main:   [9/135] 评分: Half-Heusler compounds; Se alloying...
+2026-03-22 14:06:24,663 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:24,837 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:24,926 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:27,268 [INFO] main:   [10/135] 评分: Radiative cooling of isolated Al−5 cluster ions observed on ...
+2026-03-22 14:06:27,318 [INFO] main:   [11/135] 评分: Bioinspired silver nanoparticles from Artemisia lerchiana as...
+2026-03-22 14:06:27,459 [INFO] main:   [12/135] 评分: Dynamic chiral quenching of europium and terbium excited sta...
+2026-03-22 14:06:27,583 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:27,684 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:27,823 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:30,181 [INFO] main:   [13/135] 评分: Carbonless amino acids and a carbonless GHK peptide...
+2026-03-22 14:06:30,267 [INFO] main:   [14/135] 评分: Unveiling the potential of cobalt-based half-Heusler alloys ...
+2026-03-22 14:06:30,549 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:30,637 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:30,655 [INFO] main:   [15/135] 评分: Solvent and pH effects on the ionization energies of bio-org...
+2026-03-22 14:06:30,940 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:32,762 [INFO] main:   [16/135] 评分: Proton transfer-driven intersystem crossing in apigenin...
+2026-03-22 14:06:32,776 [INFO] main:   [17/135] 评分: A Combined First-Principles and Machine Learning Study of Ph...
+2026-03-22 14:06:32,903 [INFO] main:   [18/135] 评分: Engineering Copper Surface Microstructures for Dramatically ...
+2026-03-22 14:06:33,077 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:33,099 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:33,216 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:35,258 [INFO] main:   [19/135] 评分: Mechanistic Insights into pH-Dependent Ofloxacin Adsorption ...
+2026-03-22 14:06:35,373 [INFO] main:   [20/135] 评分: A DFT study of B-doped graphene as a metal-anchor: effects o...
+2026-03-22 14:06:35,584 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:35,635 [INFO] main:   [21/135] 评分: Molecular insight on ultra-confined ionic transport in wetti...
+2026-03-22 14:06:35,690 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:35,983 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:38,112 [INFO] main:   [22/135] 评分: Coarse-grained torsional potential of polypeptide backbone b...
+2026-03-22 14:06:38,172 [INFO] main:   [23/135] 评分: Aggregation of polyampholytes: Influence of salt concentrati...
+2026-03-22 14:06:38,430 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:38,507 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:40,684 [INFO] main:   [24/135] 评分: Influence of magnetic nanoparticle diameter on three-layer M...
+2026-03-22 14:06:41,013 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:41,296 [INFO] main:   [25/135] 评分: Mechanical and electrical anharmonicity in the infrared spec...
+2026-03-22 14:06:41,523 [INFO] main:   [26/135] 评分: Bath-induced stabilization of classical non-linear response ...
+2026-03-22 14:06:41,693 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:41,837 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:43,743 [INFO] main:   [27/135] 评分: Ab initio mixed polarizabilities responsible for the Raman-f...
+2026-03-22 14:06:44,061 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:44,472 [INFO] main:   [28/135] 评分: Accurate and robust analysis of molecular kinetics with rand...
+2026-03-22 14:06:44,490 [INFO] main:   [29/135] 评分: Correlation functions in heterodyne optical fiber dynamic li...
+2026-03-22 14:06:44,807 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:44,814 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:46,831 [INFO] main:   [30/135] 评分: New range-separated screened and full-range hybrid functiona...
+2026-03-22 14:06:46,881 [INFO] main:   [31/135] 评分: Lindblad theory for incoherently driven electron transport i...
+2026-03-22 14:06:47,152 [INFO] main:   [32/135] 评分: Stabilization of Al2O3 with Al-O-P structure in HF atmospher...
+2026-03-22 14:06:47,174 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:47,357 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:47,448 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:49,713 [INFO] main:   [33/135] 评分: Engineering bimetallic coordination sites in terephthalate f...
+2026-03-22 14:06:50,070 [INFO] main:   [34/135] 评分: Linking hydrothermal deactivation of Cu-CHA catalysts for NH...
+2026-03-22 14:06:50,109 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:50,434 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:51,267 [INFO] main:   [35/135] 评分: Alginate-supported L-arginine as a biobased heterogeneous ca...
+2026-03-22 14:06:51,677 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:52,794 [INFO] main:   [36/135] 评分: HYDROGENATION OF CINNAMALDEHYDE BY PLATINUM SUPPORTED ON 2D ...
+2026-03-22 14:06:52,937 [INFO] main:   [37/135] 评分: Modifying Ni active sites with Ga and Co and optimizing reac...
+2026-03-22 14:06:53,100 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:53,263 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:54,188 [INFO] main:   [38/135] 评分: Tailoring amorphous alumina catalysts with enriched five-coo...
+2026-03-22 14:06:54,554 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:55,101 [INFO] main:   [39/135] 评分: Vacancy-engineered MoSe2/CdS hollow heterostructures boostin...
+2026-03-22 14:06:55,427 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:55,477 [INFO] main:   [40/135] 评分: Electronic Structure Modulation of Mo-Doped NiO/Ni Bifunctio...
+2026-03-22 14:06:55,801 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:57,265 [INFO] main:   [41/135] 评分: Design of Pt-based pseudo-binary intermetallic catalysts for...
+2026-03-22 14:06:57,697 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:57,939 [INFO] main:   [42/135] 评分: Boosting piezocatalytic activity of the Bi0.5Na0.5TiO3–BaTiO...
+2026-03-22 14:06:58,152 [INFO] main:   [43/135] 评分: Catalytic and mechanistic insights into desilicated ZSM-5 fo...
+2026-03-22 14:06:58,246 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:06:58,431 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:00,400 [INFO] main:   [44/135] 评分: Controlling the electron–hole separation in photo-assisted C...
+2026-03-22 14:07:00,722 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:00,934 [INFO] main:   [45/135] 评分: Synthesis of imidazolium-functionalized COFs and their catal...
+2026-03-22 14:07:00,978 [INFO] main:   [46/135] 评分: Facet-dependent metal–support interactions in cobalt–ceria b...
+2026-03-22 14:07:01,254 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:01,270 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:03,013 [INFO] main:   [47/135] 评分: Efficient glycine synthesis from CO2-derived oxalate via an ...
+2026-03-22 14:07:03,304 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:03,546 [INFO] main:   [48/135] 评分: Antifluorite-derived Li7MnN4: revisiting the crystal structu...
+2026-03-22 14:07:03,570 [INFO] main:   [49/135] 评分: Engineering atomically dispersed Fe sites into TiO2 for larg...
+2026-03-22 14:07:03,865 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:03,895 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:05,634 [INFO] main:   [50/135] 评分: MOF-integrated Bilayer Nanofibrous Membranes for Radiative-C...
+2026-03-22 14:07:05,921 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:06,173 [INFO] main:   [51/135] 评分: Low-Crystallinity Polymer Donor Enables High-Efficiency Semi...
+2026-03-22 14:07:06,487 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:06,686 [INFO] main:   [52/135] 评分: Synthesis and Molecular Sieving Mechanism of Millet-derived ...
+2026-03-22 14:07:06,981 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:08,560 [INFO] main:   [53/135] 评分: A Highly Resilient, Conductive, and Anti-Swelling Hybrid-Cro...
+2026-03-22 14:07:08,986 [INFO] main:   [54/135] 评分: MOF-Derived Chalcogenides Multifunctional Heterostructure Ma...
+2026-03-22 14:07:09,041 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:09,316 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:09,442 [INFO] main:   [55/135] 评分: Discovery of two new Cu-Sn chalco-halides for potential sola...
+2026-03-22 14:07:09,943 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:11,420 [INFO] main:   [56/135] 评分: Standalone Photo–Rechargeable Capacitor Integrating DSSCs wi...
+2026-03-22 14:07:11,535 [INFO] main:   [57/135] 评分: Dielectric shells as resonant mode tuners: unlocking superio...
+2026-03-22 14:07:11,759 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:11,936 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:12,495 [INFO] main:   [58/135] 评分: Heteroatom-Doped Graphene Nanoribbons as High-Performance El...
+2026-03-22 14:07:12,931 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:14,209 [INFO] main:   [59/135] 评分: Illumination-boosted capacitance with NiFe2O4: design and pe...
+2026-03-22 14:07:14,498 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:14,539 [INFO] main:   [60/135] 评分: Thermoelectric Properties of (In, Cr) 2 Ge 2 Te 6 Layered Co...
+2026-03-22 14:07:14,837 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:15,584 [INFO] main:   [61/135] 评分: Environmentally Friendly and Energy-saving Anode for Nonferr...
+2026-03-22 14:07:15,913 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:16,817 [INFO] main:   [62/135] 评分: Superior energy storage performance in Bi0.5Na0.5TiO3 based ...
+2026-03-22 14:07:17,052 [INFO] main:   [63/135] 评分: Machine learning-guided screening of phase-stable high-entro...
+2026-03-22 14:07:17,175 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:17,389 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:17,759 [INFO] main:   [64/135] 评分: A Harsh-Environment Tolerant, Ultra-strong yet Tough Bio-Bas...
+2026-03-22 14:07:18,083 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:19,619 [INFO] main:   [65/135] 评分: Pore-space-partitioned and hetero-atom enriched dual-redox s...
+2026-03-22 14:07:19,888 [INFO] main:   [66/135] 评分: Fluorinated surface-to-bulk engineering enables high-rate an...
+2026-03-22 14:07:19,945 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:20,183 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:20,450 [INFO] main:   [67/135] 评分: Simultaneous optimization of thermoelectric and mechanical p...
+2026-03-22 14:07:20,772 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:22,332 [INFO] main:   [68/135] 评分: Surface defect engineering toward efficient photocatalytic N...
+2026-03-22 14:07:22,633 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:22,797 [INFO] main:   [69/135] 评分: cis‐Aziridines From Terminal Alkenes via Diastereoselective ...
+2026-03-22 14:07:22,835 [INFO] main:   [70/135] 评分: Tris((4-BMes 2 )phenyl)methanide: a Carbanion with a Delocal...
+2026-03-22 14:07:23,148 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:23,183 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:25,075 [INFO] main:   [71/135] 评分: Tuneable Electronic Coupling in Linked Bis(cubane) Cobalt-Ox...
+2026-03-22 14:07:25,448 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:25,542 [INFO] main:   [72/135] 评分: Theoretical insights into site-specific heavy-atom effects o...
+2026-03-22 14:07:25,872 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:25,951 [INFO] main:   [73/135] 评分: Constructing Interfacial Charge Transfer Channels via Plasmo...
+2026-03-22 14:07:26,287 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:27,550 [INFO] main:   [74/135] 评分: Bidirectional skeletal remodelling of SF 5 -nitrobenzenes in...
+2026-03-22 14:07:27,907 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:28,126 [INFO] main:   [75/135] 评分: Anode-Free Solid-State Sodium Batteries: Navigating the Chal...
+2026-03-22 14:07:28,400 [INFO] main:   [76/135] 评分: Mechanism governing the formation of atomically precise dith...
+2026-03-22 14:07:28,451 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:28,692 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:30,203 [INFO] main:   [77/135] 评分: Chemical regulation of carbonization enables structure-tailo...
+2026-03-22 14:07:30,508 [INFO] main:   [78/135] 评分: Highly stereoselective synthesis of allylic β-lactams via en...
+2026-03-22 14:07:30,533 [INFO] main:   [79/135] 评分: Functional-Oriented Design of Gradient Composite Fluoride In...
+2026-03-22 14:07:30,539 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:30,830 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:30,835 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:32,790 [INFO] main:   [80/135] 评分: Water self-dissociation in slit pores displays non-monotonic...
+2026-03-22 14:07:33,141 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:33,164 [INFO] main:   [81/135] 评分: Retraction: Supramolecular engineering cascade regulates NIR...
+2026-03-22 14:07:33,322 [INFO] main:   [82/135] 评分: Spinel integrated layered oxide cathodes for sodium-ion batt...
+2026-03-22 14:07:33,487 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:33,608 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:35,386 [INFO] main:   [83/135] 评分: A Secondary-Sphere Proton Channel Accelerating Metal–Hydride...
+2026-03-22 14:07:35,685 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:35,694 [INFO] main:   [84/135] 评分: Biginelli dihydropyrimidines: a tunable class of alkyl radic...
+2026-03-22 14:07:35,954 [INFO] main:   [85/135] 评分: Homoleptic seven-coordinate Ti(0) and Zr(0) through a new st...
+2026-03-22 14:07:36,016 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:36,277 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:38,156 [INFO] main:   [86/135] 评分: Leveraging the redox activities of cerium and dibenzotetrath...
+2026-03-22 14:07:38,333 [INFO] main:   [87/135] 评分: Chloride-induced easier phase transformation and catalytic s...
+2026-03-22 14:07:38,446 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:38,652 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:38,932 [INFO] main:   [88/135] 评分: Metal-centered X-ray absorption and emission spectroscopy of...
+2026-03-22 14:07:39,303 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:40,867 [INFO] main:   [89/135] 评分: Switching between photochromism and photoluminescence in Sch...
+2026-03-22 14:07:41,045 [INFO] main:   [90/135] 评分: Role of arsenic speciation and aqueous environment in adsorp...
+2026-03-22 14:07:41,151 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:41,358 [INFO] main:   [91/135] 评分: Quantum Stroboscopy for Time Measurements...
+2026-03-22 14:07:41,362 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:41,673 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:43,204 [INFO] main:   [92/135] 评分: Channel Nonlocality under Decoherence...
+2026-03-22 14:07:43,411 [INFO] main:   [93/135] 评分: Experimental Quantum Channel Purification...
+2026-03-22 14:07:43,522 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:43,683 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:43,819 [INFO] main:   [94/135] 评分: Constant Overhead Entanglement Distillation via Scrambling...
+2026-03-22 14:07:44,141 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:45,392 [INFO] main:   [95/135] 评分: Uncertainty Relations between Quantum Fisher Information and...
+2026-03-22 14:07:45,727 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:46,053 [INFO] main:   [96/135] 评分: Maximal Parameter Space of Sterile Neutrino Dark Matter with...
+2026-03-22 14:07:46,373 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:46,835 [INFO] main:   [97/135] 评分: Understanding Large Localized $CP$ Violation in ${B}^{±}→{K}...
+2026-03-22 14:07:47,209 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:48,807 [INFO] main:   [98/135] 评分: Study of the Emergence of a Gluon Mass Scale from Center Vor...
+2026-03-22 14:07:49,144 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:49,417 [INFO] main:   [99/135] 评分: Observation of Resonant Monopole-Dipole Energy Transfer betw...
+2026-03-22 14:07:49,473 [INFO] main:   [100/135] 评分: Stratification-Dependent Enstrophy-Controlled Regime in Geos...
+2026-03-22 14:07:49,754 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:49,789 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:51,006 [INFO] main:   [101/135] 评分: Expansion-Driven Self-Magnetization of High-Energy-Density P...
+2026-03-22 14:07:51,340 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:51,921 [INFO] main:   [102/135] 评分: Revisiting Dissipation-Driven Phase Transition in a Josephso...
+2026-03-22 14:07:52,196 [INFO] main:   [103/135] 评分: Witnessing Spin-Orbital Entanglement Using Resonant Inelasti...
+2026-03-22 14:07:52,209 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:52,520 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:53,778 [INFO] main:   [104/135] 评分: Direct Raman Observation of the Quantum Metric in a Quantum ...
+2026-03-22 14:07:54,114 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:54,475 [INFO] main:   [105/135] 评分: Net and Compensated Altermagnetism from Staggered Orbital Or...
+2026-03-22 14:07:54,799 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:55,335 [INFO] main:   [106/135] 评分: Surface Acoustic Wave Driven Acoustic Spin Splitter in $d$-W...
+2026-03-22 14:07:55,710 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:56,981 [INFO] main:   [107/135] 评分: Exceptional Optical Phonon Coherence in Enriched Cubic Boron...
+2026-03-22 14:07:57,272 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:57,641 [INFO] main:   [108/135] 评分: Thermodynamic Constraints in Dynamic Random-Access Memory Ce...
+2026-03-22 14:07:57,958 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:58,294 [INFO] main:   [109/135] 评分: Cold Tracer in a Hot Bath: In and out of Equilibrium...
+2026-03-22 14:07:58,609 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:07:59,873 [INFO] main:   [110/135] 评分: Editorial: Introducing Perspectives...
+2026-03-22 14:08:00,202 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:00,847 [INFO] main:   [111/135] 评分: Two-stage ferroelastic transition of stishovite due to one-d...
+2026-03-22 14:08:01,099 [INFO] main:   [112/135] 评分: ${\mathrm{Cr}}^{3+}$ spin dynamics under the octahedral crys...
+2026-03-22 14:08:01,164 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:01,415 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:02,430 [INFO] main:   [113/135] 评分: Compact localized fermions and Ising anyons in a chiral spin...
+2026-03-22 14:08:02,774 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:03,160 [INFO] main:   [114/135] 评分: Linear magnetoresistance and anomalous Hall effect in the su...
+2026-03-22 14:08:03,474 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:03,520 [INFO] main:   [115/135] 评分: From quantum geometry to nonlinear optics and gerbes: Recent...
+2026-03-22 14:08:03,839 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:05,268 [INFO] main:   [116/135] 评分: High-pressure formation and characterization of a boron carb...
+2026-03-22 14:08:05,654 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:05,999 [INFO] main:   [117/135] 评分: Dynamical quantum phase transitions through the lens of mode...
+2026-03-22 14:08:06,045 [INFO] main:   [118/135] 评分: Unlocking doping effects on altermagnetism in MnTe: Emergenc...
+2026-03-22 14:08:06,316 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:06,468 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:07,914 [INFO] main:   [119/135] 评分: Twofold symmetric superconductivity in the bulk Ising superc...
+2026-03-22 14:08:08,222 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:08,406 [INFO] main:   [120/135] 评分: Surface versus bulk superconductivity in NbN thin films unde...
+2026-03-22 14:08:08,724 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:08,965 [INFO] main:   [121/135] 评分: Interfering trajectories in a ballistic Andreev cavity...
+2026-03-22 14:08:09,324 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:10,444 [INFO] main:   [122/135] 评分: Editorial: Introducing Perspectives...
+2026-03-22 14:08:10,747 [INFO] main:   [123/135] 评分: Probing the critical behavior of a sign-problematic model wi...
+2026-03-22 14:08:10,759 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:11,105 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:11,769 [INFO] main:   [124/135] 评分: Ideal nodal-sphere semimetal in the three-dimensional boron ...
+2026-03-22 14:08:12,088 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:12,792 [INFO] main:   [125/135] 评分: Study of exciton-photon coupling in CuCl semiconductor micro...
+2026-03-22 14:08:13,220 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:13,250 [INFO] main:   [126/135] 评分: Magnetotransport properties of an unconventional Rashba spin...
+2026-03-22 14:08:13,577 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:14,391 [INFO] main:   [127/135] 评分: Report on reproducibility in condensed matter physics...
+2026-03-22 14:08:14,721 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:15,473 [INFO] main:   [128/135] 评分: Bulk plasmons in elemental metals...
+2026-03-22 14:08:15,498 [INFO] main:   [129/135] 评分: Interplay of Rashba and valley Zeeman splittings in weak loc...
+2026-03-22 14:08:15,765 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:15,827 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:16,792 [INFO] main:   [130/135] 评分: Terahertz radiation induced attractive-repulsive Fermi polar...
+2026-03-22 14:08:17,124 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:18,175 [INFO] main:   [131/135] 评分: Universal classes of disorder scattering for the in-plane an...
+2026-03-22 14:08:18,268 [INFO] main:   [132/135] 评分: Chiral spin liquid and quantum phase transition in the trian...
+2026-03-22 14:08:18,501 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:18,604 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:19,749 [INFO] main:   [133/135] 评分: Quasi-one-dimensional Coulomb drag between spin-polarized qu...
+2026-03-22 14:08:20,053 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:20,725 [INFO] main:   [134/135] 评分: Microstructure-based modeling of material parameter calibrat...
+2026-03-22 14:08:21,069 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:21,588 [INFO] main:   [135/135] 评分: Scalable learning of macroscopic stochastic dynamics...
+2026-03-22 14:08:21,920 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Influence of pH and salt on the ionization state and phase b (score=2.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Borane carbene or not? A theoretical verification of Lewis A (score=7.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Decoding episodes of past temperature spikes on the Martian  (score=3.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Observation-time-induced crossover from fluctuating diffusiv (score=3.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Proline-Mediated Conformational Rigidity Governs the Ice-Bin (score=6.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: BSA kinetically traps protein KH1 in unfolded state (score=2.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Comparative Assessment of Composition-and Structure-Based Su (score=8.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Sulfur-centered non-covalent interactions: Emerging themes a (score=3.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Half-Heusler compounds; Se alloying (score=8.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Radiative cooling of isolated Al−5 cluster ions observed on  (score=3.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Bioinspired silver nanoparticles from Artemisia lerchiana as (score=3.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Dynamic chiral quenching of europium and terbium excited sta (score=2.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Carbonless amino acids and a carbonless GHK peptide (score=6.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Unveiling the potential of cobalt-based half-Heusler alloys  (score=8.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Solvent and pH effects on the ionization energies of bio-org (score=6.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Proton transfer-driven intersystem crossing in apigenin (score=6.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: A Combined First-Principles and Machine Learning Study of Ph (score=9.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Engineering Copper Surface Microstructures for Dramatically  (score=9.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Mechanistic Insights into pH-Dependent Ofloxacin Adsorption  (score=4.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: A DFT study of B-doped graphene as a metal-anchor: effects o (score=9.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Molecular insight on ultra-confined ionic transport in wetti (score=9.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Coarse-grained torsional potential of polypeptide backbone b (score=7.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✓ 入选: Aggregation of polyampholytes: Influence of salt concentrati (score=8.0)
+2026-03-22 14:08:23,945 [INFO] main:     ✗ 过滤: Influence of magnetic nanoparticle diameter on three-layer M (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✓ 入选: Mechanical and electrical anharmonicity in the infrared spec (score=7.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Bath-induced stabilization of classical non-linear response  (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Ab initio mixed polarizabilities responsible for the Raman-f (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✓ 入选: Accurate and robust analysis of molecular kinetics with rand (score=7.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Correlation functions in heterodyne optical fiber dynamic li (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✓ 入选: New range-separated screened and full-range hybrid functiona (score=9.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Lindblad theory for incoherently driven electron transport i (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Stabilization of Al2O3 with Al-O-P structure in HF atmospher (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Engineering bimetallic coordination sites in terephthalate f (score=4.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Linking hydrothermal deactivation of Cu-CHA catalysts for NH (score=4.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Alginate-supported L-arginine as a biobased heterogeneous ca (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: HYDROGENATION OF CINNAMALDEHYDE BY PLATINUM SUPPORTED ON 2D  (score=4.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Modifying Ni active sites with Ga and Co and optimizing reac (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Tailoring amorphous alumina catalysts with enriched five-coo (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Vacancy-engineered MoSe2/CdS hollow heterostructures boostin (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Electronic Structure Modulation of Mo-Doped NiO/Ni Bifunctio (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Design of Pt-based pseudo-binary intermetallic catalysts for (score=4.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Boosting piezocatalytic activity of the Bi0.5Na0.5TiO3–BaTiO (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Catalytic and mechanistic insights into desilicated ZSM-5 fo (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Controlling the electron–hole separation in photo-assisted C (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Synthesis of imidazolium-functionalized COFs and their catal (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Facet-dependent metal–support interactions in cobalt–ceria b (score=5.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Efficient glycine synthesis from CO2-derived oxalate via an  (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Antifluorite-derived Li7MnN4: revisiting the crystal structu (score=6.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✓ 入选: Engineering atomically dispersed Fe sites into TiO2 for larg (score=7.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: MOF-integrated Bilayer Nanofibrous Membranes for Radiative-C (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Low-Crystallinity Polymer Donor Enables High-Efficiency Semi (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Synthesis and Molecular Sieving Mechanism of Millet-derived  (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: A Highly Resilient, Conductive, and Anti-Swelling Hybrid-Cro (score=2.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: MOF-Derived Chalcogenides Multifunctional Heterostructure Ma (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✓ 入选: Discovery of two new Cu-Sn chalco-halides for potential sola (score=7.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Standalone Photo–Rechargeable Capacitor Integrating DSSCs wi (score=1.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Dielectric shells as resonant mode tuners: unlocking superio (score=3.0)
+2026-03-22 14:08:23,946 [INFO] main:     ✗ 过滤: Heteroatom-Doped Graphene Nanoribbons as High-Performance El (score=4.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Illumination-boosted capacitance with NiFe2O4: design and pe (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Thermoelectric Properties of (In, Cr) 2 Ge 2 Te 6 Layered Co (score=4.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Environmentally Friendly and Energy-saving Anode for Nonferr (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Superior energy storage performance in Bi0.5Na0.5TiO3 based  (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✓ 入选: Machine learning-guided screening of phase-stable high-entro (score=8.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: A Harsh-Environment Tolerant, Ultra-strong yet Tough Bio-Bas (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Pore-space-partitioned and hetero-atom enriched dual-redox s (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Fluorinated surface-to-bulk engineering enables high-rate an (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Simultaneous optimization of thermoelectric and mechanical p (score=4.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Surface defect engineering toward efficient photocatalytic N (score=4.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: cis‐Aziridines From Terminal Alkenes via Diastereoselective  (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Tris((4-BMes 2 )phenyl)methanide: a Carbanion with a Delocal (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Tuneable Electronic Coupling in Linked Bis(cubane) Cobalt-Ox (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Theoretical insights into site-specific heavy-atom effects o (score=6.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Constructing Interfacial Charge Transfer Channels via Plasmo (score=6.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Bidirectional skeletal remodelling of SF 5 -nitrobenzenes in (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Anode-Free Solid-State Sodium Batteries: Navigating the Chal (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Mechanism governing the formation of atomically precise dith (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Chemical regulation of carbonization enables structure-tailo (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Highly stereoselective synthesis of allylic β-lactams via en (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Functional-Oriented Design of Gradient Composite Fluoride In (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✓ 入选: Water self-dissociation in slit pores displays non-monotonic (score=9.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Retraction: Supramolecular engineering cascade regulates NIR (score=0.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Spinel integrated layered oxide cathodes for sodium-ion batt (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: A Secondary-Sphere Proton Channel Accelerating Metal–Hydride (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Biginelli dihydropyrimidines: a tunable class of alkyl radic (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Homoleptic seven-coordinate Ti(0) and Zr(0) through a new st (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Leveraging the redox activities of cerium and dibenzotetrath (score=4.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Chloride-induced easier phase transformation and catalytic s (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Metal-centered X-ray absorption and emission spectroscopy of (score=3.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Switching between photochromism and photoluminescence in Sch (score=2.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✓ 入选: Role of arsenic speciation and aqueous environment in adsorp (score=8.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Quantum Stroboscopy for Time Measurements (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Channel Nonlocality under Decoherence (score=0.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Experimental Quantum Channel Purification (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Constant Overhead Entanglement Distillation via Scrambling (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Uncertainty Relations between Quantum Fisher Information and (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Maximal Parameter Space of Sterile Neutrino Dark Matter with (score=1.0)
+2026-03-22 14:08:23,947 [INFO] main:     ✗ 过滤: Understanding Large Localized $CP$ Violation in ${B}^{±}→{K} (score=0.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Study of the Emergence of a Gluon Mass Scale from Center Vor (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Observation of Resonant Monopole-Dipole Energy Transfer betw (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Stratification-Dependent Enstrophy-Controlled Regime in Geos (score=0.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Expansion-Driven Self-Magnetization of High-Energy-Density P (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Revisiting Dissipation-Driven Phase Transition in a Josephso (score=1.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Witnessing Spin-Orbital Entanglement Using Resonant Inelasti (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Direct Raman Observation of the Quantum Metric in a Quantum  (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Net and Compensated Altermagnetism from Staggered Orbital Or (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Surface Acoustic Wave Driven Acoustic Spin Splitter in $d$-W (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Exceptional Optical Phonon Coherence in Enriched Cubic Boron (score=6.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Thermodynamic Constraints in Dynamic Random-Access Memory Ce (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Cold Tracer in a Hot Bath: In and out of Equilibrium (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Editorial: Introducing Perspectives (score=0.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✓ 入选: Two-stage ferroelastic transition of stishovite due to one-d (score=7.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: ${\mathrm{Cr}}^{3+}$ spin dynamics under the octahedral crys (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Compact localized fermions and Ising anyons in a chiral spin (score=6.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Linear magnetoresistance and anomalous Hall effect in the su (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: From quantum geometry to nonlinear optics and gerbes: Recent (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✓ 入选: High-pressure formation and characterization of a boron carb (score=7.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Dynamical quantum phase transitions through the lens of mode (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✓ 入选: Unlocking doping effects on altermagnetism in MnTe: Emergenc (score=8.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Twofold symmetric superconductivity in the bulk Ising superc (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Surface versus bulk superconductivity in NbN thin films unde (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Interfering trajectories in a ballistic Andreev cavity (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Editorial: Introducing Perspectives (score=0.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Probing the critical behavior of a sign-problematic model wi (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Ideal nodal-sphere semimetal in the three-dimensional boron  (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Study of exciton-photon coupling in CuCl semiconductor micro (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Magnetotransport properties of an unconventional Rashba spin (score=2.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Report on reproducibility in condensed matter physics (score=3.0)
+2026-03-22 14:08:23,948 [INFO] main:     ✗ 过滤: Bulk plasmons in elemental metals (score=6.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Interplay of Rashba and valley Zeeman splittings in weak loc (score=3.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Terahertz radiation induced attractive-repulsive Fermi polar (score=3.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Universal classes of disorder scattering for the in-plane an (score=3.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Chiral spin liquid and quantum phase transition in the trian (score=3.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Quasi-one-dimensional Coulomb drag between spin-polarized qu (score=2.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✗ 过滤: Microstructure-based modeling of material parameter calibrat (score=4.0)
+2026-03-22 14:08:23,949 [INFO] main:     ✓ 入选: Scalable learning of macroscopic stochastic dynamics (score=8.0)
+2026-03-22 14:08:23,949 [INFO] main:   初筛通过: 22 篇
+2026-03-22 14:08:23,949 [INFO] main: Step 4: 获取相关文章全文
+2026-03-22 14:08:23,949 [INFO] main:   并发全文获取（并发度=5，共 22 篇）
+2026-03-22 14:08:26,173 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1318 字, campus_proxy)
+2026-03-22 14:08:26,205 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (2444 字, campus_proxy)
+2026-03-22 14:08:26,266 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1958 字, campus_proxy)
+2026-03-22 14:08:26,421 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1867 字, campus_proxy)
+2026-03-22 14:08:26,653 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (2392 字, campus_proxy)
+2026-03-22 14:08:28,494 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1633 字, campus_proxy)
+2026-03-22 14:08:28,517 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1813 字, campus_proxy)
+2026-03-22 14:08:29,231 [INFO] core.fetcher:   Unpaywall 找到 OA 链接: https://doi.org/10.1063/5.0317585
+2026-03-22 14:08:49,135 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:08:49,136 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:08:49,136 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:08:49,136 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:08:49,445 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:08:49,445 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:08:49,445 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:08:49,445 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:08:49,922 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:08:49,923 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:08:49,923 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:08:49,923 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:08:51,485 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:08:51,487 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:08:51,487 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:08:51,487 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:08:51,531 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1717 字, campus_proxy)
+2026-03-22 14:08:51,542 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:08:51,544 [WARNING] core.fetcher:   Unpaywall OA 链接获取失败: https://doi.org/10.1063/5.0317585
+2026-03-22 14:08:52,113 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1871 字, campus_proxy)
+2026-03-22 14:08:53,738 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (1298 字, campus_proxy)
+2026-03-22 14:08:53,769 [INFO] fetchers.html_fetcher:   HTML 全文提取成功 (2921 字, campus_proxy)
+2026-03-22 14:08:54,441 [INFO] core.fetcher:   Unpaywall 找到 OA 链接: https://doi.org/10.1103/v5kf-svcz
+2026-03-22 14:09:11,611 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:11,612 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:11,612 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:11,612 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:12,948 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:12,948 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:12,948 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:12,948 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:13,640 [INFO] core.fetcher:   Unpaywall 找到 OA 链接: https://doi.org/10.1103/mlh4-htxv
+2026-03-22 14:09:13,846 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:13,846 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:13,846 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:13,846 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:15,819 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:15,819 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:15,819 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:15,819 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:16,336 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:16,337 [WARNING] core.fetcher:   Unpaywall OA 链接获取失败: https://doi.org/10.1103/v5kf-svcz
+2026-03-22 14:09:33,821 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:33,822 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:33,822 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:33,822 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:35,062 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:35,063 [WARNING] core.fetcher:   Unpaywall OA 链接获取失败: https://doi.org/10.1103/mlh4-htxv
+2026-03-22 14:09:37,920 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:37,921 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:37,921 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:37,921 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:56,386 [WARNING] fetchers.html_fetcher:   HTML 请求失败: ALL_TIERS_FAILED
+2026-03-22 14:09:56,387 [WARNING] core.fetcher:   HTML 请求失败 (ALL_TIERS_FAILED)，尝试浏览器渲染...
+2026-03-22 14:09:56,387 [INFO] core.fetcher:   浏览器渲染已禁用（use_browser=false），跳过
+2026-03-22 14:09:56,387 [WARNING] core.fetcher:   全文获取失败 (ALL_TIERS_FAILED)，将使用摘要。
+2026-03-22 14:09:56,388 [INFO] main:   [1/22] 读取全文: Borane carbene or not? A theoretical verification of Le...
+2026-03-22 14:09:56,388 [INFO] main:     ✓ 全文 2444 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,388 [INFO] main:   [2/22] 读取全文: Comparative Assessment of Composition-and Structure-Bas...
+2026-03-22 14:09:56,388 [INFO] main:     ✓ 全文 1958 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,388 [INFO] main:   [3/22] 读取全文: Half-Heusler compounds; Se alloying...
+2026-03-22 14:09:56,388 [INFO] main:     ✓ 全文 1318 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,388 [INFO] main:   [4/22] 读取全文: Unveiling the potential of cobalt-based half-Heusler al...
+2026-03-22 14:09:56,388 [INFO] main:     ✓ 全文 1867 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [5/22] 读取全文: A Combined First-Principles and Machine Learning Study ...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 2392 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [6/22] 读取全文: Engineering Copper Surface Microstructures for Dramatic...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 1813 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [7/22] 读取全文: A DFT study of B-doped graphene as a metal-anchor: effe...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 1633 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [8/22] 读取全文: Molecular insight on ultra-confined ionic transport in ...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (1458 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [9/22] 读取全文: Coarse-grained torsional potential of polypeptide backb...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (1447 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [10/22] 读取全文: Aggregation of polyampholytes: Influence of salt concen...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (1679 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [11/22] 读取全文: Mechanical and electrical anharmonicity in the infrared...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (1506 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [12/22] 读取全文: Accurate and robust analysis of molecular kinetics with...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (916 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [13/22] 读取全文: New range-separated screened and full-range hybrid func...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (898 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [14/22] 读取全文: Engineering atomically dispersed Fe sites into TiO2 for...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 1717 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [15/22] 读取全文: Discovery of two new Cu-Sn chalco-halides for potential...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 1871 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [16/22] 读取全文: Machine learning-guided screening of phase-stable high-...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 2921 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [17/22] 读取全文: Water self-dissociation in slit pores displays non-mono...
+2026-03-22 14:09:56,389 [INFO] main:     ✓ 全文 1298 字 [BestFormat.HTML_FULLTEXT, campus_proxy/proxy]
+2026-03-22 14:09:56,389 [INFO] main:   [18/22] 读取全文: Role of arsenic speciation and aqueous environment in a...
+2026-03-22 14:09:56,389 [INFO] main:     ⚠ 保持摘要 (150 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,389 [INFO] main:   [19/22] 读取全文: Two-stage ferroelastic transition of stishovite due to ...
+2026-03-22 14:09:56,390 [INFO] main:     ⚠ 保持摘要 (510 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,390 [INFO] main:   [20/22] 读取全文: High-pressure formation and characterization of a boron...
+2026-03-22 14:09:56,390 [INFO] main:     ⚠ 保持摘要 (592 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,390 [INFO] main:   [21/22] 读取全文: Unlocking doping effects on altermagnetism in MnTe: Eme...
+2026-03-22 14:09:56,390 [INFO] main:     ⚠ 保持摘要 (474 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,390 [INFO] main:   [22/22] 读取全文: Scalable learning of macroscopic stochastic dynamics...
+2026-03-22 14:09:56,390 [INFO] main:     ⚠ 保持摘要 (919 字) [status=FetchStatus.HTML_FETCH_FAIL]
+2026-03-22 14:09:56,390 [INFO] core.request_manager: 请求统计: 总计=25, 成功=11 (44.0%), Tier2回退=0, Tier3回退=0, Tier4回退=0, 失败=14
+2026-03-22 14:09:56,390 [INFO] main: Step 5: LLM 深度解读
+2026-03-22 14:09:56,390 [INFO] main:   全文解读: 11 篇，仅摘要(跳过解读): 11 篇
+2026-03-22 14:09:56,390 [INFO] main:   [1/22] 解读(全文): Borane carbene or not? A theoretical verification of Le...
+2026-03-22 14:09:56,391 [INFO] main:   [2/22] 解读(全文): Comparative Assessment of Composition-and Structure-Bas...
+2026-03-22 14:09:56,392 [INFO] main:   [3/22] 解读(全文): Half-Heusler compounds; Se alloying...
+2026-03-22 14:09:56,876 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:09:56,967 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:09:57,170 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:11:49,145 [INFO] main:   [4/22] 解读(全文): Unveiling the potential of cobalt-based half-Heusler al...
+2026-03-22 14:11:49,479 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:11:52,838 [INFO] main:   [5/22] 解读(全文): A Combined First-Principles and Machine Learning Study ...
+2026-03-22 14:11:53,162 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:11:57,883 [INFO] main:   [6/22] 解读(全文): Engineering Copper Surface Microstructures for Dramatic...
+2026-03-22 14:11:58,220 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:13:28,765 [INFO] main:   [7/22] 解读(全文): A DFT study of B-doped graphene as a metal-anchor: effe...
+2026-03-22 14:13:29,092 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:13:43,482 [INFO] main:   [8/22] 跳过解读(仅摘要): Molecular insight on ultra-confined ionic transport in ...
+2026-03-22 14:13:43,482 [INFO] main:   [9/22] 跳过解读(仅摘要): Coarse-grained torsional potential of polypeptide backb...
+2026-03-22 14:13:43,482 [INFO] main:   [10/22] 跳过解读(仅摘要): Aggregation of polyampholytes: Influence of salt concen...
+2026-03-22 14:13:43,482 [INFO] main:   [11/22] 跳过解读(仅摘要): Mechanical and electrical anharmonicity in the infrared...
+2026-03-22 14:13:43,482 [INFO] main:   [12/22] 跳过解读(仅摘要): Accurate and robust analysis of molecular kinetics with...
+2026-03-22 14:13:43,482 [INFO] main:   [13/22] 跳过解读(仅摘要): New range-separated screened and full-range hybrid func...
+2026-03-22 14:13:43,482 [INFO] main:   [14/22] 解读(全文): Engineering atomically dispersed Fe sites into TiO2 for...
+2026-03-22 14:13:43,817 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:13:48,152 [INFO] main:   [15/22] 解读(全文): Discovery of two new Cu-Sn chalco-halides for potential...
+2026-03-22 14:13:48,518 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:15:16,495 [INFO] main:   [16/22] 解读(全文): Machine learning-guided screening of phase-stable high-...
+2026-03-22 14:15:16,565 [INFO] main:   [17/22] 解读(全文): Water self-dissociation in slit pores displays non-mono...
+2026-03-22 14:15:16,827 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:15:16,972 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-22 14:15:23,483 [INFO] main:   [18/22] 跳过解读(仅摘要): Role of arsenic speciation and aqueous environment in a...
+2026-03-22 14:15:23,483 [INFO] main:   [19/22] 跳过解读(仅摘要): Two-stage ferroelastic transition of stishovite due to ...
+2026-03-22 14:15:23,483 [INFO] main:   [20/22] 跳过解读(仅摘要): High-pressure formation and characterization of a boron...
+2026-03-22 14:15:23,483 [INFO] main:   [21/22] 跳过解读(仅摘要): Unlocking doping effects on altermagnetism in MnTe: Eme...
+2026-03-22 14:15:23,483 [INFO] main:   [22/22] 跳过解读(仅摘要): Scalable learning of macroscopic stochastic dynamics...
+2026-03-22 14:17:23,655 [INFO] main: Step 6: 保存数据库记录
+2026-03-22 14:17:31,589 [INFO] main: Step 7: 生成报告
+2026-03-22 14:17:31,889 [INFO] core.notifier: Markdown 报告已保存: data/output/2026-03-22.md
+2026-03-22 14:17:31,960 [INFO] core.notifier: HTML 报告已保存: data/output/2026-03-22.html
+2026-03-22 14:17:33,880 [INFO] core.notifier: 邮件推送成功 (格式: html)
+2026-03-22 14:17:33,880 [INFO] core.notifier: 推送渠道状态 — email: ✓ 成功
+2026-03-22 14:17:34,084 [INFO] main: ========== 完成！报告: data/output/2026-03-22.md ==========
+2026-03-22 14:17:34,085 [INFO] main:   抓取: 409 → 去重: 135 → 相关: 22

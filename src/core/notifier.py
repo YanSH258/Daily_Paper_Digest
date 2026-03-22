@@ -5,6 +5,7 @@ notifier.py - 输出与推送模块
   2. 🔬 相关文章深度解读（仅相关文章）
 支持：Markdown 文件 / HTML 文件 / 邮件推送 / 飞书 Webhook
 """
+import re
 import smtplib
 import logging
 import requests
@@ -13,11 +14,12 @@ from datetime import datetime
 from collections import defaultdict
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 # ── 关键词 → 研究子方向映射（用于自动分类）─────────────────────
-TOPIC_CLASSIFIER = [
+TOPIC_CLASSIFIER: List[tuple] = [
     ("机器学习势函数 / MLIP",   ["machine learning potential", "machine learning force field",
                                  "neural network potential", "mlip", "deepmd", "dp-md",
                                  "gpumd", "nequip", "mace", "allegro", "schnet",
@@ -43,83 +45,161 @@ TOPIC_CLASSIFIER = [
     ("其他",                     []),  # 兜底分类
 ]
 
-def classify_article(article: dict) -> str:
+
+def _build_kw_pattern(kw: str) -> re.Pattern:
+    """
+    为单个关键词构建正则模式。
+    含连字符（dp-md、first-principles）或空格（2d material）的关键词，
+    在连字符/空格两侧不能用 \\b（因为 \\b 只识别 \\w/\\W 边界），
+    需要在整体前后加边界断言。
+    策略：
+      - 整个关键词首字符前加 (?<![\\w])  （或直接 \\b 当首字符是字母数字时）
+      - 整个关键词尾字符后加 (?![\\w])
+    这样可以正确处理含连字符和空格的情况。
+    """
+    escaped = re.escape(kw)  # 连字符、点等均被转义
+    # 用 lookahead/lookbehind 替代 \b，更稳健地处理非纯字母边界
+    pattern = r'(?<![^\W_])' + escaped + r'(?![^\W_])'
+    # 更简洁的方案：在词边界用 (?<!\w) / (?!\w)
+    pattern = r'(?<!\w)' + escaped + r'(?!\w)'
+    return re.compile(pattern, re.IGNORECASE)
+
+
+# 模块加载时预编译所有关键词的正则模式
+# 结构：List[ (topic_name, List[re.Pattern]) ]
+_TOPIC_PATTERNS: List[tuple] = [
+    (topic_name, [_build_kw_pattern(kw) for kw in keywords])
+    for topic_name, keywords in TOPIC_CLASSIFIER
+]
+
+
+def classify_article(article: Dict[str, Any]) -> str:
     """根据标题和摘要判断文章属于哪个子方向"""
     text = (article.get("title", "") + " " + article.get("abstract", "")).lower()
-    for topic_name, keywords in TOPIC_CLASSIFIER[:-1]:  # 不含"其他"
-        if any(kw in text for kw in keywords):
+    for topic_name, patterns in _TOPIC_PATTERNS[:-1]:  # 不含"其他"
+        if any(pat.search(text) for pat in patterns):
             return topic_name
     return "其他"
 
+
+# 邮件必要配置字段
+REQUIRED_EMAIL_KEYS: List[str] = ['smtp_server', 'smtp_port', 'username', 'password', 'recipients']
+
+
 class Notifier:
-    def __init__(self, config: dict):
+    def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.output_cfg = config.get("output", {})
-        self.output_dir = Path(self.output_cfg.get("output_dir", "output"))
+        # ★ 默认输出目录改为 data/output
+        self.output_dir = Path(self.output_cfg.get("output_dir", "data/output"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # 读取需要的格式列表，默认只生成 markdown
-        self.formats = self.output_cfg.get("formats", ["markdown"])
+        self.formats: List[str] = self.output_cfg.get("formats", ["markdown"])
 
     # ──────────────────────────────────────────────
     # 主入口
     # ──────────────────────────────────────────────
 
-    def notify(self, relevant_articles: list, all_articles: list = None,
-               date_str: str = None) -> str:
+    def notify(self, relevant_articles: List[Dict[str, Any]],
+               all_articles: Optional[List[Dict[str, Any]]] = None,
+               date_str: Optional[str] = None) -> str:
         """
         生成今日报告并推送
         """
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
         all_articles = all_articles or relevant_articles
 
-        # 1. 构建 Markdown 内容（基础内容）
-        md_content = self._build_markdown(relevant_articles, all_articles, date_str)
+        # R8: 预计算所有文章的分类，避免重复调用 classify_article
+        article_topics: Dict[int, str] = {
+            id(a): classify_article(a) for a in all_articles
+        }
+        # relevant 中可能有不在 all_articles 里的文章，一并覆盖
+        for a in relevant_articles:
+            if id(a) not in article_topics:
+                article_topics[id(a)] = classify_article(a)
+
+        # 1. 构建 Markdown 内容
+        md_content = self._build_markdown(relevant_articles, all_articles, date_str, article_topics)
         md_path = self.output_dir / f"{date_str}.md"
-        
-        # 2. 根据配置决定保存哪些文件格式
+
+        # 2. 保存 Markdown
         if "markdown" in self.formats:
             md_path.write_text(md_content, encoding="utf-8")
             logger.info(f"Markdown 报告已保存: {md_path}")
-            
+
+        # 3. 生成 HTML（无论 formats 是否包含 html，邮件发送时都需要）
+        html_content = self._build_html(md_content, date_str)
+        html_ok = not html_content.startswith("<h1>错误</h1>")
+
         if "html" in self.formats:
-            html_content = self._build_html(md_content, date_str)
             html_path = self.output_dir / f"{date_str}.html"
             html_path.write_text(html_content, encoding="utf-8")
             logger.info(f"HTML 报告已保存: {html_path}")
 
-        # 3. 各种网络推送
-        email_cfg = self.output_cfg.get("email", {})
-        if email_cfg.get("enabled", False):
-            # 邮件发送优先使用 HTML 格式，如果没有则发普通文本
-            if "html" in self.formats:
-                self._send_email(html_content, date_str, email_cfg, is_html=True)
-            else:
-                self._send_email(md_content, date_str, email_cfg, is_html=False)
+        # 推送状态汇总
+        push_results: Dict[str, Optional[bool]] = {}
 
+        # 4. 邮件推送
+        email_cfg = self.output_cfg.get("email", {})
+        fail_on_error: bool = self.output_cfg.get("fail_on_push_error", False)
+        if email_cfg.get("enabled", False):
+            if not html_ok:
+                logger.warning("HTML 生成失败，邮件将降级为纯文本发送")
+                send_content = md_content
+                send_as_html = False
+            else:
+                send_content = html_content
+                send_as_html = True
+            try:
+                self._send_email(send_content, date_str, email_cfg, is_html=send_as_html)
+                push_results["email"] = True
+            except Exception:
+                push_results["email"] = False
+                if fail_on_error:
+                    raise
+
+        # 5. 飞书推送
         feishu_cfg = self.output_cfg.get("feishu", {})
         if feishu_cfg.get("enabled", False):
-            self._send_feishu(relevant_articles, all_articles, date_str, feishu_cfg)
+            try:
+                self._send_feishu(relevant_articles, all_articles, date_str, feishu_cfg, article_topics)
+                push_results["feishu"] = True
+            except Exception:
+                push_results["feishu"] = False
+                if fail_on_error:
+                    raise
+
+        # R6: 总结日志
+        if push_results:
+            summary_parts = []
+            for channel, success in push_results.items():
+                status = "✓ 成功" if success else "✗ 失败"
+                summary_parts.append(f"{channel}: {status}")
+            logger.info(f"推送渠道状态 — {' | '.join(summary_parts)}")
 
         return str(md_path)
 
     # ──────────────────────────────────────────────
-    # HTML 构建逻辑 (新加入)
+    # HTML 构建
     # ──────────────────────────────────────────────
+
     def _build_html(self, md_content: str, date_str: str) -> str:
         """将 Markdown 转换为带排版的 HTML"""
         try:
             import markdown
         except ImportError:
-            logger.error("未安装 markdown 库！无法生成 HTML。请在终端运行: pip install markdown")
-            return f"<h1>错误</h1><p>请安装 markdown 库：pip install markdown</p>"
+            # R7: 功能降级用 warning，非 error
+            logger.warning("未安装 markdown 库，HTML 生成已降级。请运行: pip install markdown")
+            return (
+                "<h1>错误</h1>"
+                "<p>markdown 库未安装，无法生成 HTML 格式报告。"
+                "请运行 <code>pip install markdown</code> 后重试。</p>"
+            )
 
-        # 转换 markdown，开启表格(tables)和代码块(fenced_code)扩展
         html_body = markdown.markdown(
-            md_content, 
+            md_content,
             extensions=['tables', 'fenced_code', 'nl2br']
         )
 
-        # 嵌入一个轻量、美观的 CSS 样式
         html_template = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -181,12 +261,14 @@ class Notifier:
 """
         return html_template
 
-
     # ──────────────────────────────────────────────
     # Markdown 构建
     # ──────────────────────────────────────────────
 
-    def _build_markdown(self, relevant: list, all_articles: list, date_str: str) -> str:
+    def _build_markdown(self, relevant: List[Dict[str, Any]],
+                        all_articles: List[Dict[str, Any]],
+                        date_str: str,
+                        article_topics: Optional[Dict[int, str]] = None) -> str:
         topics = self.config.get("research_topics", [])
         topics_str = "、".join(topics)
 
@@ -202,16 +284,24 @@ class Notifier:
             "",
         ]
 
-        lines += self._build_summary_table(all_articles, date_str)
-        lines += self._build_deep_analysis(relevant)
+        lines += self._build_summary_table(all_articles, date_str, article_topics)
+        lines += self._build_deep_analysis(relevant, article_topics)
 
         return "\n".join(lines)
 
     # ── Part 1: 统计总览表 ──────────────────────────
 
-    def _build_summary_table(self, all_articles: list, date_str: str) -> list:
+    def _build_summary_table(self, all_articles: List[Dict[str, Any]],
+                              date_str: str,
+                              article_topics: Optional[Dict[int, str]] = None) -> List[str]:
         if not all_articles:
             return ["## 📊 今日文献总览\n\n今日无新文章。\n\n---\n"]
+
+        # R8: 使用预计算的分类，fallback 到实时计算
+        def get_topic(a: Dict[str, Any]) -> str:
+            if article_topics is not None:
+                return article_topics.get(id(a), classify_article(a))
+            return classify_article(a)
 
         lines = [
             "## 📊 今日文献总览",
@@ -220,7 +310,7 @@ class Notifier:
             "",
         ]
 
-        by_journal = defaultdict(list)
+        by_journal: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for a in all_articles:
             by_journal[a.get("journal", "Unknown")].append(a)
 
@@ -231,10 +321,13 @@ class Notifier:
             "|------|--------|----------|------------|",
         ]
         for journal, arts in sorted(by_journal.items(), key=lambda x: -len(x[1])):
-            relevant_count = sum(1 for a in arts if a.get("relevance", 0) >= self.config.get("relevance_threshold", 5))
-            topic_counter = defaultdict(int)
+            relevant_count = sum(
+                1 for a in arts
+                if a.get("relevance", 0) >= self.config.get("relevance_threshold", 5)
+            )
+            topic_counter: Dict[str, int] = defaultdict(int)
             for a in arts:
-                topic_counter[classify_article(a)] += 1
+                topic_counter[get_topic(a)] += 1
             top_topics = sorted(topic_counter.items(), key=lambda x: -x[1])[:3]
             topics_str = "、".join(f"{t}({n})" for t, n in top_topics)
             rel_str = f"**{relevant_count}**" if relevant_count > 0 else "0"
@@ -242,9 +335,9 @@ class Notifier:
 
         lines.append("")
 
-        by_topic = defaultdict(list)
+        by_topic: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for a in all_articles:
-            by_topic[classify_article(a)].append(a)
+            by_topic[get_topic(a)].append(a)
 
         lines += [
             "### 按研究方向分类",
@@ -260,7 +353,10 @@ class Notifier:
             sorted_topics.append(("其他", by_topic["其他"]))
 
         for topic_name, arts in sorted_topics:
-            rel_count = sum(1 for a in arts if a.get("relevance", 0) >= self.config.get("relevance_threshold", 5))
+            rel_count = sum(
+                1 for a in arts
+                if a.get("relevance", 0) >= self.config.get("relevance_threshold", 5)
+            )
             best = max(arts, key=lambda a: a.get("relevance", 0))
             title_short = best.get("title", "")[:45] + ("…" if len(best.get("title", "")) > 45 else "")
             rel_str = f"**{rel_count}**" if rel_count > 0 else "0"
@@ -279,9 +375,10 @@ class Notifier:
         for i, a in enumerate(sorted_all, 1):
             title = a.get("title", "")[:50] + ("…" if len(a.get("title", "")) > 50 else "")
             journal = a.get("journal", "")
-            topic = classify_article(a)
+            topic = get_topic(a)
             score = a.get("relevance", 0)
-            stars = self._score_to_stars(score) if score > 0 else "—"
+            # R4: 统一使用 _score_to_stars，无需调用方判断 score > 0
+            stars = self._score_to_stars(score)
             url = a.get("url", "")
             link = f"[🔗]({url})" if url else "—"
             lines.append(f"| {i} | {journal} | {title} | {topic} | {stars} | {link} |")
@@ -291,7 +388,8 @@ class Notifier:
 
     # ── Part 2: 相关文章深度解读 ────────────────────
 
-    def _build_deep_analysis(self, relevant: list) -> list:
+    def _build_deep_analysis(self, relevant: List[Dict[str, Any]],
+                              article_topics: Optional[Dict[int, str]] = None) -> List[str]:
         if not relevant:
             return [
                 "## 🔬 相关文章深度解读",
@@ -302,10 +400,14 @@ class Notifier:
 
         sorted_relevant = sorted(relevant, key=lambda a: -a.get("relevance", 0))
 
+        analyzed = [a for a in sorted_relevant if a.get("analysis") is not None]
+        abstract_only = [a for a in sorted_relevant if a.get("analysis") is None]
+
         lines = [
             "## 🔬 相关文章深度解读",
             "",
-            f"> 以下 {len(sorted_relevant)} 篇文章与研究方向高度相关，已由 AI 完成结构化解读。",
+            f"> 共 {len(sorted_relevant)} 篇相关文章：**{len(analyzed)} 篇**已完成 AI 深度解读，"
+            f"**{len(abstract_only)} 篇**仅获取到摘要（已收录，不作解读）。",
             "",
             "### 目录",
             ""
@@ -316,16 +418,18 @@ class Notifier:
             stars = self._score_to_stars(score)
             title = a.get("title", "无标题")[:60]
             journal = a.get("journal", "")
-            lines.append(f"{i}. {stars} **[{journal}]** {title}")
-            
+            tag = "" if a.get("analysis") is not None else " *(仅摘要)*"
+            lines.append(f"{i}. {stars} **[{journal}]** {title}{tag}")
+
         lines += ["", "---", ""]
 
         for i, a in enumerate(sorted_relevant, 1):
-            lines += self._article_block(i, a)
+            lines += self._article_block(i, a, article_topics)
 
         return lines
 
-    def _article_block(self, idx: int, article: dict) -> list:
+    def _article_block(self, idx: int, article: Dict[str, Any],
+                       article_topics: Optional[Dict[int, str]] = None) -> List[str]:
         title    = article.get("title", "无标题")
         journal  = article.get("journal", "")
         authors  = article.get("authors", [])
@@ -333,8 +437,12 @@ class Notifier:
         doi      = article.get("doi", "")
         pub_date = article.get("pub_date", "")
         score    = article.get("relevance", 0)
-        topic    = classify_article(article)
-        analysis = article.get("analysis", "暂无解读")
+        # R8: 使用预计算分类
+        if article_topics is not None:
+            topic = article_topics.get(id(article), classify_article(article))
+        else:
+            topic = classify_article(article)
+        analysis = article.get("analysis")  # 可能为 None
 
         authors_str = ", ".join(authors[:5])
         if len(authors) > 5:
@@ -345,8 +453,8 @@ class Notifier:
         lines = [
             f"### {idx}. {title}",
             "",
-            f"| 字段 | 内容 |",
-            f"|------|------|",
+            "| 字段 | 内容 |",
+            "|------|------|",
             f"| 期刊 | **{journal}** |",
             f"| 方向分类 | {topic} |",
             f"| 作者 | {authors_str or '—'} |",
@@ -358,57 +466,93 @@ class Notifier:
         if url:
             lines.append(f"| 链接 | [阅读原文]({url}) |")
 
-        lines += [
-            "",
-            "#### 🤖 AI 解读",
-            "",
-            analysis,
-            "",
-            "---",
-            "",
-        ]
+        lines += ["", "#### 🤖 AI 解读", ""]
+
+        if analysis is not None:
+            lines.append(analysis)
+        else:
+            abstract = article.get("abstract", "").strip()
+            lines.append("> 📄 **仅获取到摘要，跳过 AI 深度解读。**")
+            if abstract:
+                lines += ["", "> **摘要**：", "", abstract]
+
+        lines += ["", "---", ""]
         return lines
 
     @staticmethod
     def _score_to_stars(score: float) -> str:
+        """将相关性评分转为星级字符串；score <= 0 时返回 '—'"""
         score = float(score)
-        if score >= 8: return "⭐⭐⭐"
-        elif score >= 6: return "⭐⭐"
-        elif score >= 4: return "⭐"
+        if score <= 0:
+            return "—"
+        if score >= 8:
+            return "⭐⭐⭐"
+        elif score >= 6:
+            return "⭐⭐"
+        elif score >= 4:
+            return "⭐"
         return "○"
 
     # ──────────────────────────────────────────────
     # 邮件推送
     # ──────────────────────────────────────────────
 
-    def _send_email(self, content: str, date_str: str, cfg: dict, is_html: bool = False):
+    def _send_email(self, content: str, date_str: str,
+                    cfg: Dict[str, Any], is_html: bool = False) -> None:
+        # R1: 邮件配置校验
+        missing = [key for key in REQUIRED_EMAIL_KEYS if not cfg.get(key)]
+        if missing:
+            msg = f"邮件配置缺少必要字段: {', '.join(missing)}"
+            logger.error(msg)
+            raise ValueError(msg)
+
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"📚 化学文献日报 {date_str}"
-            msg["From"]    = cfg["username"]
-            msg["To"]      = ", ".join(cfg["recipients"])
-            
-            # 根据传入的内容类型设置邮件格式
+            msg_obj = MIMEMultipart("alternative")
+            msg_obj["Subject"] = f"📚 化学文献日报 {date_str}"
+            msg_obj["From"]    = cfg["username"]
+            msg_obj["To"]      = ", ".join(cfg["recipients"])
+
             mime_type = "html" if is_html else "plain"
-            msg.attach(MIMEText(content, mime_type, "utf-8"))
+            msg_obj.attach(MIMEText(content, mime_type, "utf-8"))
 
             with smtplib.SMTP_SSL(cfg["smtp_server"], cfg["smtp_port"]) as server:
                 server.login(cfg["username"], cfg["password"])
-                server.sendmail(cfg["username"], cfg["recipients"], msg.as_string())
+                server.sendmail(cfg["username"], cfg["recipients"], msg_obj.as_string())
             logger.info(f"邮件推送成功 (格式: {mime_type})")
+        except ValueError:
+            # 配置校验异常直接向上传递，不重复记录
+            raise
         except Exception as e:
-            logger.error(f"邮件推送失败: {e}")
+            # R6: 使用 logger.exception 输出完整 traceback
+            logger.exception(f"邮件推送失败: {e}")
+            raise
 
     # ──────────────────────────────────────────────
     # 飞书 Webhook
     # ──────────────────────────────────────────────
 
-    def _send_feishu(self, relevant: list, all_articles: list,
-                     date_str: str, cfg: dict):
+    def _send_feishu(self, relevant: List[Dict[str, Any]],
+                     all_articles: List[Dict[str, Any]],
+                     date_str: str,
+                     cfg: Dict[str, Any],
+                     article_topics: Optional[Dict[int, str]] = None) -> None:
+        # R2: 飞书配置校验
+        webhook_url = cfg.get("webhook_url", "").strip()
+        if not webhook_url:
+            msg = "飞书配置缺少必要字段: webhook_url"
+            logger.error(msg)
+            raise ValueError(msg)
+
         try:
-            by_topic = defaultdict(int)
+            # R8: 使用预计算分类
+            def get_topic(a: Dict[str, Any]) -> str:
+                if article_topics is not None:
+                    return article_topics.get(id(a), classify_article(a))
+                return classify_article(a)
+
+            by_topic: Dict[str, int] = defaultdict(int)
             for a in all_articles:
-                by_topic[classify_article(a)] += 1
+                by_topic[get_topic(a)] += 1
 
             topic_lines = "\n".join(
                 f"  • {t}: {n}篇"
@@ -438,8 +582,12 @@ class Notifier:
                 text += "（今日无高相关文章）"
 
             payload = {"msg_type": "text", "content": {"text": text}}
-            resp = requests.post(cfg["webhook_url"], json=payload, timeout=10)
+            resp = requests.post(webhook_url, json=payload, timeout=10)
             resp.raise_for_status()
             logger.info("飞书推送成功")
+        except ValueError:
+            raise
         except Exception as e:
-            logger.error(f"飞书推送失败: {e}")
+            # R6: 使用 logger.exception 输出完整 traceback
+            logger.exception(f"飞书推送失败: {e}")
+            raise

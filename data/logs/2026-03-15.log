@@ -1,0 +1,57 @@
+2026-03-15 08:00:02,412 [INFO] main: ========== 开始运行: 2026-03-15 ==========
+2026-03-15 08:00:02,413 [INFO] core.db: 数据库初始化完成: data/db/chem_daily.db
+2026-03-15 08:00:02,435 [INFO] core.analyzer: LLM 已初始化: provider=deepseek, model=deepseek-chat
+2026-03-15 08:00:02,435 [INFO] main: Step 1: 抓取期刊 RSS
+2026-03-15 08:00:02,435 [INFO] core.fetcher: 正在抓取: J. Chem. Theory Comput. (JCTC)
+2026-03-15 08:00:05,012 [INFO] core.fetcher: 正在抓取: J. Comput. Chem.
+2026-03-15 08:00:08,159 [INFO] core.fetcher: 正在抓取: Theor. Chem. Acc.
+2026-03-15 08:00:12,517 [INFO] core.fetcher: 正在抓取: WIREs Comput. Mol. Sci.
+2026-03-15 08:00:15,313 [INFO] core.fetcher: 正在抓取: J. Chem. Inf. Model. (JCIM)
+2026-03-15 08:00:17,782 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. A
+2026-03-15 08:00:20,223 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. C
+2026-03-15 08:00:22,741 [INFO] core.fetcher: 正在抓取: Phys. Chem. Chem. Phys. (PCCP)
+2026-03-15 08:00:40,755 [INFO] core.fetcher: 正在抓取: Chem. Phys. Lett.
+2026-03-15 08:00:43,144 [INFO] core.fetcher: 正在抓取: J. Chem. Phys. (JCP)
+2026-03-15 08:00:46,539 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. Letters (JPCL)
+2026-03-15 08:00:49,038 [INFO] core.fetcher: 正在抓取: J. Phys. Chem. B
+2026-03-15 08:00:51,518 [INFO] core.fetcher: 正在抓取: ACS Catalysis
+2026-03-15 08:00:54,071 [INFO] core.fetcher: 正在抓取: J. Catalysis
+2026-03-15 08:00:56,445 [INFO] core.fetcher: 正在抓取: Applied Catalysis B: Env.
+2026-03-15 08:00:58,793 [INFO] core.fetcher: 正在抓取: Catalysis Sci. & Tech.
+2026-03-15 08:01:16,293 [INFO] core.fetcher: 正在抓取: ChemCatChem
+2026-03-15 08:01:18,854 [INFO] core.fetcher: 正在抓取: Chemistry of Materials
+2026-03-15 08:01:21,338 [INFO] core.fetcher: 正在抓取: J. Mater. Chem. A
+2026-03-15 08:01:39,852 [INFO] core.fetcher: 正在抓取: JACS
+2026-03-15 08:01:42,516 [INFO] core.fetcher: 正在抓取: Angew. Chem. Int. Ed.
+2026-03-15 08:01:45,265 [INFO] core.fetcher: 正在抓取: Chemical Science
+2026-03-15 08:02:03,056 [INFO] core.fetcher: 正在抓取: Nature Chemistry
+2026-03-15 08:02:05,378 [INFO] core.fetcher: 正在抓取: npj Comput. Materials
+2026-03-15 08:02:07,652 [INFO] core.fetcher: 正在抓取: Comput. Mater. Sci.
+2026-03-15 08:02:09,975 [INFO] core.fetcher: 正在抓取: Nature Comput. Sci.
+2026-03-15 08:02:12,256 [INFO] core.fetcher: 正在抓取: Machine Learning: Sci. Tech.
+2026-03-15 08:02:16,046 [INFO] core.fetcher: 正在抓取: Phys. Rev. Letters (PRL)
+2026-03-15 08:02:19,184 [INFO] core.fetcher: 正在抓取: Phys. Rev. B
+2026-03-15 08:02:21,722 [INFO] core.fetcher: 正在抓取: Phys. Rev. Materials
+2026-03-15 08:02:24,254 [INFO] core.fetcher: 正在抓取: npj Quantum Materials
+2026-03-15 08:02:26,603 [INFO] main:   共抓取: 338 篇原始文章
+2026-03-15 08:02:26,604 [INFO] main: Step 2: 数据库去重
+2026-03-15 08:02:27,000 [INFO] main:   去重后: 2 篇新文章（跳过 336 篇重复）
+2026-03-15 08:02:27,000 [INFO] main: Step 3: LLM 相关性过滤-第一阶段 (阈值=4, 使用摘要)
+2026-03-15 08:02:27,003 [INFO] main:   [1/2] 评分: Highly regio- and stereoselective selenylamidation of alkyne...
+2026-03-15 08:02:27,003 [INFO] main:   [2/2] 评分: On modified Mott’s law (T−14) in the conductivity of Ni45Mn4...
+2026-03-15 08:02:28,902 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-15 08:02:28,932 [INFO] httpx: HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"
+2026-03-15 08:02:31,585 [INFO] main:     ✗ 过滤: Highly regio- and stereoselective selenylamidation of alkyne (score=2.0)
+2026-03-15 08:02:31,585 [INFO] main:     ✗ 过滤: On modified Mott’s law (T−14) in the conductivity of Ni45Mn4 (score=2.0)
+2026-03-15 08:02:31,585 [INFO] main:   初筛通过: 0 篇
+2026-03-15 08:02:31,585 [INFO] main: Step 4: 获取相关文章全文
+2026-03-15 08:02:31,585 [INFO] main:   全文抓取已关闭或无候选文章，跳过。
+2026-03-15 08:02:31,586 [INFO] main: Step 5: LLM 深度解读
+2026-03-15 08:02:31,586 [INFO] main:   全文解读: 0 篇，仅摘要(跳过解读): 0 篇
+2026-03-15 08:02:31,586 [INFO] main: Step 6: 保存数据库记录
+2026-03-15 08:02:31,905 [INFO] main: Step 7: 生成报告
+2026-03-15 08:02:31,905 [INFO] core.notifier: Markdown 报告已保存: data/output/2026-03-15.md
+2026-03-15 08:02:31,950 [INFO] core.notifier: HTML 报告已保存: data/output/2026-03-15.html
+2026-03-15 08:02:32,844 [INFO] core.notifier: 邮件推送成功 (格式: html)
+2026-03-15 08:02:32,924 [INFO] main: ========== 完成！报告: data/output/2026-03-15.md ==========
+2026-03-15 08:02:32,924 [INFO] main:   抓取: 338 → 去重: 2 → 相关: 0
