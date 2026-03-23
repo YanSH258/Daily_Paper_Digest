@@ -13,7 +13,9 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
+from email import encoders
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -149,8 +151,11 @@ class Notifier:
             else:
                 send_content = html_content
                 send_as_html = True
+            # 附加数据库 HTML 文件（如存在）
+            db_html = self.output_dir / "paper_index.html"
+            attachments = [db_html] if db_html.exists() else []
             try:
-                self._send_email(send_content, date_str, email_cfg, is_html=send_as_html)
+                self._send_email(send_content, date_str, email_cfg, is_html=send_as_html, attachments=attachments)
                 push_results["email"] = True
             except Exception:
                 push_results["email"] = False
@@ -498,7 +503,8 @@ class Notifier:
     # ──────────────────────────────────────────────
 
     def _send_email(self, content: str, date_str: str,
-                    cfg: Dict[str, Any], is_html: bool = False) -> None:
+                    cfg: Dict[str, Any], is_html: bool = False,
+                    attachments: Optional[List[Path]] = None) -> None:
         # R1: 邮件配置校验
         missing = [key for key in REQUIRED_EMAIL_KEYS if not cfg.get(key)]
         if missing:
@@ -507,13 +513,29 @@ class Notifier:
             raise ValueError(msg)
 
         try:
-            msg_obj = MIMEMultipart("alternative")
+            msg_obj = MIMEMultipart("mixed")
             msg_obj["Subject"] = f"📚 化学文献日报 {date_str}"
             msg_obj["From"]    = cfg["username"]
             msg_obj["To"]      = ", ".join(cfg["recipients"])
 
             mime_type = "html" if is_html else "plain"
             msg_obj.attach(MIMEText(content, mime_type, "utf-8"))
+
+            # 附加文件
+            for attach_path in (attachments or []):
+                if not attach_path.exists():
+                    logger.warning(f"附件不存在，已跳过: {attach_path}")
+                    continue
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attach_path.read_bytes())
+                encoders.encode_base64(part)
+                part.add_header(
+                    "Content-Disposition",
+                    "attachment",
+                    filename=attach_path.name,
+                )
+                msg_obj.attach(part)
+                logger.info(f"已附加文件: {attach_path.name}")
 
             with smtplib.SMTP_SSL(cfg["smtp_server"], cfg["smtp_port"]) as server:
                 server.login(cfg["username"], cfg["password"])
