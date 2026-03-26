@@ -282,8 +282,18 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
         db.save_article(article)
 
 
-    # ── Step 7: 生成报告并推送 ────────────────────────────────
-    logger.info("Step 7: 生成报告")
+    # ── Step 7: 先更新 HTML 索引（邮件需要附加最新版本）───────
+    logger.info("Step 7: 更新数据库 HTML 索引")
+    try:
+        from utils.stat_db import build_html_index
+        _threshold = config.get("relevance_threshold", 5)
+        with db.get_connection() as conn:
+            build_html_index(conn, _threshold, "data/output/paper_index.html")
+    except Exception as e:
+        logger.warning(f"HTML 索引生成失败: {e}")
+
+    # ── Step 8: 生成报告并推送 ─────────────────────────────────
+    logger.info("Step 8: 生成报告并推送")
     md_path = notifier.notify(
         relevant_articles,
         all_articles=new_articles,
@@ -296,15 +306,6 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
         total_found=len(new_articles),
         total_pushed=len(relevant_articles),
     )
-
-    # 自动更新 HTML 索引 ──────────────────────────────────────
-    try:
-        from utils.stat_db import build_html_index
-        _threshold = config.get("relevance_threshold", 5)
-        with db.get_connection() as conn:
-            build_html_index(conn, _threshold, "data/output/paper_index.html")
-    except Exception as e:
-        logger.warning(f"自动导出失败: {e}")
 
     logger.info(f"========== 完成！报告: {md_path} ==========")
     logger.info(
