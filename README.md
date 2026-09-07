@@ -111,3 +111,31 @@ output:
 
 * **GitHub Actions 部署**：不要将 `config/config.yaml` 提交到公开仓库，应将 API Key 和邮件密码配置在 GitHub Secrets 中。
 * **代理**：如需通过机构代理访问，设置 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量即可。
+
+
+## 🌐 网页端控制台（新增）
+
+支持一个轻量网页端：只读大盘访问、文章检索 API、历史日报 API、手动触发抓取任务（后台运行）。
+
+```bash
+# 启动网页端（默认 8080）
+python src/web_server.py --config config/config.yaml --host 0.0.0.0 --port 8080
+
+# 或通过安装后的命令
+daily-paper-web --config config/config.yaml --port 8080
+```
+
+打开：`http://127.0.0.1:8080/`
+
+主要接口：
+- `GET /paper-index`：在线查看 `data/output/paper_index.html`（只读）
+- `GET /api/articles`：文章列表（支持 q/journal/topic/min_score/analyzed_only）
+- `GET /api/articles/{id}`：单篇详情
+- `GET /api/reports`：历史日报列表
+- `GET /api/status`：任务运行状态与数据库概览
+- `POST /api/run`：手动触发一次任务（mode: default/abstract/fulltext）
+
+可选安全设置：
+- 在 `config.yaml` 中设置 `web.api_token`（或环境变量 `WEB_API_TOKEN`），启用后 `POST /api/run` 需要请求头 `X-API-Token`。
+
+> 说明：网页端任务采用后台线程执行，避免阻塞页面请求。

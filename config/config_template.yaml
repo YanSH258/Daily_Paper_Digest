@@ -253,3 +253,9 @@ performance:
     retry_status_codes: [403, 429, 500, 502, 503, 504]  # 触发重试的状态码
 
 unpaywall_email: "YOUR_EMAIL@163.com" # Unpaywall API 要求提供一个联系邮箱地址，用于监控和联系用户（请替换为你的邮箱）
+
+# ---------- 网页端 ----------
+web:
+  enable_scheduler: false   # 网页端是否启用每日定时调度（按 scheduler.run_time）
+  readonly: false           # 只读模式提示（建议在反向代理层禁用 POST /api/run）
+  api_token: ""            # 可选：配置后，POST /api/run 需在请求头带 X-API-Token
