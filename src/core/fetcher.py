@@ -19,6 +19,7 @@ import concurrent.futures
 import feedparser
 import requests
 import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -50,6 +51,45 @@ DOI_PUBLISHER_MAP = {
     "10.26434": "ChemRxiv",
     "10.48550": "arXiv",
 }
+
+# ── URL 主机名 → 出版商映射（Web 端导入订阅时自动识别）────────
+PUBLISHER_BY_HOST = {
+    "pubs.acs.org": "ACS",
+    "acs.org": "ACS",
+    "onlinelibrary.wiley.com": "Wiley",
+    "wiley.com": "Wiley",
+    "nature.com": "Nature",
+    "link.springer.com": "Springer",
+    "springer.com": "Springer",
+    "sciencedirect.com": "Elsevier",
+    "elsevier.com": "Elsevier",
+    "feeds.rsc.org": "RSC",
+    "pubs.rsc.org": "RSC",
+    "rsc.org": "RSC",
+    "pubs.aip.org": "AIP",
+    "aip.org": "AIP",
+    "feeds.aps.org": "APS",
+    "aps.org": "APS",
+    "iopscience.iop.org": "IOP",
+    "iop.org": "IOP",
+    "mdpi.com": "MDPI",
+    "science.org": "Science",
+    "sciencemag.org": "Science",
+    "arxiv.org": "arXiv",
+    "chemrxiv.org": "ChemRxiv",
+}
+
+
+def detect_publisher_from_url(url: str) -> str:
+    """根据 RSS URL 的主机名识别出版商，无法识别时返回 DEFAULT。"""
+    if not url:
+        return "DEFAULT"
+    host = (urlparse(url).netloc or "").lower()
+    for key, publisher in PUBLISHER_BY_HOST.items():
+        if host == key or host.endswith("." + key):
+            return publisher
+    return "DEFAULT"
+
 
 # ── CSS 选择器（轻量请求用）────────────────────────────────────
 PUBLISHER_SELECTORS = {
@@ -367,6 +407,36 @@ class JournalFetcher:
             time.sleep(self.delay)
         return all_articles
 
+    def test_feed(self, rss_url: str, publisher: str = "DEFAULT") -> dict:
+        """测试某个 RSS 链接是否可抓取（供 Web 端「测试链接」使用）。"""
+        if not rss_url:
+            return {"ok": False, "error": "RSS 链接为空", "count": 0, "sample": []}
+        try:
+            feed = self._fetch_rss(rss_url, publisher)
+        except Exception as e:
+            logger.warning(f"测试 RSS 失败: {rss_url} - {e}")
+            return {"ok": False, "error": f"抓取异常: {e}", "count": 0, "sample": []}
+
+        if not feed or not feed.entries:
+            return {
+                "ok": False,
+                "error": "无法获取 RSS 或没有条目（可能是链接无效或需要登录）",
+                "count": 0,
+                "sample": [],
+            }
+
+        feed_title = getattr(feed.feed, "title", "") or ""
+        samples = [
+            re.sub(r"\s+", " ", BeautifulSoup(entry.get("title", ""), "html.parser").get_text()).strip()[:80]
+            for entry in feed.entries[:5]
+        ]
+        return {
+            "ok": True,
+            "feed_title": feed_title,
+            "count": len(feed.entries),
+            "sample": samples,
+        }
+
     def fetch_fulltext(self, article: dict) -> str:
         return self.fetch_fulltext_with_status(article).text
 
@@ -648,8 +718,14 @@ class JournalFetcher:
 
     def _parse_entry(self, entry, journal_name: str, publisher: str) -> Optional[dict]:
         try:
-            title = re.sub(r'\s+', ' ', BeautifulSoup(
-                entry.get("title", ""), "html.parser").get_text()).strip()
+            raw_title = BeautifulSoup(entry.get("title", ""), "html.parser").get_text()
+            # 清洗 LaTeX 数学符号（例如 APS 期刊的 ${\mathrm{PbZrO}}_{3}$ 等）
+            raw_title = re.sub(r'\$\s*\{\s*\\mathrm\{([^}]+)\}\s*\}\s*(\^|\_)?(\{?[^}$]*\}?)?\s*\$', r'\1\3', raw_title)
+            raw_title = re.sub(r'\$\s*\\mathrm\{([^}]+)\}\s*\$', r'\1', raw_title)
+            raw_title = re.sub(r'\$([^\$]+)\$', lambda m: m.group(1).replace(r'\mathrm{', '').replace('}', '').replace('{', ''), raw_title)
+            raw_title = re.sub(r'\\math[a-z]+\{([^}]+)\}', r'\1', raw_title)
+            raw_title = re.sub(r'[_^]\{([^}]+)\}', r'\1', raw_title)
+            title = re.sub(r'\s+', ' ', raw_title).strip()
             if not title or title.lower() in ("addition/correction", "correction") \
                     or title.startswith("[ASAP]"):
                 return None

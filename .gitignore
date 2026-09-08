@@ -9,6 +9,9 @@ __pycache__/
 venv/
 env/
 
+# Local pip --target deps
+.deps/
+
 # Test artifacts & pytest cache
 .pytest_cache/
 
@@ -24,10 +27,18 @@ data/output/
 # Local databases or other artifacts
 *.db
 data/db/*.db
+data/db/*.db-wal
+data/db/*.db-shm
 
 # Build / dist
 *.egg-info/
 dist/
 config/config.yaml
+config/*.bak*
 
 *.csv
+
+# Logs & temp
+data/logs/
+*.log
+.zcode/

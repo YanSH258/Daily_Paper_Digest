@@ -4,14 +4,15 @@
 # ============================================================
 
 # ---------- LLM 配置 ----------
+# provider 可任意命名（deepseek / qwen / zhipu / siliconflow 等），
+# 只要 llm.<provider> 下配置 api_key + base_url + model（OpenAI 兼容接口）即可
 llm:
-  provider: "deepseek"          # 可选: "deepseek" 或 "qwen"
-  
+  provider: "deepseek"
   deepseek:
     api_key: "填入你的_DEEPSEEK_API_KEY"
     base_url: "https://api.deepseek.com"
-    model: "deepseek-chat"
-    
+    # V4 模型名：deepseek-v4-flash（日常性价比）/ deepseek-v4-pro（更强）
+    model: "deepseek-v4-flash"
   qwen:
     api_key: "填入你的_QWEN_API_KEY"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -20,184 +21,27 @@ llm:
   temperature: 0.3
   max_tokens: 8192
 
+# ---------- 解读分析设置 ----------
+analyzer:
+  # 当未抓取到全文时，是否依然对高相关文章基于摘要进行深度解读 (默认 true)
+  analyze_abstract_only: true
+
 # ---------- 研究方向过滤 ----------
 # 请替换为你自己的研究方向关键词
 research_topics:
-  - "machine learning interatomic potential"
-  - "density functional theory DFT"
-  - "molecular dynamics simulation"
+- "machine learning interatomic potential"
+- "density functional theory DFT"
+- "molecular dynamics simulation"
 
 # 相关性分数阈值（0-10），低于此分数的文章不推送
 relevance_threshold: 4
-
-# ---------- 期刊 RSS 订阅 ----------
-journals:
-  # ── 一、计算化学核心期刊 ──
-  - name: "J. Chem. Theory Comput. (JCTC)"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jctcce"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "J. Comput. Chem."
-    rss: "https://onlinelibrary.wiley.com/feed/1096987x/most-recent"
-    publisher: "Wiley"
-    max_articles: 100
-
-  - name: "Theor. Chem. Acc."
-    rss: "https://link.springer.com/search.rss?facet-journal-id=214&sortOrder=newestFirst"
-    publisher: "Springer"
-    max_articles: 100
-
-  - name: "WIREs Comput. Mol. Sci."
-    rss: "https://onlinelibrary.wiley.com/feed/17590884/most-recent"
-    publisher: "Wiley"
-    max_articles: 100
-
-  - name: "J. Chem. Inf. Model. (JCIM)"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jcisd8"
-    publisher: "ACS"
-    max_articles: 100
-
-  # ── 二、物理化学 / 表面化学 ──
-  - name: "J. Phys. Chem. A"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jpcafh"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "J. Phys. Chem. C"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jpccck"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "Phys. Chem. Chem. Phys. (PCCP)"
-    rss: "https://feeds.rsc.org/rss/cp"
-    publisher: "RSC"
-    max_articles: 100
-
-  - name: "Chem. Phys. Lett."
-    rss: "https://rss.sciencedirect.com/publication/science/00092614"
-    publisher: "Elsevier"
-    max_articles: 100
-
-  - name: "J. Chem. Phys. (JCP)"
-    rss: "https://pubs.aip.org/rss/site_1000043/1000024.xml"
-    publisher: "AIP"
-    max_articles: 100
-
-  - name: "J. Phys. Chem. Letters (JPCL)"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jpclcd"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "J. Phys. Chem. B"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jpcbfk"
-    publisher: "ACS"
-    max_articles: 100
-
-  # ── 三、材料 / 催化 ──
-  - name: "ACS Catalysis"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=accacs"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "J. Catalysis"
-    rss: "https://rss.sciencedirect.com/publication/science/00219517"
-    publisher: "Elsevier"
-    max_articles: 100
-
-  - name: "Applied Catalysis B: Env."
-    rss: "https://rss.sciencedirect.com/publication/science/09263373"
-    publisher: "Elsevier"
-    max_articles: 100
-
-  - name: "Catalysis Sci. & Tech."
-    rss: "https://feeds.rsc.org/rss/cy"
-    publisher: "RSC"
-    max_articles: 100
-
-  - name: "ChemCatChem"
-    rss: "https://onlinelibrary.wiley.com/feed/18673899/most-recent"
-    publisher: "Wiley"
-    max_articles: 100
-
-  - name: "Chemistry of Materials"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=cmatex"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "J. Mater. Chem. A"
-    rss: "https://feeds.rsc.org/rss/ta"
-    publisher: "RSC"
-    max_articles: 100
-
-  # ── 四、综合化学顶刊 ──
-  - name: "JACS"
-    rss: "https://pubs.acs.org/action/showFeed?type=axatoc&feed=rss&jc=jacsat"
-    publisher: "ACS"
-    max_articles: 100
-
-  - name: "Angew. Chem. Int. Ed."
-    rss: "https://onlinelibrary.wiley.com/feed/15213773/most-recent"
-    publisher: "Wiley"
-    max_articles: 100
-
-  - name: "Chemical Science"
-    rss: "https://feeds.rsc.org/rss/sc"
-    publisher: "RSC"
-    max_articles: 100
-
-  - name: "Nature Chemistry"
-    rss: "https://www.nature.com/nchem.rss"
-    publisher: "Nature"
-    max_articles: 100
-
-  #── 五、机器学习势 / MD 重点期刊 ──
-  - name: "npj Comput. Materials"
-    rss: "https://www.nature.com/npjcompumats.rss"
-    publisher: "Nature"
-    max_articles: 100
-
-  - name: "Comput. Mater. Sci."
-    rss: "https://rss.sciencedirect.com/publication/science/09270256"
-    publisher: "Elsevier"
-    max_articles: 100
-
-  - name: "Nature Comput. Sci."
-    rss: "https://www.nature.com/natcomputsci.rss"
-    publisher: "Nature"
-    max_articles: 100
-
-  - name: "Machine Learning: Sci. Tech."
-    rss: "https://iopscience.iop.org/journal/rss/2632-2153"
-    publisher: "IOP"
-    max_articles: 100
-
-  - name: "Phys. Rev. Letters (PRL)"
-    rss: "https://feeds.aps.org/rss/recent/prl.xml"
-    publisher: "APS"
-    max_articles: 100
-
-  - name: "Phys. Rev. B"
-    rss: "https://feeds.aps.org/rss/recent/prb.xml"
-    publisher: "APS"
-    max_articles: 100
-
-  - name: "Phys. Rev. Materials"
-    rss: "https://feeds.aps.org/rss/recent/prmaterials.xml"
-    publisher: "APS"
-    max_articles: 100
-
-  - name: "npj Quantum Materials"
-    rss: "https://www.nature.com/npjquantmats.rss"
-    publisher: "Nature"
-    max_articles: 100
 
 # ---------- 抓取设置 ----------
 fetcher:
   use_fulltext: false  # 不抓全文，直接用摘要分析
   use_browser: false
   max_articles_per_journal: 100   # 每个期刊最多抓取文章数
-  date_filter_days: 3 
+  date_filter_days: 3
   request_timeout: 15            # 请求超时秒数
   retry_times: 3                 # 失败重试次数
   delay_between_requests: 2      # 请求间隔秒数（避免频繁访问）
@@ -206,7 +50,6 @@ fetcher:
 output:
   formats: ["markdown", "html"]
   output_dir: "data/output"
-  
   email:
     enabled: false # 如果需要邮件推送，请改为 true 并填写下方信息
     smtp_server: "smtp.163.com"
@@ -214,8 +57,8 @@ output:
     username: "YOUR_EMAIL@163.com"
     password: "YOUR_AUTH_CODE"
     recipients:
-      - "TARGET_EMAIL@qq.com"
-      
+    - "TARGET_EMAIL@qq.com"
+
   # 飞书 Webhook 推送（可选）
   feishu:
     enabled: false

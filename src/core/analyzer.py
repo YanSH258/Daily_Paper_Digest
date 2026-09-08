@@ -8,7 +8,7 @@ import re
 import json
 import time
 import logging
-from typing import Any, Optional, TypedDict
+from typing import Any, Generator, Optional, TypedDict
 
 import openai
 from openai import OpenAI
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 DEFAULT_TEMPERATURE: float = 0.3
 DEFAULT_MAX_TOKENS: int = 8192
-RELEVANCE_MAX_TOKENS: int = 200
+RELEVANCE_MAX_TOKENS: int = 800
 ANALYSIS_MIN_TOKENS: int = 4096
 ANALYSIS_MAX_TOKENS: int = 8192
 
@@ -42,6 +42,12 @@ CHUNK_BUDGET_CONCLUSION: int = 5000
 # 本模块专用：LLM 重试策略
 LLM_MAX_RETRIES: int = 3
 LLM_RETRY_BASE_DELAY: float = 5.0
+
+# 本模块专用：文献对话
+CHAT_ABSTRACT_MAX_CHARS: int = 3000
+CHAT_ANALYSIS_MAX_CHARS: int = 6000
+CHAT_HISTORY_MESSAGES: int = 12
+CHAT_MAX_TOKENS: int = 4096
 
 
 # ──────────────────────────────────────────────
@@ -89,7 +95,7 @@ class LLMAnalyzer:
             api_key=provider_cfg["api_key"],
             base_url=provider_cfg["base_url"],
         )
-        self.model: str = provider_cfg.get("model", "deepseek-chat")
+        self.model: str = provider_cfg.get("model", "deepseek-v4-flash")
         logger.info(
             "[LLM_INIT] LLM 已初始化: provider=%s, model=%s",
             self.provider,
@@ -368,6 +374,117 @@ class LLMAnalyzer:
             )
 
     # ──────────────────────────────────────────────
+    # 文献对话（流式）
+    # ──────────────────────────────────────────────
+
+    def chat_with_article(
+        self,
+        article: dict,
+        history: list[dict],
+        question: str,
+    ) -> Generator[str, None, None]:
+        """针对单篇文献的多轮对话，流式 yield 回答文本片段。
+
+        article: 文献记录（title/journal/authors/abstract/analysis 等）
+        history: 历史消息 [{role, content}, ...]
+        question: 本次用户提问
+        """
+        abstract = (article.get("abstract") or "").strip()
+        analysis = (article.get("analysis") or "").strip()
+        authors = article.get("authors") or ""
+        if isinstance(authors, list):
+            authors = ", ".join(authors)
+
+        doc_parts = [
+            f"标题：{article.get('title', '')}",
+            f"期刊：{article.get('journal', '') or '未知'}",
+            f"作者：{authors or '未知'}",
+            f"DOI：{article.get('doi', '') or '无'}",
+            "\n【摘要】",
+            abstract[:CHAT_ABSTRACT_MAX_CHARS] if abstract else "（摘要不可用）",
+        ]
+        if analysis:
+            doc_parts.append(
+                "\n【已有的 AI 深度解读（供参考，可能有误，以原文摘要为准）】\n"
+                + analysis[:CHAT_ANALYSIS_MAX_CHARS]
+            )
+        document = "\n".join(doc_parts)
+
+        system_prompt = (
+            "你是一位专业的化学/材料领域文献阅读助手。用户正在阅读下面这篇文献，"
+            "会针对它向你提问。\n\n"
+            f"【文献信息】\n{document}\n\n"
+            "回答要求：\n"
+            "1. 优先基于给定文献信息回答；若信息不足以回答，明确说明，"
+            "可适当补充领域通用知识但必须标注\"（文献未提及，为通用知识补充）\"。\n"
+            "2. 使用中文回答，专业术语保留英文原文。\n"
+            "3. 回答简洁、结构化，可使用 markdown 列表和小标题。\n"
+            "4. 严禁编造文献中的具体数据、公式或结论。"
+        )
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        for m in (history or [])[-CHAT_HISTORY_MESSAGES:]:
+            role = m.get("role")
+            content = (m.get("content") or "").strip()
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question})
+
+        yield from self._call_llm_stream(messages)
+
+    def _call_llm_stream(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: Optional[int] = None,
+    ) -> Generator[str, None, None]:
+        """流式调用 LLM，逐段 yield 回答内容；出错时 yield 错误说明文本（不重试）。"""
+        effective_max_tokens: int = max_tokens if max_tokens is not None else CHAT_MAX_TOKENS
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=effective_max_tokens,
+                stream=True,
+            )
+            got_content = False
+            for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    got_content = True
+                    yield content
+            if not got_content:
+                yield "（模型未返回内容，请稍后重试或检查模型配置。）"
+        except openai.AuthenticationError as e:
+            logger.error(
+                "[LLM_AUTH_ERROR] 文献对话失败：认证错误 | provider=%s | model=%s: %s",
+                self.provider, self.model, e,
+            )
+            yield "⚠️ 调用失败：API 认证失败，请检查 API key 或账户余额。"
+        except openai.RateLimitError as e:
+            logger.error(
+                "[LLM_QUOTA] 文献对话失败：速率限制 | provider=%s | model=%s: %s",
+                self.provider, self.model, e,
+            )
+            yield "⚠️ 调用失败：API 速率限制/配额不足，请稍后重试。"
+        except openai.APITimeoutError as e:
+            logger.error(
+                "[LLM_TIMEOUT] 文献对话失败：超时 | provider=%s | model=%s: %s",
+                self.provider, self.model, e,
+            )
+            yield "⚠️ 调用失败：API 请求超时，请重试。"
+        except Exception as e:  # noqa: BLE001 - 流式调用需要兜底以保证前端总能收到反馈
+            logger.error(
+                "[LLM_ERROR] 文献对话失败 | provider=%s | model=%s: %s",
+                self.provider, self.model, e,
+                exc_info=True,
+            )
+            yield f"⚠️ 调用失败：{e}"
+
+    # ──────────────────────────────────────────────
     # 智能全文切分
     # ──────────────────────────────────────────────
 
@@ -450,8 +567,12 @@ class LLMAnalyzer:
                 )
 
                 choice = response.choices[0]
-                message: str = choice.message.content.strip()
-                finish_reason: str = choice.finish_reason
+                raw_content = getattr(choice.message, "content", "") or ""
+                # 如果 content 为空且存在 reasoning_content，尝试使用它
+                if not raw_content and hasattr(choice.message, "reasoning_content"):
+                    raw_content = getattr(choice.message, "reasoning_content", "") or ""
+                message: str = raw_content.strip()
+                finish_reason: str = getattr(choice, "finish_reason", "")
 
                 if finish_reason == "length":
                     logger.warning(

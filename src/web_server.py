@@ -7,8 +7,10 @@ import copy
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -18,6 +20,9 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
+from core.analyzer import LLMAnalyzer
+from core.db import Database
+from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import classify_article
 from main import load_config, run_once, validate_config
 
@@ -139,6 +144,8 @@ class WebContext:
         self.config = load_config(config_path)
         validate_config(self.config)
         self.runner = TaskRunner(self.config)
+        self.db = Database(self.config["database"]["path"])
+        self.fetcher = JournalFetcher(self.config)
 
         output_cfg = self.config.get("output", {})
         self.output_dir = Path(output_cfg.get("output_dir", "data/output")).resolve()
@@ -177,8 +184,10 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
     q = (query.get("q", [""])[0] or "").strip()
     journal = (query.get("journal", [""])[0] or "").strip()
     topic = (query.get("topic", [""])[0] or "").strip()
+    tag = (query.get("tag", [""])[0] or "").strip()
     min_score = float(query.get("min_score", ["0"])[0] or 0)
     analyzed_only = _parse_bool((query.get("analyzed_only", ["false"])[0] or "false"))
+    starred_only = _parse_bool((query.get("starred", ["false"])[0] or "false"))
     limit = _to_int(query.get("limit", ["50"])[0], 50, 1, 200)
     offset = _to_int(query.get("offset", ["0"])[0], 0, 0, 100000)
 
@@ -192,31 +201,49 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
     if journal:
         where.append("journal = ?")
         params.append(journal)
+    if starred_only:
+        where.append("COALESCE(starred, 0) = 1")
+    if tag:
+        # tags 为逗号分隔存储，用首尾加逗号的方式做整词匹配
+        where.append("(',' || COALESCE(tags, '') || ',') LIKE ?")
+        params.append(f"%,{tag},%")
 
     where.append("COALESCE(relevance, 0) >= ?")
     params.append(min_score)
 
     if analyzed_only:
         where.append("analysis IS NOT NULL AND analysis != ''")
+    if topic:
+        where.append("topic = ?")
+        params.append(topic)
 
-    sql = (
-        "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, created_at "
-        "FROM articles WHERE " + " AND ".join(where) +
-        " ORDER BY relevance DESC, created_at DESC LIMIT ? OFFSET ?"
-    )
-    params.extend([limit, offset])
+    where_clause = " AND ".join(where)
 
     conn = ctx.connect_db()
     try:
-        rows = conn.execute(sql, params).fetchall()
-        data = []
+        # 1. 直接通过 SQL 获取总数
+        count_sql = f"SELECT COUNT(*) FROM articles WHERE {where_clause}"
+        total = conn.execute(count_sql, params).fetchone()[0]
+
+        # 2. 数据库层面物理分页，避免全量内存加载
+        sql = (
+            "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
+            "starred, tags, created_at, topic "
+            f"FROM articles WHERE {where_clause} "
+            "ORDER BY relevance DESC, created_at DESC "
+            "LIMIT ? OFFSET ?"
+        )
+        query_params = list(params) + [limit, offset]
+        rows = conn.execute(sql, query_params).fetchall()
+
+        page = []
         for row in rows:
             item = dict(row)
-            item["topic"] = classify_article(item)
+            # 兼容历史未打 topic 标签的数据
+            if not item.get("topic"):
+                item["topic"] = classify_article(item)
             item["has_analysis"] = bool(item.get("analysis"))
-            if topic and item["topic"] != topic:
-                continue
-            data.append(item)
+            page.append(item)
 
         journal_rows = conn.execute(
             "SELECT DISTINCT journal FROM articles WHERE journal IS NOT NULL AND journal != '' ORDER BY journal"
@@ -229,8 +256,11 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         recent_dates = [r[0] for r in report_rows]
 
         return {
-            "items": data,
-            "count": len(data),
+            "items": page,
+            "count": len(page),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
             "journals": journals,
             "recent_report_dates": recent_dates,
         }
@@ -250,6 +280,7 @@ def _get_article_detail(ctx: WebContext, article_id: int) -> Optional[dict[str, 
         item = dict(row)
         item["topic"] = classify_article(item)
         item["has_analysis"] = bool(item.get("analysis"))
+        item["chat_count"] = ctx.db.get_article_chat_count(article_id)
         return item
     finally:
         conn.close()
@@ -266,6 +297,197 @@ def _list_reports(ctx: WebContext, limit: int = 30) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def _mask_secret(v: Optional[str]) -> str:
+    v = v or ""
+    if not v:
+        return ""
+    if len(v) <= 8:
+        return "****"
+    return v[:4] + "****" + v[-4:]
+
+
+_SETTINGS_FIELDS = [
+    "llm.provider", "llm.model", "llm.api_key", "llm.base_url",
+    "relevance_threshold", "research_topics",
+    "fetcher.use_fulltext", "fetcher.use_browser",
+    "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
+    "scheduler.run_time", "web.api_token",
+    "output.email_enabled", "output.email_recipients",
+    "output.feishu_enabled", "output.feishu_webhook",
+]
+
+
+def _settings_view(ctx: WebContext) -> dict[str, Any]:
+    """设置页数据：脱敏配置 + 可编辑字段清单。密钥只回传掩码，绝不回传明文。"""
+    c = ctx.config
+    llm = c.get("llm", {}) or {}
+    provider = llm.get("provider", "")
+    provider_cfg = llm.get(provider, {}) or {}
+    fetcher = c.get("fetcher", {}) or {}
+    output = c.get("output", {}) or {}
+    email = output.get("email", {}) or {}
+    feishu = output.get("feishu", {}) or {}
+    web = c.get("web", {}) or {}
+
+    # 已配置的 provider 列表（供前端切换时回填 base_url / model）
+    known_providers: dict[str, dict[str, Any]] = {}
+    for name, pcfg in llm.items():
+        if isinstance(pcfg, dict) and (pcfg.get("base_url") or pcfg.get("model") or pcfg.get("api_key")):
+            known_providers[name] = {
+                "base_url": pcfg.get("base_url", ""),
+                "model": pcfg.get("model", ""),
+                "api_key_set": bool(pcfg.get("api_key")),
+            }
+
+    return {
+        "editable": _SETTINGS_FIELDS,
+        "llm": {
+            "provider": provider,
+            "model": provider_cfg.get("model", ""),
+            "base_url": provider_cfg.get("base_url", ""),
+            "api_key_set": bool(provider_cfg.get("api_key")),
+            "api_key_masked": _mask_secret(provider_cfg.get("api_key")),
+            "providers": known_providers,
+        },
+        "relevance_threshold": c.get("relevance_threshold"),
+        "research_topics": c.get("research_topics", []),
+        "fetcher": {
+            "use_fulltext": fetcher.get("use_fulltext"),
+            "use_browser": fetcher.get("use_browser"),
+            "max_articles_per_journal": fetcher.get("max_articles_per_journal"),
+            "date_filter_days": fetcher.get("date_filter_days"),
+        },
+        "scheduler": c.get("scheduler", {}),
+        "web": {
+            "api_token_set": bool(web.get("api_token")),
+            "enable_scheduler": web.get("enable_scheduler", False),
+        },
+        "output": {
+            "email_enabled": bool(email.get("enabled")),
+            "email_recipients": email.get("recipients", []),
+            "email_username": email.get("username", ""),
+            "feishu_enabled": bool(feishu.get("enabled")),
+        },
+        "config_path": ctx.config_path,
+    }
+
+
+def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """把白名单字段写回 config.yaml（ruamel 保留注释）。密钥留空 = 不修改。"""
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
+
+    allowed = set(_SETTINGS_FIELDS)
+    updates = {k: v for k, v in (data or {}).items() if k in allowed}
+    if not updates:
+        return {"ok": False, "error": "没有可更新的字段（或字段不在白名单内）"}, 400
+
+    yaml_io = YAML()
+    yaml_io.preserve_quotes = True
+    cfg_path = Path(ctx.config_path)
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml_io.load(f)
+        if cfg is None:
+            cfg = CommentedMap()
+    except FileNotFoundError:
+        return {"ok": False, "error": f"配置文件不存在: {cfg_path}"}, 400
+
+    def ensure(keys: list) -> CommentedMap:
+        node = cfg
+        for k in keys:
+            if k not in node or not isinstance(node[k], dict):
+                node[k] = CommentedMap()
+            node = node[k]
+        return node
+
+    provider = str(updates.get("llm.provider") or cfg.get("llm", {}).get("provider") or "deepseek")
+    changed: list[str] = []
+
+    try:
+        for key, value in updates.items():
+            if key == "llm.provider":
+                # 自定义提供方：任意字母/数字/下划线/短横线组合
+                s = str(value).strip()
+                if s and re.match(r"^[A-Za-z0-9_-]{1,32}$", s):
+                    ensure(["llm"])["provider"] = s
+                    changed.append(key)
+            elif key == "llm.model":
+                if value:
+                    ensure(["llm", provider])["model"] = str(value)
+                    changed.append(key)
+            elif key == "llm.base_url":
+                s = str(value).strip()
+                if s:
+                    if not s.lower().startswith(("http://", "https://")):
+                        return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
+                    ensure(["llm", provider])["base_url"] = s
+                    changed.append(key)
+            elif key == "llm.api_key":
+                if value:  # 留空 = 保持不变
+                    ensure(["llm", provider])["api_key"] = str(value)
+                    changed.append(key)
+            elif key == "relevance_threshold":
+                v = float(value)
+                if 0 <= v <= 10:
+                    cfg["relevance_threshold"] = v
+                    changed.append(key)
+            elif key == "research_topics":
+                topics = [str(t).strip() for t in (value or []) if str(t).strip()]
+                if topics:
+                    cfg["research_topics"] = topics
+                    changed.append(key)
+            elif key == "scheduler.run_time":
+                s = str(value).strip()
+                if re.match(r"^\d{1,2}:\d{2}$", s):
+                    ensure(["scheduler"])["run_time"] = s
+                    changed.append(key)
+            elif key == "web.api_token":
+                ensure(["web"])["api_token"] = str(value or "")
+                changed.append(key)
+            elif key == "output.email_enabled":
+                ensure(["output", "email"])["enabled"] = bool(value)
+                changed.append(key)
+            elif key == "output.email_recipients":
+                recips = [str(r).strip() for r in (value or []) if str(r).strip()]
+                ensure(["output", "email"])["recipients"] = recips
+                changed.append(key)
+            elif key == "output.feishu_enabled":
+                ensure(["output", "feishu"])["enabled"] = bool(value)
+                changed.append(key)
+            elif key == "output.feishu_webhook":
+                if value:
+                    ensure(["output", "feishu"])["webhook_url"] = str(value)
+                    changed.append(key)
+            elif key.startswith("fetcher."):
+                sub = key.split(".", 1)[1]
+                node = ensure(["fetcher"])
+                if sub == "max_articles_per_journal":
+                    node[sub] = max(1, int(value))
+                elif sub == "date_filter_days":
+                    node[sub] = max(0, int(value))
+                else:
+                    node[sub] = bool(value)
+                changed.append(key)
+    except (ValueError, TypeError) as e:
+        return {"ok": False, "error": f"字段值格式无效: {e}"}, 400
+
+    if not changed:
+        return {"ok": False, "error": "没有字段通过校验"}, 400
+
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml_io.dump(cfg, f)
+
+    # 写入成功后热重载（后续手动触发的任务会用新配置）
+    try:
+        ctx.config = load_config(ctx.config_path)
+        validate_config(ctx.config)
+    except Exception as e:
+        return {"ok": True, "changed": changed, "warning": f"已写入文件，但重载校验失败: {e}"}, 200
+
+    return {"ok": True, "changed": changed}, 200
 
 
 def _db_summary(ctx: WebContext) -> dict[str, Any]:
@@ -285,240 +507,255 @@ def _db_summary(ctx: WebContext) -> dict[str, Any]:
         conn.close()
 
 
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Daily Paper Digest 控制台</title>
-  <style>
-    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f6f8fa; margin:0; color:#1f2328; }
-    header { background:#24292f; color:#fff; padding:14px 20px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    main { max-width:1200px; margin:16px auto; padding:0 14px; }
-    .card { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:14px; margin-bottom:12px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    input, select, button { padding:8px 10px; border:1px solid #d0d7de; border-radius:6px; }
-    button { cursor:pointer; background:#0969da; color:#fff; border:none; }
-    button.secondary { background:#57606a; }
-    table { width:100%; border-collapse:collapse; font-size:14px; }
-    th, td { border-bottom:1px solid #d8dee4; padding:8px; text-align:left; vertical-align:top; }
-    th { background:#f6f8fa; }
-    .mono { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-    .small { font-size:12px; color:#57606a; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#ddf4ff; color:#0969da; }
-    .err { color:#cf222e; white-space:pre-wrap; max-height:200px; overflow:auto; }
-    .ok { color:#1a7f37; }
-    a { color:#0969da; }
-  </style>
-</head>
-<body>
-<header>
-  <strong>📚 Daily Paper Digest 控制台</strong>
-  <div><a href="/paper-index" target="_blank" style="color:#9ecbff;">打开只读大盘 paper_index.html</a></div>
-</header>
-<main>
-  <section class="card">
-    <h3>任务控制</h3>
-    <div class="row" style="margin-top:8px;">
-      <button onclick="triggerRun('default')">运行（默认模式）</button>
-      <button onclick="triggerRun('abstract')" class="secondary">运行（仅摘要模式）</button>
-      <button onclick="triggerRun('fulltext')" class="secondary">运行（强制全文模式）</button>
-      <input id="tokenInput" placeholder="可选：API Token" style="min-width:220px;" />
-      <span id="runResult" class="small"></span>
-    </div>
-    <div id="statusBox" class="small" style="margin-top:10px;"></div>
-  </section>
+# ── 期刊订阅管理 ──────────────────────────────────────────────
 
-  <section class="card">
-    <h3>筛选检索</h3>
-    <div class="row" style="margin-top:8px;">
-      <input id="q" placeholder="关键词（标题/摘要/作者/期刊）" style="min-width:260px; flex:1;" />
-      <select id="journal"><option value="">全部期刊</option></select>
-      <select id="topic">
-        <option value="">全部方向</option>
-        <option>机器学习势函数 / MLIP</option>
-        <option>分子动力学 / MD</option>
-        <option>金属有机框架 / MOF</option>
-        <option>DFT / 第一性原理</option>
-        <option>催化 / 反应机理</option>
-        <option>材料性质预测</option>
-        <option>大模型 / AI for Science</option>
-        <option>量子化学 / 电子结构</option>
-        <option>纳米材料 / 表面</option>
-        <option>其他</option>
-      </select>
-      <input id="minScore" type="number" min="0" max="10" step="0.1" value="0" style="width:100px;" />
-      <label class="small"><input id="analyzedOnly" type="checkbox" /> 仅看有解读</label>
-      <button onclick="loadArticles()">查询</button>
-    </div>
-    <div id="summary" class="small" style="margin-top:10px;"></div>
-    <div style="overflow:auto; margin-top:10px;">
-      <table id="articleTable">
-        <thead>
-          <tr>
-            <th>ID</th><th>评分</th><th>方向</th><th>期刊</th><th>标题</th><th>日期</th><th>解读</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+def _read_json_body(handler: "Handler") -> dict[str, Any]:
+    length = int(handler.headers.get("Content-Length", "0"))
+    body = handler.rfile.read(length) if length > 0 else b"{}"
+    if not body.strip():
+        return {}
+    return json.loads(body.decode("utf-8"))
 
-  <section class="card">
-    <h3>文章详情</h3>
-    <div id="detail" class="small">点击上方表格标题查看详情</div>
-  </section>
 
-  <section class="card">
-    <h3>历史日报</h3>
-    <div id="reports" class="small"></div>
-  </section>
-</main>
+def _list_journals(ctx: WebContext) -> dict[str, Any]:
+    journals = ctx.db.list_journals()
+    return {"items": journals, "count": len(journals)}
 
-<script>
-async function fetchJSON(url, options = {}) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+
+def _add_journal(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    rss = (data.get("rss") or "").strip()
+    if not rss:
+        return {"ok": False, "error": "RSS 链接不能为空"}, 400
+    if not rss.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "RSS 链接必须以 http:// 或 https:// 开头"}, 400
+
+    if ctx.db.get_journal_by_rss(rss) is not None:
+        return {"ok": False, "error": "该 RSS 链接已存在"}, 409
+
+    name = (data.get("name") or "").strip()
+    publisher = (data.get("publisher") or "").strip()
+    if not publisher:
+        publisher = detect_publisher_from_url(rss)
+    max_articles = _to_int(str(data.get("max_articles", "100")), 100, 1, 500)
+
+    journal_id = ctx.db.add_journal(
+        name=name, rss=rss, publisher=publisher, max_articles=max_articles
+    )
+    if journal_id is None:
+        return {"ok": False, "error": "该 RSS 链接已存在或保存失败"}, 409
+
+    item = ctx.db.get_journal_by_rss(rss)
+    return {"ok": True, "id": journal_id, "item": item}, 200
+
+
+def _test_journal(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    rss = (data.get("rss") or "").strip()
+    if not rss:
+        return {"ok": False, "error": "RSS 链接不能为空"}, 400
+    publisher = (data.get("publisher") or "").strip() or detect_publisher_from_url(rss)
+    result = ctx.fetcher.test_feed(rss, publisher=publisher)
+    result["publisher"] = publisher
+    return result, 200
+
+
+def _toggle_journal(ctx: WebContext, journal_id: int) -> tuple[dict[str, Any], int]:
+    journals = ctx.db.list_journals()
+    item = next((j for j in journals if j["id"] == journal_id), None)
+    if item is None:
+        return {"ok": False, "error": "订阅不存在"}, 404
+    new_enabled = not bool(item.get("enabled"))
+    ctx.db.set_journal_enabled(journal_id, new_enabled)
+    return {"ok": True, "id": journal_id, "enabled": new_enabled}, 200
+
+
+def _delete_journal(ctx: WebContext, journal_id: int) -> tuple[dict[str, Any], int]:
+    ctx.db.delete_journal(journal_id)
+    return {"ok": True, "id": journal_id}, 200
+
+
+def _parse_opml(text: str, publisher_override: str) -> Optional[list[tuple[str, str, str]]]:
+    """解析 OPML XML，返回 (name, rss, publisher) 列表；解析失败返回 None。"""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+    entries: list[tuple[str, str, str]] = []
+    for outline in root.iter("outline"):
+        xml_url = outline.get("xmlUrl") or outline.get("xmlurl") or ""
+        if not xml_url:
+            continue
+        name = outline.get("text") or outline.get("title") or ""
+        entries.append((name, xml_url, publisher_override))
+    return entries
+
+
+def _import_journals(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    text = (data.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "内容为空，请粘贴链接或 OPML"}, 400
+
+    publisher_override = (data.get("publisher") or "").strip()
+
+    if text.lstrip().startswith("<"):
+        entries = _parse_opml(text, publisher_override)
+        if entries is None:
+            return {"ok": False, "error": "OPML 解析失败，请检查 XML 格式"}, 400
+    else:
+        entries = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            entries.append(("", line, publisher_override))
+
+    added: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for name, rss, publisher in entries:
+        rss = (rss or "").strip()
+        if not rss.lower().startswith(("http://", "https://")):
+            skipped.append({"url": rss, "reason": "无效链接"})
+            continue
+        if ctx.db.get_journal_by_rss(rss):
+            skipped.append({"url": rss, "reason": "已存在"})
+            continue
+        p = (publisher or "").strip() or detect_publisher_from_url(rss)
+        jid = ctx.db.add_journal(name=(name or "").strip(), rss=rss, publisher=p)
+        if jid is None:
+            skipped.append({"url": rss, "reason": "保存失败"})
+        else:
+            added.append({"id": jid, "name": (name or "").strip(), "rss": rss, "publisher": p})
+
+    return {
+        "ok": True,
+        "added": added,
+        "skipped": skipped,
+        "added_count": len(added),
+        "skipped_count": len(skipped),
+    }, 200
+
+
+# ── 静态前端 ──────────────────────────────────────────────────
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+_STATIC_CONTENT_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
 }
 
-function esc(s) {
-  return (s ?? '').toString().replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-}
 
-async function loadStatus() {
-  try {
-    const data = await fetchJSON('/api/status');
-    const s = data.task || {};
-    const running = s.running ? '<span class="pill">运行中</span>' : '<span class="pill">空闲</span>';
-    const err = s.last_error ? `<div class="err">${esc(s.last_error)}</div>` : '';
-    document.getElementById('statusBox').innerHTML = `
-      ${running} task_id=<span class="mono">${esc(s.task_id || '-')}</span> trigger=${esc(s.trigger || '-')}
-      mode=${esc(s.mode || '-')}<br>
-      started=${esc(s.started_at || '-')} ended=${esc(s.ended_at || '-')}<br>
-      runs=${esc(s.run_count)} success=${esc(s.success_count)} failure=${esc(s.failure_count)}
-      ${err}
-    `;
-  } catch (e) {
-    document.getElementById('statusBox').innerText = '状态获取失败: ' + e.message;
-  }
-}
+# ── 个人文献库：星标 / 笔记 / 标签 / 对话 ──────────────────────
 
-async function triggerRun(mode) {
-  const token = document.getElementById('tokenInput').value.trim();
-  const headers = {'Content-Type': 'application/json'};
-  if (token) headers['X-API-Token'] = token;
-  const resultEl = document.getElementById('runResult');
-  resultEl.innerText = '提交中...';
-  try {
-    const data = await fetchJSON('/api/run', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({mode})
-    });
-    resultEl.innerHTML = `<span class="ok">已触发，task_id=${esc(data.task_id)}</span>`;
-    await loadStatus();
-  } catch (e) {
-    resultEl.innerText = '触发失败: ' + e.message;
-  }
-}
+def _list_tags(ctx: WebContext) -> dict[str, Any]:
+    return {"items": ctx.db.list_all_tags()}
 
-async function loadArticles() {
-  const q = document.getElementById('q').value.trim();
-  const journal = document.getElementById('journal').value;
-  const topic = document.getElementById('topic').value;
-  const minScore = document.getElementById('minScore').value || '0';
-  const analyzedOnly = document.getElementById('analyzedOnly').checked ? 'true' : 'false';
 
-  const params = new URLSearchParams({q, journal, topic, min_score: minScore, analyzed_only: analyzedOnly, limit: '100'});
+def _article_action_result(
+    ctx: WebContext, article_id: int
+) -> tuple[dict[str, Any], int]:
+    """文章字段更新成功后，返回最新详情供前端刷新。"""
+    item = _get_article_detail(ctx, article_id)
+    if item is None:
+        return {"ok": False, "error": "article not found"}, 404
+    return {"ok": True, "id": article_id, "item": item}, 200
 
-  try {
-    const data = await fetchJSON('/api/articles?' + params.toString());
-    const tbody = document.querySelector('#articleTable tbody');
-    tbody.innerHTML = '';
-    for (const a of data.items) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${esc(a.id)}</td>
-        <td>${Number(a.relevance || 0).toFixed(1)}</td>
-        <td>${esc(a.topic)}</td>
-        <td>${esc(a.journal || '')}</td>
-        <td><a href="#" data-id="${esc(a.id)}">${esc(a.title || '')}</a></td>
-        <td>${esc(a.pub_date || '')}</td>
-        <td>${a.has_analysis ? '✅' : '—'}</td>
-      `;
-      tbody.appendChild(tr);
-    }
 
-    document.querySelectorAll('a[data-id]').forEach(a => {
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        loadDetail(a.dataset.id);
-      });
-    });
+def _set_article_star(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    starred = bool(data.get("starred"))
+    ctx.db.set_article_star(article_id, starred)
+    return _article_action_result(ctx, article_id)
 
-    if (data.journals) {
-      const journalSel = document.getElementById('journal');
-      const current = journalSel.value;
-      journalSel.innerHTML = '<option value="">全部期刊</option>';
-      for (const j of data.journals) {
-        const opt = document.createElement('option');
-        opt.value = j;
-        opt.textContent = j;
-        if (j === current) opt.selected = true;
-        journalSel.appendChild(opt);
-      }
-    }
 
-    document.getElementById('summary').innerText = `结果 ${data.count} 篇`;
-  } catch (e) {
-    document.getElementById('summary').innerText = '查询失败: ' + e.message;
-  }
-}
+def _set_article_note(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    note = str(data.get("note", "") or "")
+    if len(note) > 20000:
+        return {"ok": False, "error": "笔记过长（上限 20000 字符）"}, 400
+    ctx.db.update_article_note(article_id, note)
+    return _article_action_result(ctx, article_id)
 
-async function loadDetail(id) {
-  try {
-    const a = await fetchJSON('/api/articles/' + id);
-    document.getElementById('detail').innerHTML = `
-      <div><strong>${esc(a.title || '')}</strong></div>
-      <div class="small">期刊：${esc(a.journal || '')} | 日期：${esc(a.pub_date || '')} | 评分：${Number(a.relevance || 0).toFixed(1)} | 方向：${esc(a.topic || '')}</div>
-      <div style="margin-top:8px;"><strong>链接：</strong><a href="${esc(a.url || '#')}" target="_blank">${esc(a.url || '')}</a></div>
-      <div style="margin-top:8px;"><strong>摘要：</strong><pre style="white-space:pre-wrap;">${esc(a.abstract || '')}</pre></div>
-      <div style="margin-top:8px;"><strong>AI解读：</strong><pre style="white-space:pre-wrap;">${esc(a.analysis || '无')}</pre></div>
-    `;
-  } catch (e) {
-    document.getElementById('detail').innerText = '详情获取失败: ' + e.message;
-  }
-}
 
-async function loadReports() {
-  try {
-    const data = await fetchJSON('/api/reports?limit=30');
-    if (!data.items || data.items.length === 0) {
-      document.getElementById('reports').innerText = '暂无历史日报';
-      return;
-    }
-    const links = data.items.map(r => {
-      const date = esc(r.report_date);
-      return `<li>${date} | found=${esc(r.total_found)} pushed=${esc(r.total_pushed)} | <a href="/reports/${date}.md" target="_blank">Markdown</a> <a href="/reports/${date}.html" target="_blank">HTML</a></li>`;
-    }).join('');
-    document.getElementById('reports').innerHTML = `<ul>${links}</ul>`;
-  } catch (e) {
-    document.getElementById('reports').innerText = '历史日报获取失败: ' + e.message;
-  }
-}
+def _set_article_tags(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    tags = data.get("tags", [])
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    if len(list(tags or [])) > 20:
+        return {"ok": False, "error": "标签数量过多（上限 20 个）"}, 400
+    ctx.db.update_article_tags(article_id, tags)
+    return _article_action_result(ctx, article_id)
 
-async function init() {
-  await loadStatus();
-  await loadArticles();
-  await loadReports();
-  setInterval(loadStatus, 5000);
-}
-init();
-</script>
-</body>
-</html>
-"""
+
+def _test_llm(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """测试 LLM API 可用性。
+
+    表单值可选传入（provider/base_url/model/api_key）；api_key 留空时
+    回退到该 provider 已保存的 key（便于先测试再保存，也能测已有配置）。
+    """
+    llm_cfg = ctx.config.get("llm", {}) or {}
+    provider = str(data.get("provider") or "").strip() or str(llm_cfg.get("provider") or "deepseek")
+    provider_cfg = llm_cfg.get(provider, {}) or {}
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {}
+
+    base_url = str(data.get("base_url") or "").strip() or str(provider_cfg.get("base_url") or "").strip()
+    model = str(data.get("model") or "").strip() or str(provider_cfg.get("model") or "").strip()
+    api_key = str(data.get("api_key") or "").strip() or str(provider_cfg.get("api_key") or "").strip()
+
+    missing = [
+        label for label, val in
+        [("Base URL", base_url), ("模型名", model), ("API Key", api_key)]
+        if not val
+    ]
+    if missing:
+        return {"ok": False, "error": f"缺少 {'、'.join(missing)}（表单和已保存配置中都没有）"}, 400
+    if not base_url.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
+
+    import openai as _openai
+    client = _openai.OpenAI(api_key=api_key, base_url=base_url, timeout=25, max_retries=0)
+    started = time.monotonic()
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "这是一次连通性测试，请只回复两个字：正常"}],
+            max_tokens=512,
+            temperature=0,
+        )
+    except _openai.AuthenticationError as e:
+        return {"ok": False, "error": f"认证失败：API key 无效或账户余额不足（{e}）"}, 200
+    except _openai.RateLimitError as e:
+        return {"ok": False, "error": f"速率限制/配额不足（{e}）"}, 200
+    except _openai.NotFoundError as e:
+        return {"ok": False, "error": f"接口地址或模型名不存在（{e}）"}, 200
+    except _openai.APITimeoutError as e:
+        return {"ok": False, "error": f"请求超时（25s）：{e}"}, 200
+    except _openai.APIStatusError as e:
+        return {"ok": False, "error": f"API 返回错误 HTTP {getattr(e, 'status_code', '?')}：{e}"}, 200
+    except Exception as e:  # noqa: BLE001 - 连通性测试需要把任何失败反馈给前端
+        return {"ok": False, "error": f"连接失败：{type(e).__name__}: {e}"}, 200
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    reply = ""
+    if getattr(resp, "choices", None):
+        reply = (resp.choices[0].message.content or "").strip()
+    return {
+        "ok": True,
+        "latency_ms": latency_ms,
+        "model": model,
+        "base_url": base_url,
+        "provider": provider,
+        "reply": reply,
+    }, 200
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -555,6 +792,95 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_static_file(self, rel_path: str) -> None:
+        """服务 src/static/ 下的静态文件（防目录穿越，禁缓存）。"""
+        rel_path = (rel_path or "").strip().lstrip("/")
+        if not rel_path:
+            rel_path = "index.html"
+        target = (STATIC_DIR / rel_path).resolve()
+        try:
+            target.relative_to(STATIC_DIR)
+        except ValueError:
+            self._json_response({"error": "bad path"}, code=400)
+            return
+        if not target.is_file():
+            self._json_response({"error": "not found"}, code=404)
+            return
+        content_type = _STATIC_CONTENT_TYPES.get(
+            target.suffix.lower(), "application/octet-stream"
+        )
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _sse_start(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _sse_send(self, payload: dict[str, Any]) -> bool:
+        """发送一条 SSE 事件；连接断开时返回 False。"""
+        data = json.dumps(payload, ensure_ascii=False)
+        try:
+            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+
+    def _handle_chat_stream(self, article_id: int) -> None:
+        """POST /api/articles/{id}/chat：SSE 流式回答，并把对话落库。"""
+        try:
+            data = _read_json_body(self)
+        except json.JSONDecodeError:
+            self._json_response({"error": "invalid json"}, code=400)
+            return
+
+        question = str(data.get("question") or "").strip()
+        if not question:
+            self._json_response({"error": "question 不能为空"}, code=400)
+            return
+        if len(question) > 8000:
+            self._json_response({"error": "question 过长（上限 8000 字符）"}, code=400)
+            return
+
+        article = _get_article_detail(self.ctx, article_id)
+        if article is None:
+            self._json_response({"error": "article not found"}, code=404)
+            return
+
+        try:
+            analyzer = LLMAnalyzer(self.ctx.config)
+        except Exception as e:  # noqa: BLE001 - 配置缺失时给前端明确错误
+            self._json_response({"error": f"LLM 初始化失败，请检查配置: {e}"}, code=500)
+            return
+
+        history = self.ctx.db.get_chat_messages(article_id)
+        self.ctx.db.add_chat_message(article_id, "user", question)
+
+        self._sse_start()
+        pieces: list[str] = []
+        try:
+            for delta in analyzer.chat_with_article(article, history, question):
+                pieces.append(delta)
+                if not self._sse_send({"delta": delta}):
+                    break
+        except Exception as e:  # noqa: BLE001 - 流式兜底，保证前端拿到 done/error
+            logger.error("文献对话流式输出失败: %s", e, exc_info=True)
+            self._sse_send({"error": f"对话失败: {e}"})
+
+        answer = "".join(pieces)
+        if answer:
+            self.ctx.db.add_chat_message(article_id, "assistant", answer)
+        self._sse_send({"done": True})
+
     def _require_token(self) -> bool:
         token = self.ctx.api_token
         if not token:
@@ -572,7 +898,11 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/" or path == "/dashboard":
-                self._text_response(DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+                self._serve_static_file("index.html")
+                return
+
+            if path.startswith("/static/"):
+                self._serve_static_file(path.removeprefix("/static/"))
                 return
 
             if path == "/healthz":
@@ -611,6 +941,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(_list_articles(self.ctx, query))
                 return
 
+            if path.startswith("/api/articles/") and path.endswith("/chat"):
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/chat")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                messages = self.ctx.db.get_chat_messages(int(article_id_raw))
+                self._json_response({"items": messages, "count": len(messages)})
+                return
+
             if path.startswith("/api/articles/"):
                 article_id_raw = path.removeprefix("/api/articles/")
                 if not article_id_raw.isdigit():
@@ -623,9 +962,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(item)
                 return
 
+            if path == "/api/tags":
+                self._json_response(_list_tags(self.ctx))
+                return
+
             if path == "/api/reports":
                 limit = _to_int(query.get("limit", ["30"])[0], 30, 1, 365)
                 self._json_response({"items": _list_reports(self.ctx, limit=limit)})
+                return
+
+            if path == "/api/journals":
+                self._json_response(_list_journals(self.ctx))
+                return
+
+            if path == "/api/settings":
+                self._json_response(_settings_view(self.ctx))
                 return
 
             self._json_response({"error": "not found"}, code=404)
@@ -641,11 +992,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/run":
                 if not self._require_token():
                     return
-
-                length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if length > 0 else b"{}"
-                data = json.loads(body.decode("utf-8"))
-
+                data = _read_json_body(self)
                 mode = str(data.get("mode", "default"))
                 date_str = data.get("date")
                 if mode not in {"default", "abstract", "fulltext"}:
@@ -654,9 +1001,104 @@ class Handler(BaseHTTPRequestHandler):
 
                 ok, msg = self.ctx.runner.start_run(trigger="manual", mode=mode, date_str=date_str)
                 if not ok:
-                    self._json_response({"ok": False, "message": msg}, code=409)
+                    self._json_response({"ok": False, "error": msg, "message": msg}, code=409)
                     return
                 self._json_response({"ok": True, "task_id": msg})
+                return
+
+            if path == "/api/settings":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _save_settings(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/chat"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/chat")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                self._handle_chat_stream(int(article_id_raw))
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/star"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/star")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_article_star(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/note"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/note")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_article_note(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/tags"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/tags")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_article_tags(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/llm/test":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _test_llm(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/journals":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _add_journal(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/journals/import":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _import_journals(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/journals/test":
+                data = _read_json_body(self)
+                payload, code = _test_journal(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/journals/") and path.endswith("/toggle"):
+                if not self._require_token():
+                    return
+                journal_id_raw = path.removeprefix("/api/journals/").removesuffix("/toggle")
+                if not journal_id_raw.isdigit():
+                    self._json_response({"error": "invalid journal id"}, code=400)
+                    return
+                payload, code = _toggle_journal(self.ctx, int(journal_id_raw))
+                self._json_response(payload, code=code)
                 return
 
             self._json_response({"error": "not found"}, code=404)
@@ -664,6 +1106,38 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response({"error": "invalid json"}, code=400)
         except Exception as e:  # pragma: no cover - 运行期保护
             logger.error("POST 处理失败: %s", e, exc_info=True)
+            self._json_response({"error": str(e)}, code=500)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        try:
+            if path.startswith("/api/articles/") and path.endswith("/chat"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/chat")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                self.ctx.db.clear_chat_messages(int(article_id_raw))
+                self._json_response({"ok": True, "id": int(article_id_raw)})
+                return
+
+            if path.startswith("/api/journals/"):
+                if not self._require_token():
+                    return
+                journal_id_raw = path.removeprefix("/api/journals/")
+                if not journal_id_raw.isdigit():
+                    self._json_response({"error": "invalid journal id"}, code=400)
+                    return
+                payload, code = _delete_journal(self.ctx, int(journal_id_raw))
+                self._json_response(payload, code=code)
+                return
+
+            self._json_response({"error": "not found"}, code=404)
+        except Exception as e:  # pragma: no cover - 运行期保护
+            logger.error("DELETE 处理失败: %s", e, exc_info=True)
             self._json_response({"error": str(e)}, code=500)
 
     def log_message(self, fmt: str, *args: Any) -> None:

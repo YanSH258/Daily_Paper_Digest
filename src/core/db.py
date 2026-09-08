@@ -101,6 +101,25 @@ class Database:
                 total_pushed INTEGER,
                 created_at   TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS journals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                rss         TEXT NOT NULL UNIQUE,
+                publisher   TEXT,
+                max_articles INTEGER NOT NULL DEFAULT 100,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                source      TEXT NOT NULL DEFAULT 'web',
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id  INTEGER NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
         """)
 
         # 启用 WAL 模式（仅文件数据库）
@@ -112,6 +131,10 @@ class Database:
         for col, definition in [
             ("title_hash", "TEXT"),
             ("analysis", "TEXT"),
+            ("topic", "TEXT"),
+            ("starred", "INTEGER DEFAULT 0"),
+            ("note", "TEXT"),
+            ("tags", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE articles ADD COLUMN {col} {definition}")
@@ -136,8 +159,21 @@ class Database:
             ),
             (
                 "CREATE INDEX IF NOT EXISTS idx_articles_relevance_created "
-                "ON articles(relevance DESC, created_at DESC)",
+                "ON articles (relevance DESC, created_at DESC)",
                 "relevance+created_at 复合索引",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(starred)",
+                "starred 索引",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_articles_topic ON articles(topic)",
+                "topic 索引",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_chat_messages_article "
+                "ON chat_messages(article_id, id)",
+                "chat_messages 文章索引",
             ),
         ]
         for stmt, desc in index_statements:
@@ -260,6 +296,9 @@ class Database:
         _days: int = days if days is not None else self._config["dedup_window_days"]
 
         norm_target = " ".join(title.lower().split())
+        len_target = len(norm_target)
+        if len_target == 0:
+            return []
 
         cursor = conn.execute(
             "SELECT id, title, doi, url FROM articles WHERE created_at >= datetime('now', ?)",
@@ -278,8 +317,14 @@ class Database:
             candidate = (row[title_idx] or "").strip()
             if not candidate:
                 continue
+            norm_cand = " ".join(candidate.lower().split())
+            len_cand = len(norm_cand)
+            # 长度过滤：如果长度比例上限都不可能达到 _threshold，直接跳过 difflib
+            if min(len_target, len_cand) / max(len_target, len_cand) < _threshold:
+                continue
+
             ratio = difflib.SequenceMatcher(
-                None, norm_target, " ".join(candidate.lower().split())
+                None, norm_target, norm_cand
             ).ratio()
             if ratio >= _threshold:
                 results.append({
@@ -292,60 +337,98 @@ class Database:
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results
 
-    def save_article(self, article: dict[str, Any]) -> bool:
-        is_dup, reason = self.check_duplicate(article)
-        if is_dup:
-            logger.debug("跳过重复文章: %s", reason)
-            return False
+    def save_article(self, article: dict[str, Any], check_dup: bool = True) -> bool:
+        if check_dup:
+            is_dup, reason = self.check_duplicate(article)
+            if is_dup:
+                logger.debug("跳过重复文章: %s", reason)
+                return False
 
         title = (article.get("title") or "").strip()
         analysis = article.get("analysis")
+        topic = article.get("topic")
 
         try:
             params = {
                 "doi": article.get("doi") or None,
                 "title": title,
                 "journal": article.get("journal", ""),
-                "authors": ", ".join(article.get("authors", [])),
+                "authors": ", ".join(article.get("authors", [])) if isinstance(article.get("authors"), list) else (article.get("authors") or ""),
                 "pub_date": article.get("pub_date", ""),
                 "url": article.get("url", ""),
                 "abstract": article.get("abstract", ""),
                 "relevance": article.get("relevance", 0),
                 "title_hash": _compute_title_hash(title) if title else None,
                 "analysis": analysis,
+                "topic": topic,
             }
+            sql = """
+                INSERT OR IGNORE INTO articles
+                    (doi, title, journal, authors, pub_date, url, abstract,
+                     relevance, processed, title_hash, analysis, topic)
+                VALUES
+                    (:doi, :title, :journal, :authors, :pub_date, :url,
+                     :abstract, :relevance, 1, :title_hash, :analysis, :topic)
+            """
             if self._memory_conn is not None:
                 with self._memory_lock:
-                    self._memory_conn.execute(
-                        """
-                        INSERT OR IGNORE INTO articles
-                            (doi, title, journal, authors, pub_date, url, abstract,
-                             relevance, processed, title_hash, analysis)
-                        VALUES
-                            (:doi, :title, :journal, :authors, :pub_date, :url,
-                             :abstract, :relevance, 1, :title_hash, :analysis)
-                        """,
-                        params,
-                    )
+                    self._memory_conn.execute(sql, params)
                     self._memory_conn.commit()
             else:
                 conn = self._conn()
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO articles
-                        (doi, title, journal, authors, pub_date, url, abstract,
-                         relevance, processed, title_hash, analysis)
-                    VALUES
-                        (:doi, :title, :journal, :authors, :pub_date, :url,
-                         :abstract, :relevance, 1, :title_hash, :analysis)
-                    """,
-                    params,
-                )
+                conn.execute(sql, params)
                 conn.commit()
             return True
         except sqlite3.Error as e:
             logger.error("保存文章失败: %s", e)
             return False
+
+    def save_articles_batch(self, articles: list[dict[str, Any]]) -> int:
+        """批量保存文章（单次事务提交，极大减少磁盘 I/O）"""
+        if not articles:
+            return 0
+
+        params_list = []
+        for article in articles:
+            title = (article.get("title") or "").strip()
+            authors = article.get("authors", [])
+            authors_str = ", ".join(authors) if isinstance(authors, list) else (authors or "")
+            params_list.append({
+                "doi": article.get("doi") or None,
+                "title": title,
+                "journal": article.get("journal", ""),
+                "authors": authors_str,
+                "pub_date": article.get("pub_date", ""),
+                "url": article.get("url", ""),
+                "abstract": article.get("abstract", ""),
+                "relevance": article.get("relevance", 0),
+                "title_hash": _compute_title_hash(title) if title else None,
+                "analysis": article.get("analysis"),
+                "topic": article.get("topic"),
+            })
+
+        sql = """
+            INSERT OR IGNORE INTO articles
+                (doi, title, journal, authors, pub_date, url, abstract,
+                 relevance, processed, title_hash, analysis, topic)
+            VALUES
+                (:doi, :title, :journal, :authors, :pub_date, :url,
+                 :abstract, :relevance, 1, :title_hash, :analysis, :topic)
+        """
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.executemany(sql, params_list)
+                    self._memory_conn.commit()
+                    return cur.rowcount
+            else:
+                conn = self._conn()
+                with conn:
+                    cur = conn.executemany(sql, params_list)
+                return cur.rowcount
+        except sqlite3.Error as e:
+            logger.error("批量保存文章失败: %s", e)
+            return 0
 
     def get_duplicate_count(self) -> int:
         try:
@@ -443,3 +526,328 @@ class Database:
         col_names = [description[0] for description in cursor.description]
         rows = cursor.fetchall()
         return [dict(zip(col_names, row)) for row in rows]
+
+    # ── 期刊订阅管理 ──────────────────────────────────────────
+
+    def list_journals(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        """列出所有订阅源（Web 端导入的）。"""
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return self._list_journals_impl(self._memory_conn, enabled_only)
+            return self._list_journals_impl(self._conn(), enabled_only)
+        except sqlite3.Error as e:
+            logger.error("list_journals 查询失败: %s", e)
+            return []
+
+    def _list_journals_impl(self, conn: sqlite3.Connection, enabled_only: bool) -> list[dict[str, Any]]:
+        sql = (
+            "SELECT id, name, rss, publisher, max_articles, enabled, source, created_at "
+            "FROM journals"
+        )
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY id"
+        cursor = conn.execute(sql)
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_journal_by_rss(self, rss: str) -> Optional[dict[str, Any]]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return self._get_journal_by_rss_impl(self._memory_conn, rss)
+            return self._get_journal_by_rss_impl(self._conn(), rss)
+        except sqlite3.Error as e:
+            logger.error("get_journal_by_rss 查询失败: %s", e)
+            return None
+
+    def _get_journal_by_rss_impl(self, conn: sqlite3.Connection, rss: str) -> Optional[dict[str, Any]]:
+        cursor = conn.execute(
+            "SELECT id, name, rss, publisher, max_articles, enabled, source, created_at "
+            "FROM journals WHERE rss = ?",
+            (rss,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
+
+    def add_journal(
+        self,
+        name: str,
+        rss: str,
+        publisher: Optional[str] = None,
+        max_articles: int = 100,
+        enabled: bool = True,
+        source: str = "web",
+    ) -> Optional[int]:
+        """新增订阅源，返回新记录 id；若 RSS 已存在或出错返回 None。"""
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return self._add_journal_impl(
+                        self._memory_conn, name, rss, publisher, max_articles, enabled, source
+                    )
+            return self._add_journal_impl(
+                self._conn(), name, rss, publisher, max_articles, enabled, source
+            )
+        except sqlite3.Error as e:
+            logger.error("add_journal 失败: %s", e)
+            return None
+
+    def _add_journal_impl(
+        self,
+        conn: sqlite3.Connection,
+        name: str,
+        rss: str,
+        publisher: Optional[str],
+        max_articles: int,
+        enabled: bool,
+        source: str,
+    ) -> Optional[int]:
+        conn.execute(
+            "INSERT OR IGNORE INTO journals "
+            "(name, rss, publisher, max_articles, enabled, source) VALUES (?,?,?,?,?,?)",
+            (name, rss, publisher, int(max_articles or 100), 1 if enabled else 0, source),
+        )
+        conn.commit()
+        row = conn.execute("SELECT id FROM journals WHERE rss = ?", (rss,)).fetchone()
+        return row[0] if row else None
+
+    def update_journal(self, journal_id: int, **fields: Any) -> bool:
+        allowed = {"name", "rss", "publisher", "max_articles", "enabled"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values())
+        values.append(journal_id)
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        f"UPDATE journals SET {set_clause} WHERE id = ?", values
+                    )
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(f"UPDATE journals SET {set_clause} WHERE id = ?", values)
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("update_journal 失败: %s", e)
+            return False
+
+    def set_journal_enabled(self, journal_id: int, enabled: bool) -> bool:
+        return self.update_journal(journal_id, enabled=1 if enabled else 0)
+
+    def migrate_config_journals(self, journals: list[dict[str, Any]]) -> int:
+        """把旧版 config.yaml 里的 journals 列表迁移入库（按 RSS 去重），返回新增数。"""
+        added = 0
+        for j in journals or []:
+            rss = (j.get("rss") or "").strip()
+            if not rss or self.get_journal_by_rss(rss) is not None:
+                continue
+            self.add_journal(
+                name=(j.get("name") or "未命名").strip(),
+                rss=rss,
+                publisher=(j.get("publisher") or "").strip() or "DEFAULT",
+                max_articles=int(j.get("max_articles") or 100),
+                enabled=True,
+                source="config",
+            )
+            added += 1
+        return added
+
+    def delete_journal(self, journal_id: int) -> bool:
+        """删除订阅源；确有删除时把剩余订阅重排为 1..N（订阅 id 无外部引用，重排安全）。"""
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "DELETE FROM journals WHERE id = ?", (journal_id,)
+                    )
+                    if cur.rowcount > 0:
+                        self._renumber_journals_impl(self._memory_conn)
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                cur = conn.execute("DELETE FROM journals WHERE id = ?", (journal_id,))
+                if cur.rowcount > 0:
+                    self._renumber_journals_impl(conn)
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("delete_journal 失败: %s", e)
+            return False
+
+    @staticmethod
+    def _renumber_journals_impl(conn: sqlite3.Connection) -> None:
+        """按现有顺序把 journals 重排为 1..N，并同步自增计数器（两步法避免主键冲突）。"""
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM journals").fetchone()
+        offset = (row[0] if row else 0) + 100000
+        conn.execute("UPDATE journals SET id = id + ?", (offset,))
+        for new_id, (old_id,) in enumerate(
+            conn.execute("SELECT id FROM journals ORDER BY id").fetchall(), start=1
+        ):
+            conn.execute("UPDATE journals SET id = ? WHERE id = ?", (new_id, old_id))
+        count = conn.execute("SELECT COUNT(*) FROM journals").fetchone()[0]
+        seq_row = conn.execute(
+            "SELECT 1 FROM sqlite_sequence WHERE name = 'journals'"
+        ).fetchone()
+        if seq_row:
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'journals'", (count,)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('journals', ?)", (count,)
+            )
+
+    # ── 个人文献库：星标 / 笔记 / 标签 ────────────────────────
+
+    @staticmethod
+    def _normalize_tags(tags: Any) -> str:
+        """把标签列表规范化为去重后的逗号分隔字符串。"""
+        if isinstance(tags, str):
+            items = tags.split(",")
+        else:
+            items = list(tags or [])
+        seen: list[str] = []
+        for t in items:
+            t = str(t).strip().lstrip("#")
+            if t and t not in seen:
+                seen.append(t)
+        return ",".join(seen)
+
+    def _update_article_field(self, article_id: int, field: str, value: Any) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        f"UPDATE articles SET {field} = ? WHERE id = ?", (value, article_id)
+                    )
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(f"UPDATE articles SET {field} = ? WHERE id = ?", (value, article_id))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("更新 articles.%s 失败: %s", field, e)
+            return False
+
+    def set_article_star(self, article_id: int, starred: bool) -> bool:
+        return self._update_article_field(article_id, "starred", 1 if starred else 0)
+
+    def update_article_note(self, article_id: int, note: str) -> bool:
+        return self._update_article_field(article_id, "note", (note or "").strip() or None)
+
+    def update_article_tags(self, article_id: int, tags: Any) -> bool:
+        return self._update_article_field(article_id, "tags", self._normalize_tags(tags))
+
+    def list_all_tags(self) -> list[dict[str, Any]]:
+        """返回所有自定义标签及其使用次数。"""
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    rows = self._memory_conn.execute(
+                        "SELECT tags FROM articles WHERE tags IS NOT NULL AND tags != ''"
+                    ).fetchall()
+            else:
+                rows = self._conn().execute(
+                    "SELECT tags FROM articles WHERE tags IS NOT NULL AND tags != ''"
+                ).fetchall()
+            counter: dict[str, int] = {}
+            for (raw,) in rows:
+                for t in str(raw or "").split(","):
+                    t = t.strip()
+                    if t:
+                        counter[t] = counter.get(t, 0) + 1
+            return [{"tag": k, "count": v} for k, v in sorted(counter.items(), key=lambda x: -x[1])]
+        except sqlite3.Error as e:
+            logger.error("list_all_tags 查询失败: %s", e)
+            return []
+
+    # ── 文献对话记录 ─────────────────────────────────────────
+
+    def add_chat_message(self, article_id: int, role: str, content: str) -> Optional[int]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "INSERT INTO chat_messages (article_id, role, content) VALUES (?,?,?)",
+                        (article_id, role, content),
+                    )
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            cur = self._conn().execute(
+                "INSERT INTO chat_messages (article_id, role, content) VALUES (?,?,?)",
+                (article_id, role, content),
+            )
+            self._conn().commit()
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            logger.error("add_chat_message 失败: %s", e)
+            return None
+
+    def get_chat_messages(self, article_id: int, limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cursor = self._memory_conn.execute(
+                        "SELECT id, role, content, created_at FROM chat_messages "
+                        "WHERE article_id = ? ORDER BY id DESC LIMIT ?",
+                        (article_id, limit),
+                    )
+                    cols = [d[0] for d in cursor.description]
+                    rows = cursor.fetchall()
+            else:
+                cursor = self._conn().execute(
+                    "SELECT id, role, content, created_at FROM chat_messages "
+                    "WHERE article_id = ? ORDER BY id DESC LIMIT ?",
+                    (article_id, limit),
+                )
+                cols = [d[0] for d in cursor.description]
+                rows = cursor.fetchall()
+            items = [dict(zip(cols, row)) for row in rows]
+            items.reverse()
+            return items
+        except sqlite3.Error as e:
+            logger.error("get_chat_messages 查询失败: %s", e)
+            return []
+
+    def clear_chat_messages(self, article_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        "DELETE FROM chat_messages WHERE article_id = ?", (article_id,)
+                    )
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute("DELETE FROM chat_messages WHERE article_id = ?", (article_id,))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("clear_chat_messages 失败: %s", e)
+            return False
+
+    def get_article_chat_count(self, article_id: int) -> int:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    row = self._memory_conn.execute(
+                        "SELECT COUNT(*) FROM chat_messages WHERE article_id = ?", (article_id,)
+                    ).fetchone()
+            else:
+                row = self._conn().execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE article_id = ?", (article_id,)
+                ).fetchone()
+            return row[0] if row else 0
+        except sqlite3.Error as e:
+            logger.error("get_article_chat_count 查询失败: %s", e)
+            return 0

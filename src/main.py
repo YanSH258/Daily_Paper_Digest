@@ -19,7 +19,7 @@ import argparse
 import concurrent.futures
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -28,7 +28,7 @@ import yaml
 from core.db       import Database
 from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from core.analyzer import LLMAnalyzer
-from core.notifier import Notifier
+from core.notifier import Notifier, classify_article
 from fetchers.models import FetchResult
 
 # ── 日志配置 ──────────────────────────────────────────────────
@@ -103,6 +103,32 @@ def validate_config(config: dict) -> None:
         )
 
 
+def load_journals_config(config: dict, db: Database) -> list[dict[str, Any]]:
+    """订阅源唯一来源是数据库：
+    1. 旧版 config.yaml 若还有 journals，自动迁移入库（一次性，之后 config 里不再保留）；
+    2. 返回库中所有启用中的订阅，供抓取使用。
+    """
+    legacy = config.get("journals") or []
+    if legacy:
+        added = db.migrate_config_journals(legacy)
+        if added:
+            logger.info(f"已将 config.yaml 中 {added} 个订阅源迁移至数据库")
+        config.pop("journals", None)
+
+    rows = db.list_journals(enabled_only=True)
+    journals = [
+        {
+            "name": j.get("name") or "未命名订阅",
+            "rss": j["rss"],
+            "publisher": j.get("publisher") or "DEFAULT",
+            "max_articles": int(j.get("max_articles") or 100),
+        }
+        for j in rows
+    ]
+    logger.info(f"订阅源共 {len(journals)} 个（数据库，启用状态）")
+    return journals
+
+
 def run_once(config: dict, date_str: Optional[str] = None) -> None:
     date_str  = date_str or datetime.now().strftime("%Y-%m-%d")
     threshold = config.get("relevance_threshold", 5)
@@ -110,6 +136,7 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
     logger.info(f"========== 开始运行: {date_str} ==========")
 
     db       = Database(config["database"]["path"])
+    config["journals"] = load_journals_config(config, db)
     fetcher  = JournalFetcher(config)
     analyzer = LLMAnalyzer(config)
     notifier = Notifier(config)
@@ -238,25 +265,29 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
     relevant_articles = candidate_articles
 
     # 统计需要解读的文章数
+    analyze_abstract_only = config.get("analyzer", {}).get("analyze_abstract_only", True)
     fulltext_count = sum(1 for a in relevant_articles if a.get("has_fulltext", False))
     abstract_only_count = len(relevant_articles) - fulltext_count
     logger.info(
-        f"  全文解读: {fulltext_count} 篇，仅摘要(跳过解读): {abstract_only_count} 篇"
+        f"  待解读文章: 全文 {fulltext_count} 篇，"
+        f"仅摘要 {abstract_only_count} 篇 (仅摘要解读开关={analyze_abstract_only})"
     )
 
     def _analyze_one(idx_article):
         idx, article = idx_article
-        # ★ 仅摘要文章跳过深度解读，直接标记 analysis 为 None
-        if not article.get("has_fulltext", False):
+        has_ft = article.get("has_fulltext", False)
+
+        if not has_ft and not analyze_abstract_only:
             logger.info(
-                f"  [{idx+1}/{len(relevant_articles)}] 跳过解读(仅摘要): "
+                f"  [{idx+1}/{len(relevant_articles)}] 跳过解读(仅摘要且开关未开启): "
                 f"{article['title'][:55]}..."
             )
             article["analysis"] = None
             return
 
+        mode_str = "全文" if has_ft else "仅摘要"
         logger.info(
-            f"  [{idx+1}/{len(relevant_articles)}] 解读(全文): "
+            f"  [{idx+1}/{len(relevant_articles)}] 解读({mode_str}): "
             f"{article['title'][:55]}..."
         )
         try:
@@ -273,13 +304,18 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
 
     # ── Step 6: 保存数据库记录 ────────────────────────────────
     logger.info("Step 6: 保存数据库记录")
-    # 把 analysis 挂到 new_articles 里对应的相关文章上
+    # 把 analysis 挂到 new_articles 里对应的相关文章上，并提前计算 topic 分类
     relevant_map = {a.get("doi") or a.get("url"): a for a in relevant_articles}
     for article in new_articles:
         key = article.get("doi") or article.get("url")
         if key and key in relevant_map:
             article["analysis"] = relevant_map[key].get("analysis")
-        db.save_article(article)
+        if not article.get("topic"):
+            article["topic"] = classify_article(article)
+
+    # 批量入库，单事务提升写入性能
+    saved_count = db.save_articles_batch(new_articles)
+    logger.info(f"  已批量保存 {saved_count} 篇新文章到数据库")
 
 
     # ── Step 7: 先更新 HTML 索引（邮件需要附加最新版本）───────
