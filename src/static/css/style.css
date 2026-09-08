@@ -293,3 +293,58 @@ details[open] summary::before { content: "− "; }
 @media (max-width: 700px) {
   .settings-grid { grid-template-columns: 1fr; }
 }
+
+/* ══════ 今日精选 ══════ */
+.today-date { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.today-overview { display: flex; flex-wrap: wrap; gap: 18px; padding: 16px 20px; margin-bottom: 16px; }
+.today-stat { display: flex; flex-direction: column; align-items: center; min-width: 72px; }
+.today-stat b { font-size: 1.3em; }
+.today-stat span { font-size: 0.75em; color: var(--muted-fg, #7a8699); }
+.today-stat.top b { color: #1d5bd6; }
+.bucket-title { margin: 18px 0 10px; font-size: 1.02em; }
+.today-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.today-card { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.today-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.today-card-head .feed-card-meta { flex: 1; }
+.today-card-title { font-weight: 600; line-height: 1.45; margin: 4px 0; }
+.today-card-title a { color: var(--fg); }
+.today-reason { font-size: 0.85em; background: #f0f6ff; border-left: 3px solid var(--accent);
+                padding: 6px 10px; border-radius: 0 6px 6px 0; margin: 6px 0; }
+.today-card-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.today-compact { display: flex; flex-direction: column; gap: 6px; }
+.today-row { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid var(--border);
+             border-radius: 8px; padding: 8px 12px; }
+.today-row-title { flex: 1; color: var(--fg); font-size: 0.9em; }
+
+/* ══════ 徽章与状态 ══════ */
+.ev-badge { display: inline-block; font-size: 0.72em; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.ev-full { background: #e6f4ea; color: #1a7f37; }
+.ev-abstract { background: #fff4e0; color: #b26a00; }
+.ev-unknown { background: #f0f0f0; color: #666; }
+.status-chip { display: inline-block; font-size: 0.72em; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.st-queued { background: #e3edfd; color: #1d5bd6; }
+.st-reading { background: #fff4e0; color: #b26a00; }
+.st-read { background: #e6f4ea; color: #1a7f37; }
+
+/* ══════ 批量操作栏 ══════ */
+.batch-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+             background: #f0f6ff; border: 1px solid #c9dcfd; border-radius: 8px;
+             padding: 8px 12px; margin-bottom: 12px; }
+.batch-bar[hidden] { display: none; }
+.small-btn { padding: 4px 10px; font-size: 0.8em; }
+.link-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.82em; padding: 2px 4px; }
+.active-green { border-color: #1a7f37; color: #1a7f37; }
+.active-red { border-color: #c0392b; color: #c0392b; }
+
+/* ══════ 阅读清单 ══════ */
+.reading-list { display: flex; flex-direction: column; gap: 8px; }
+.reading-row { display: flex; align-items: center; gap: 10px; background: #fff;
+               border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.reading-row-main { flex: 1; min-width: 0; }
+.reading-row-title { color: var(--fg); font-weight: 600; font-size: 0.92em; }
+.reading-row-title:hover { color: var(--accent); }
+.reading-row-ops { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ══════ 导航分组 ══════ */
+.nav-divider { height: 1px; background: var(--border); margin: 10px 16px; }
+.nav-secondary .idx { color: var(--muted-fg, #94a0b3); }

@@ -49,7 +49,7 @@ const API = {
    * POST 并消费 SSE 流。
    * 事件格式：data: {"delta": "..."} / {"error": "..."} / {"done": true}
    */
-  async stream(url, body, { onDelta, onDone, onError } = {}) {
+  async stream(url, body, { onDelta, onDone, onError, onContext } = {}) {
     let errored = false;
     try {
       const res = await fetch(url, {
@@ -89,6 +89,7 @@ const API = {
             if (onError) onError(payload.error);
             return;
           }
+          if (payload.context && onContext) onContext(payload.context);
           if (payload.done) {
             if (onDone) onDone(payload);
             return;

@@ -227,6 +227,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
     min_score = float(query.get("min_score", ["0"])[0] or 0)
     analyzed_only = _parse_bool((query.get("analyzed_only", ["false"])[0] or "false"))
     starred_only = _parse_bool((query.get("starred", ["false"])[0] or "false"))
+    read_status = (query.get("read_status", [""])[0] or "").strip()
     limit = _to_int(query.get("limit", ["50"])[0], 50, 1, 200)
     offset = _to_int(query.get("offset", ["0"])[0], 0, 0, 100000)
 
@@ -246,6 +247,11 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         # tags 为逗号分隔存储，用首尾加逗号的方式做整词匹配
         where.append("(',' || COALESCE(tags, '') || ',') LIKE ?")
         params.append(f"%,{tag},%")
+    if read_status == "none":
+        where.append("COALESCE(read_status, '') = ''")
+    elif read_status:
+        where.append("read_status = ?")
+        params.append(read_status)
 
     where.append("COALESCE(relevance, 0) >= ?")
     params.append(min_score)
@@ -264,10 +270,11 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         count_sql = f"SELECT COUNT(*) FROM articles WHERE {where_clause}"
         total = conn.execute(count_sql, params).fetchone()[0]
 
-        # 2. 数据库层面物理分页，避免全量内存加载
+        # 2. 数据库层面物理分页，避免全量内存加载（不含 fulltext_text 大字段）
         sql = (
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
-            "starred, tags, created_at, topic "
+            "starred, tags, created_at, topic, relevance_reason, score_status, "
+            "evidence_level, analysis_status, read_status, relevance_feedback "
             f"FROM articles WHERE {where_clause} "
             "ORDER BY relevance DESC, created_at DESC "
             "LIMIT ? OFFSET ?"
@@ -282,6 +289,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
             if not item.get("topic"):
                 item["topic"] = classify_article(item)
             item["has_analysis"] = bool(item.get("analysis"))
+            item["has_fulltext"] = item.get("evidence_level") == "FULLTEXT"
             page.append(item)
 
         journal_rows = conn.execute(
@@ -307,6 +315,98 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         conn.close()
 
 
+def _today_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
+    """今日精选：按评分分桶（优先阅读 / 值得关注 / 快速浏览）+ 处理中队列。"""
+    date = (query.get("date", [""])[0] or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    rows = ctx.db.list_articles_by_created_date(date, limit=500)
+    buckets: dict[str, list[dict[str, Any]]] = {"top": [], "notable": [], "browse": []}
+    processing: list[dict[str, Any]] = []
+
+    for r in rows:
+        if not r.get("topic"):
+            r["topic"] = classify_article(r)
+        r["has_analysis"] = bool(r.get("analysis"))
+        r["has_fulltext"] = r.get("evidence_level") == "FULLTEXT"
+        r.pop("fulltext_text", None)
+        if r.get("score_status") != "ok" or r.get("relevance") is None:
+            processing.append(r)
+            continue
+        score = float(r["relevance"])
+        if score >= 8:
+            buckets["top"].append(r)
+        elif score >= 6:
+            buckets["notable"].append(r)
+        else:
+            buckets["browse"].append(r)
+
+    return {
+        "date": date,
+        "total": len(rows),
+        "counts": {
+            "top": len(buckets["top"]),
+            "notable": len(buckets["notable"]),
+            "browse": len(buckets["browse"]),
+            "processing": len(processing),
+        },
+        "buckets": buckets,
+        "processing": processing[:50],
+        "task": ctx.runner.get_state(),
+    }
+
+
+def _set_read_status(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    allowed = {"queued", "reading", "read", ""}
+    status = str(data.get("read_status", "") or "")
+    if status not in allowed:
+        return {"ok": False, "error": f"read_status 必须是 {'/'.join(sorted(allowed))}"}, 400
+    ctx.db.update_article_fields(article_id, read_status=status)
+    return _article_action_result(ctx, article_id)
+
+
+def _set_feedback(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    allowed = {"relevant", "irrelevant", ""}
+    feedback = str(data.get("feedback", "") or "")
+    if feedback not in allowed:
+        return {"ok": False, "error": f"feedback 必须是 {'/'.join(sorted(allowed))}"}, 400
+    ctx.db.update_article_fields(article_id, relevance_feedback=feedback)
+    return _article_action_result(ctx, article_id)
+
+
+def _batch_update(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """批量操作：加入阅读清单 / 标记已读等。"""
+    ids = data.get("ids") or []
+    ids = [int(i) for i in ids if str(i).isdigit()][:200]
+    if not ids:
+        return {"ok": False, "error": "ids 不能为空"}, 400
+    allowed = {"queued", "reading", "read", ""}
+    read_status = str(data.get("read_status", "") or "")
+    if read_status not in allowed:
+        return {"ok": False, "error": "read_status 无效"}, 400
+    updated = sum(1 for i in ids if ctx.db.update_article_fields(i, read_status=read_status))
+    return {"ok": True, "updated": updated, "requested": len(ids)}, 200
+
+
+def _citation(ctx: WebContext, article_id: int, fmt: str) -> tuple[str, int, str]:
+    from utils.citation import format_article_citation
+    item = _get_article_detail(ctx, article_id)
+    if item is None:
+        return json.dumps({"error": "article not found"}), 404, "application/json; charset=utf-8"
+    text = format_article_citation(item, fmt)
+    return text, 200, "text/plain; charset=utf-8"
+
+
+def _batch_citation(ctx: WebContext, data: dict[str, Any]) -> tuple[str, int, str]:
+    from utils.citation import format_article_citation
+    fmt = str(data.get("format") or "bibtex").lower()
+    if fmt not in {"bibtex", "ris"}:
+        return json.dumps({"error": "format 必须是 bibtex 或 ris"}), 400, "application/json; charset=utf-8"
+    ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()][:200]
+    items = ctx.db.get_articles_by_ids(ids)
+    items.sort(key=lambda a: ids.index(a["id"]) if a["id"] in ids else 999)
+    parts = [format_article_citation(a, fmt) for a in items]
+    return "\n\n".join(parts), 200, "text/plain; charset=utf-8"
+
+
 def _get_article_detail(ctx: WebContext, article_id: int) -> Optional[dict[str, Any]]:
     conn = ctx.connect_db()
     try:
@@ -329,7 +429,7 @@ def _list_reports(ctx: WebContext, limit: int = 30) -> list[dict[str, Any]]:
     conn = ctx.connect_db()
     try:
         rows = conn.execute(
-            "SELECT report_date, file_path, total_found, total_pushed, created_at "
+            "SELECT report_date, file_path, total_found, total_pushed, push_results, created_at "
             "FROM daily_reports ORDER BY report_date DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -919,7 +1019,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
 
     def _handle_chat_stream(self, article_id: int) -> None:
-        """POST /api/articles/{id}/chat：SSE 流式回答，并把对话落库。"""
+        """POST /api/articles/{id}/chat：SSE 流式回答，并把对话落库。
+
+        事件协议：{"context": 依据范围} → {"delta": ...} → {"done": true}；
+        失败发 {"error": ...} 且不落库伪回答。regenerate=true 时不重复记录问题。
+        """
         try:
             data = _read_json_body(self)
         except json.JSONDecodeError:
@@ -927,6 +1031,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         question = str(data.get("question") or "").strip()
+        regenerate = bool(data.get("regenerate"))
         if not question:
             self._json_response({"error": "question 不能为空"}, code=400)
             return
@@ -946,19 +1051,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         history = self.ctx.db.get_chat_messages(article_id)
-        self.ctx.db.add_chat_message(article_id, "user", question)
+        if not regenerate:
+            self.ctx.db.add_chat_message(article_id, "user", question)
 
         self._sse_start()
+        try:
+            self._sse_send({"context": analyzer.chat_context_summary(article)})
+        except Exception:  # noqa: BLE001 - 上下文说明失败不阻断对话
+            pass
+
         pieces: list[str] = []
         try:
             for delta in analyzer.chat_with_article(article, history, question):
                 pieces.append(delta)
                 if not self._sse_send({"delta": delta}):
                     break
-        except Exception as e:  # noqa: BLE001 - 流式兜底，保证前端拿到 done/error
+        except Exception as e:  # noqa: BLE001 - 流式兜底，保证前端拿到 error 事件
             logger.error("文献对话流式输出失败: %s", e, exc_info=True)
             self._sse_send({"error": f"对话失败: {e}"})
 
+        # 只落库真实回答；错误信息不伪装成 assistant 消息保存
         answer = "".join(pieces)
         if answer:
             self.ctx.db.add_chat_message(article_id, "assistant", answer)
@@ -982,6 +1094,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/" or path == "/dashboard":
                 self._serve_static_file("index.html")
+                return
+
+            if path.startswith("/article/"):
+                pid = path.removeprefix("/article/")
+                if not pid.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                self._serve_static_file("article.html")
                 return
 
             if path.startswith("/static/"):
@@ -1020,6 +1140,10 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if path == "/api/today":
+                self._json_response(_today_view(self.ctx, query))
+                return
+
             if path == "/api/articles":
                 self._json_response(_list_articles(self.ctx, query))
                 return
@@ -1035,6 +1159,15 @@ class Handler(BaseHTTPRequestHandler):
 
             if path.startswith("/api/articles/"):
                 article_id_raw = path.removeprefix("/api/articles/")
+                if article_id_raw.endswith("/citation"):
+                    aid = article_id_raw.removesuffix("/citation")
+                    if not aid.isdigit():
+                        self._json_response({"error": "invalid article id"}, code=400)
+                        return
+                    fmt = (query.get("format", ["bibtex"])[0] or "bibtex").lower()
+                    body, code, ctype = _citation(self.ctx, int(aid), fmt)
+                    self._text_response(body, code=code, content_type=ctype)
+                    return
                 if not article_id_raw.isdigit():
                     self._json_response({"error": "invalid article id"}, code=400)
                     return
@@ -1141,6 +1274,65 @@ class Handler(BaseHTTPRequestHandler):
                 data = _read_json_body(self)
                 payload, code = _set_article_tags(self.ctx, int(article_id_raw), data)
                 self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/status"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/status")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_read_status(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/feedback"):
+                if not self._require_token():
+                    return
+                article_id_raw = path.removeprefix("/api/articles/").removesuffix("/feedback")
+                if not article_id_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_feedback(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/articles/batch":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _batch_update(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/articles/citation":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                body, code, ctype = _batch_citation(self.ctx, data)
+                self._text_response(body, code=code, content_type=ctype)
+                return
+
+            if path == "/api/reports/resend":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                date_str = str(data.get("date") or "").strip()
+                if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+                    self._json_response({"error": "date 格式应为 YYYY-MM-DD"}, code=400)
+                    return
+                try:
+                    from main import push_only
+                    result = push_only(self.ctx.config, date_str)
+                    self._json_response({"ok": True, **result})
+                except FileNotFoundError as e:
+                    self._json_response({"ok": False, "error": str(e)}, code=404)
+                except Exception as e:  # noqa: BLE001 - 推送失败原因需要回传前端
+                    logger.error("补发推送失败: %s", e, exc_info=True)
+                    self._json_response({"ok": False, "error": f"补发失败: {e}"}, code=500)
                 return
 
             if path == "/api/llm/test":

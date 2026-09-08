@@ -166,6 +166,52 @@ def _sha256(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+class RunBusyError(RuntimeError):
+    """已有流水线任务在运行"""
+
+
+class RunLock:
+    """基于文件锁的跨进程互斥：统一约束 CLI、网页触发与定时任务。
+
+    进程崩溃时由操作系统自动释放，不产生死锁残留。
+    """
+
+    def __init__(self, config: dict) -> None:
+        try:
+            import fcntl
+        except ImportError:  # 非 POSIX 平台降级为仅进程内约束
+            fcntl = None  # noqa: F841
+        self._fcntl_available = fcntl is not None
+        db_path = Path(config.get("database", {}).get("path", "data/db/chem_daily.db"))
+        if not db_path.is_absolute():
+            db_path = Path(__file__).resolve().parent.parent / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path = db_path.parent / ".pipeline.lock"
+        self._handle: Optional[Any] = None
+
+    def acquire(self) -> None:
+        if not self._fcntl_available:
+            return
+        import fcntl
+        self._handle = open(self._lock_path, "w")
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as e:
+            self._handle.close()
+            self._handle = None
+            raise RunBusyError("已有流水线任务正在运行（数据库文件锁被占用）") from e
+
+    def release(self) -> None:
+        if not self._fcntl_available or self._handle is None:
+            return
+        import fcntl
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
 def dedupe_batch(articles: list[dict]) -> list[dict]:
     """批次内去重：同一 DOI/URL/标题只保留第一条。
 
@@ -232,6 +278,10 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
 
     if own_task:
         db.task_start(task_id, trigger="cli", mode="default", date_str=date_str)
+
+    # 跨进程互斥：CLI / 网页触发 / 定时任务同一时间只允许一个流水线实例
+    _run_lock = RunLock(config)
+    _run_lock.acquire()
 
     def progress(stage: str) -> None:
         if not own_task:
@@ -531,6 +581,8 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         if own_task:
             db.task_finish(task_id, status="failed", stats=stats, error=str(e))
         raise
+    finally:
+        _run_lock.release()
 
 # ── 定时调度 ──────────────────────────────────────────────────
 

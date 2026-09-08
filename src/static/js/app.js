@@ -2,7 +2,9 @@
 "use strict";
 
 const VIEW_LOADERS = {
+  today: () => Today.load(),
   database: () => { Library.load(); Library.loadTags(); },
+  reading: () => Reading.load(),
   subscriptions: () => Journals.load(),
   reports: () => Reports.load(),
   tasks: () => Tasks.loadStatus(),
@@ -42,9 +44,11 @@ function init() {
   });
 
   Library.init();
+  Reading.init();
+  Today.init();
   initTokenBox();
 
-  showView("database");
+  showView("today");
   Tasks.loadStatus();
   setInterval(() => {
     // 任务状态轮询：仅更新 DOM，不打扰其他视图

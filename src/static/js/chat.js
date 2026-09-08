@@ -126,6 +126,8 @@ const MarkdownLite = {
 const Chat = {
   articleId: null,
   streaming: false,
+  lastQuestion: "",
+  contextNote: "",
 
   init(articleId) {
     this.articleId = articleId;
@@ -198,21 +200,42 @@ const Chat = {
     document.getElementById("chatInput").disabled = busy;
   },
 
-  send() {
+  showContext(note) {
+    this.contextNote = note || "";
+    const wrap = document.getElementById("chatBox");
+    if (!wrap) return;
+    let el = wrap.querySelector(".chat-context");
+    if (!note) {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "chat-context small muted";
+      wrap.insertBefore(el, document.getElementById("chatMessages"));
+    }
+    el.textContent = "本次回答依据：" + note;
+  },
+
+  send(regenerate = false) {
     if (this.streaming) return;
     const input = document.getElementById("chatInput");
-    const question = input.value.trim();
+    let question = input.value.trim();
+    if (regenerate) question = this.lastQuestion;
     if (!question) return;
+    if (!regenerate) this.lastQuestion = question;
+    if (regenerate) input.value = question;
 
-    input.value = "";
-    this.appendBubble("user", question);
+    if (!regenerate) input.value = "";
+    if (!regenerate) this.appendBubble("user", question);
     this.setBusy(true);
 
     const bubble = this.appendBubble("assistant", "");
     const mdEl = bubble.querySelector(".md");
     let acc = "";
 
-    API.stream(`/api/articles/${this.articleId}/chat`, { question }, {
+    API.stream(`/api/articles/${this.articleId}/chat`, { question, regenerate }, {
+      onContext: (note) => this.showContext(note),
       onDelta: (delta) => {
         acc += delta;
         mdEl.innerHTML = MarkdownLite.render(acc);
@@ -227,11 +250,18 @@ const Chat = {
       onError: (msg) => {
         bubble.classList.remove("streaming");
         if (!acc) {
-          mdEl.innerHTML = `<span style="color:var(--red-fg);">${API.esc(msg)}</span>`;
+          // 错误不会落库为回答；提供重新生成入口
+          mdEl.innerHTML = `
+            <span style="color:var(--red-fg);">${API.esc(msg)}</span>
+            <div style="margin-top:6px;"><button class="secondary small-btn" onclick="Chat.retry()">重新生成</button></div>`;
         }
         this.setBusy(false);
       },
     });
+  },
+
+  retry() {
+    this.send(true);
   },
 
   askSuggestion(text) {

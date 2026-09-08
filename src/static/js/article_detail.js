@@ -58,9 +58,18 @@ const Detail = {
 
     const hasAnalysis = Boolean(a.analysis);
     const evidenceBadge = a.evidence_level === "FULLTEXT"
-      ? '<span class="badge green">📜 全文解读</span>'
-      : (hasAnalysis ? '<span class="badge amber">📄 仅摘要解读</span>' : '');
+      ? '<span class="ev-badge ev-full">全文依据</span>'
+      : (a.evidence_level === "ABSTRACT_ONLY"
+          ? '<span class="ev-badge ev-abstract">摘要依据</span>'
+          : '<span class="ev-badge ev-unknown">依据未知</span>');
 
+    const statusOptions = [
+      ["", "未加入清单"], ["queued", "📖 待读"], ["reading", "🔍 在读"], ["read", "✅ 已读"],
+    ].map(([v, label]) =>
+      `<option value="${v}" ${(a.read_status || "") === v ? "selected" : ""}>${label}</option>`
+    ).join("");
+
+    const feedback = a.relevance_feedback || "";
     document.getElementById("drawerContent").innerHTML = `
       <div class="drawer-top">
         <h3>${API.esc(API.cleanTitle(a.title || ""))}</h3>
@@ -73,11 +82,20 @@ const Detail = {
         <span class="badge blue">${API.esc(a.topic || "未分类")}</span>
         <span class="badge ${Number(a.relevance || 0) >= 7 ? "green" : "muted"}">⭐ ${Number(a.relevance || 0).toFixed(1)}</span>
         ${evidenceBadge}
+        <a class="ext-link" href="/article/${a.id}" target="_blank">📖 完整阅读页</a>
         ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
         ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener">DOI ↗</a>` : ""}
       </div>
       <div class="meta-line"><strong>期刊：</strong>${API.esc(a.journal || "-")} · <strong>日期：</strong>${API.esc(a.pub_date || "-")}</div>
       <div class="meta-line"><strong>作者：</strong>${API.esc(a.authors || "-")}</div>
+      ${a.relevance_reason ? `<div class="today-reason"><b>推荐理由：</b>${API.esc(a.relevance_reason)}</div>` : ""}
+
+      <div class="drawer-actions" style="gap:8px;">
+        <select id="detailReadStatus" onchange="Detail.saveReadStatus()" style="max-width:150px;">${statusOptions}</select>
+        <button class="secondary small-btn ${feedback === 'relevant' ? 'active-green' : ''}" onclick="Detail.saveFeedback('relevant')">👍 有用</button>
+        <button class="secondary small-btn ${feedback === 'irrelevant' ? 'active-red' : ''}" onclick="Detail.saveFeedback('irrelevant')">👎 不相关</button>
+        <a class="ext-link" onclick="Detail.downloadCitation('bibtex')">复制 BibTeX</a>
+      </div>
 
       <!-- 选项卡切换 -->
       <div class="drawer-tabs">
@@ -135,6 +153,7 @@ const Detail = {
           </div>
           <div class="chat-ops">
             <span class="small muted" id="chatState"></span>
+            <button class="link-btn" onclick="Chat.retry()">重新生成</button>
             <button class="link-btn" onclick="Chat.clear()">清空对话</button>
           </div>
           <div class="chat-input-row">
@@ -168,6 +187,51 @@ const Detail = {
       this.applyUpdate(resp);
     } catch (e) {
       alert("操作失败: " + e.message);
+    }
+  },
+
+  async saveReadStatus() {
+    const a = this.article;
+    if (!a) return;
+    const status = document.getElementById("detailReadStatus").value;
+    try {
+      const resp = await API.post(`/api/articles/${a.id}/status`, { read_status: status });
+      this.applyUpdate(resp, null, false);
+    } catch (e) {
+      alert("更新失败: " + e.message);
+    }
+  },
+
+  async saveFeedback(feedback) {
+    const a = this.article;
+    if (!a) return;
+    const next = a.relevance_feedback === feedback ? "" : feedback;
+    try {
+      const resp = await API.post(`/api/articles/${a.id}/feedback`, { feedback: next });
+      this.applyUpdate(resp);
+    } catch (e) {
+      alert("反馈失败: " + e.message);
+    }
+  },
+
+  async downloadCitation(fmt) {
+    try {
+      const res = await fetch(`/api/articles/${this.article.id}/citation?format=${fmt}`);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const text = await res.text();
+      try {
+        await navigator.clipboard.writeText(text);
+        alert("BibTeX 已复制到剪贴板");
+      } catch (e) {
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `citation.${fmt}`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    } catch (e) {
+      alert("导出失败: " + e.message);
     }
   },
 

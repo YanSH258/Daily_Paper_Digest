@@ -641,10 +641,14 @@ class Database:
             return []
 
     def list_articles_by_created_date(self, date_str: str, limit: int = 500) -> list[dict[str, Any]]:
-        """按入库日期（created_at 的日期部分）列出文章，供今日精选使用。"""
+        """按入库日期（created_at 转本地时区的日期部分）列出文章，供今日精选使用。
+
+        created_at 默认值为 UTC 的 datetime('now')，必须转 localtime 再比较，
+        否则跨午夜时段的运行会落到"昨天"。
+        """
         try:
             sql = (
-                "SELECT * FROM articles WHERE date(created_at) = ? "
+                "SELECT * FROM articles WHERE date(created_at, 'localtime') = ? "
                 "ORDER BY COALESCE(relevance, 0) DESC, id DESC LIMIT ?"
             )
             if self._memory_conn is not None:
@@ -909,49 +913,26 @@ class Database:
         return added
 
     def delete_journal(self, journal_id: int) -> bool:
-        """删除订阅源；确有删除时把剩余订阅重排为 1..N（订阅 id 无外部引用，重排安全）。"""
+        """删除订阅源。
+
+        订阅 ID 是永久 ID（页面端可能持有旧列表），删除后不做重排，
+        避免旧页面按位置误操作到其他订阅。
+        """
         try:
             if self._memory_conn is not None:
                 with self._memory_lock:
                     cur = self._memory_conn.execute(
                         "DELETE FROM journals WHERE id = ?", (journal_id,)
                     )
-                    if cur.rowcount > 0:
-                        self._renumber_journals_impl(self._memory_conn)
                     self._memory_conn.commit()
-            else:
-                conn = self._conn()
-                cur = conn.execute("DELETE FROM journals WHERE id = ?", (journal_id,))
-                if cur.rowcount > 0:
-                    self._renumber_journals_impl(conn)
-                conn.commit()
-            return True
+                    return cur.rowcount > 0
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM journals WHERE id = ?", (journal_id,))
+            conn.commit()
+            return cur.rowcount > 0
         except sqlite3.Error as e:
             logger.error("delete_journal 失败: %s", e)
             return False
-
-    @staticmethod
-    def _renumber_journals_impl(conn: sqlite3.Connection) -> None:
-        """按现有顺序把 journals 重排为 1..N，并同步自增计数器（两步法避免主键冲突）。"""
-        row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM journals").fetchone()
-        offset = (row[0] if row else 0) + 100000
-        conn.execute("UPDATE journals SET id = id + ?", (offset,))
-        for new_id, (old_id,) in enumerate(
-            conn.execute("SELECT id FROM journals ORDER BY id").fetchall(), start=1
-        ):
-            conn.execute("UPDATE journals SET id = ? WHERE id = ?", (new_id, old_id))
-        count = conn.execute("SELECT COUNT(*) FROM journals").fetchone()[0]
-        seq_row = conn.execute(
-            "SELECT 1 FROM sqlite_sequence WHERE name = 'journals'"
-        ).fetchone()
-        if seq_row:
-            conn.execute(
-                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'journals'", (count,)
-            )
-        else:
-            conn.execute(
-                "INSERT INTO sqlite_sequence (name, seq) VALUES ('journals', ?)", (count,)
-            )
 
     # ── 个人文献库：星标 / 笔记 / 标签 ────────────────────────
 

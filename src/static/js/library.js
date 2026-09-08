@@ -7,6 +7,7 @@ const Library = {
   total: 0,
   tab: "all",
   loadedOnce: false,
+  selection: new Set(),
 
   init() {
     const tabs = document.getElementById("libraryTabs");
@@ -73,10 +74,12 @@ const Library = {
     const journal = document.getElementById("journal").value;
     const topic = document.getElementById("topic").value;
     const tag = document.getElementById("tagFilter").value;
+    const readStatus = document.getElementById("readStatusFilter").value;
     const minScore = document.getElementById("minScore").value || "0";
     const analyzedOnly = document.getElementById("analyzedOnly").checked ? "true" : "false";
     const params = new URLSearchParams({
       q, journal, topic, tag, min_score: minScore, analyzed_only: analyzedOnly,
+      read_status: readStatus,
       starred: this.tab === "starred" ? "true" : "false",
       limit: String(this.perPage),
       offset: String(this.page * this.perPage),
@@ -98,12 +101,25 @@ const Library = {
     }
   },
 
+  evidenceBadge(a) {
+    if (a.evidence_level === "FULLTEXT") return '<span class="ev-badge ev-full">全文依据</span>';
+    if (a.evidence_level === "ABSTRACT_ONLY") return '<span class="ev-badge ev-abstract">摘要依据</span>';
+    return '<span class="ev-badge ev-unknown">依据未知</span>';
+  },
+
+  statusChip(a) {
+    const map = { queued: ["待读", "st-queued"], reading: ["在读", "st-reading"], read: ["已读", "st-read"] };
+    const s = map[a.read_status];
+    return s ? `<span class="status-chip ${s[1]}">${s[0]}</span>` : "";
+  },
+
   renderCards(items) {
     const container = document.getElementById("articleCardContainer");
     if (!container) return;
     container.innerHTML = "";
     if (!items.length) {
       container.innerHTML = '<div class="empty-state">没有符合条件的文献。</div>';
+      this.renderBatchBar();
       return;
     }
     for (const a of items) {
@@ -113,7 +129,7 @@ const Library = {
       const scoreClass = score >= 8 ? "high" : (score >= 6 ? "mid" : "low");
       const hasAnalysis = Boolean(a.has_analysis || a.analysis);
       const badge = hasAnalysis ? '<span class="badge green">AI 解读</span>' : '<span class="badge muted">仅摘要</span>';
-      
+
       const card = document.createElement("div");
       card.className = "article-feed-card";
       card.innerHTML = `
@@ -123,16 +139,20 @@ const Library = {
             <span class="journal-tag">${API.esc(a.journal || "未知期刊")}</span>
             <span class="topic-tag">${API.esc(a.topic || "未分类")}</span>
             <span class="date-tag">${API.esc(a.pub_date || "")}</span>
+            ${this.statusChip(a)}
           </div>
           <button class="star-btn ${a.starred ? "on" : ""}" data-star="${a.id}" data-val="${a.starred ? 1 : 0}"
             title="${a.starred ? "取消收藏" : "收藏"}">${a.starred ? "★" : "☆"}</button>
         </div>
         <div class="feed-card-title title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</div>
+        ${a.relevance_reason ? `<div class="today-reason"><b>推荐理由：</b>${API.esc(a.relevance_reason)}</div>` : ""}
         <div class="feed-card-authors">${API.esc(a.authors || "-")}</div>
         <div class="feed-card-foot">
           <div class="feed-card-tags">${tagBadges}</div>
           <div class="feed-card-actions">
             ${badge}
+            ${this.evidenceBadge(a)}
+            <a class="ext-link" href="/article/${a.id}" target="_blank">阅读页</a>
             ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener" class="ext-link" onclick="event.stopPropagation()">DOI ↗</a>` : ""}
             ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener" class="ext-link" onclick="event.stopPropagation()">原文 ↗</a>` : ""}
           </div>
@@ -149,20 +169,23 @@ const Library = {
         this.toggleStar(el);
       });
     });
+    this.renderBatchBar();
   },
 
   renderRows(items) {
     const tbody = document.querySelector("#articleTable tbody");
     tbody.innerHTML = "";
     if (!items.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="small">没有符合条件的文献。</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="small">没有符合条件的文献。</td></tr>';
       return;
     }
     for (const a of items) {
       const tr = document.createElement("tr");
       const tags = (a.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const tagBadges = tags.map((t) => `<span class="tag-badge">${API.esc(t)}</span>`).join("");
+      const statusMap = { queued: "待读", reading: "在读", read: "已读" };
       tr.innerHTML = `
+        <td><input type="checkbox" data-check="${a.id}" ${this.selection.has(a.id) ? "checked" : ""} /></td>
         <td><button class="star-btn ${a.starred ? "on" : ""}" data-star="${a.id}" data-val="${a.starred ? 1 : 0}"
           title="${a.starred ? "取消收藏" : "收藏"}">${a.starred ? "★" : "☆"}</button></td>
         <td>${Number(a.relevance || 0).toFixed(1)}</td>
@@ -170,6 +193,7 @@ const Library = {
         <td>${API.esc(a.journal || "")}</td>
         <td><span class="title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</span></td>
         <td>${tagBadges}</td>
+        <td>${statusMap[a.read_status] || "—"}</td>
         <td>${API.esc(a.pub_date || "")}</td>
         <td>${a.has_analysis ? '<span class="dot green"></span>' : '<span class="dot muted"></span>'}</td>
       `;
@@ -181,6 +205,64 @@ const Library = {
     tbody.querySelectorAll("button[data-star]").forEach((el) => {
       el.addEventListener("click", () => this.toggleStar(el));
     });
+    tbody.querySelectorAll("input[data-check]").forEach((el) => {
+      el.addEventListener("change", () => {
+        const id = Number(el.dataset.check);
+        if (el.checked) this.selection.add(id); else this.selection.delete(id);
+        this.renderBatchBar();
+      });
+    });
+  },
+
+  toggleCheckAll(el) {
+    const boxes = document.querySelectorAll("#articleTable tbody input[data-check]");
+    boxes.forEach((b) => {
+      b.checked = el.checked;
+      const id = Number(b.dataset.check);
+      if (el.checked) this.selection.add(id); else this.selection.delete(id);
+    });
+    this.renderBatchBar();
+  },
+
+  clearSelection() {
+    this.selection.clear();
+    this.load();
+  },
+
+  renderBatchBar() {
+    const bar = document.getElementById("batchBar");
+    if (!bar) return;
+    bar.hidden = this.selection.size === 0;
+    const countEl = document.getElementById("batchCount");
+    if (countEl) countEl.textContent = `已选 ${this.selection.size} 篇`;
+  },
+
+  async batchSetStatus(status) {
+    if (!this.selection.size) return;
+    try {
+      const resp = await API.post("/api/articles/batch", { ids: [...this.selection], read_status: status });
+      if (resp.ok) { this.selection.clear(); this.load(); }
+      else alert(resp.error || "批量更新失败");
+    } catch (e) { alert("批量更新失败: " + e.message); }
+  },
+
+  async batchExportCitation(fmt) {
+    if (!this.selection.size) return;
+    try {
+      const res = await fetch("/api/articles/citation", {
+        method: "POST",
+        headers: API.headers(),
+        body: JSON.stringify({ ids: [...this.selection], format: fmt }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const text = await res.text();
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `selection.${fmt}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { alert("导出失败: " + e.message); }
   },
 
   renderJournals(journals) {

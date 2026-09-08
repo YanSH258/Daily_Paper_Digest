@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文献阅读 · Daily Paper Digest</title>
+  <style>
+    :root {
+      --bg: #f7f8fa; --card: #ffffff; --ink: #2c3e50; --muted: #7a8699;
+      --line: #e4e8ee; --accent: #2f6fed; --green: #1a7f37; --amber: #b26a00; --red: #c0392b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+           background: var(--bg); color: var(--ink); line-height: 1.7; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: #fff;
+             border-radius: 6px; padding: 6px 12px; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.secondary { background: #f2f4f8; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .topbar a.back { color: var(--muted); }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+    @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; margin-bottom: 16px; }
+    h1.title { font-size: 1.35em; line-height: 1.45; margin-bottom: 10px; }
+    .meta { color: var(--muted); font-size: 0.88em; margin-bottom: 8px; }
+    .meta b { color: var(--ink); font-weight: 600; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+    .pill { display: inline-block; font-size: 0.75em; padding: 2px 8px; border-radius: 10px;
+            background: #eef2f8; color: #4a5b76; white-space: nowrap; }
+    .pill.blue { background: #e3edfd; color: #1d5bd6; }
+    .ev-badge { display: inline-block; font-size: 0.72em; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+    .ev-full { background: #e6f4ea; color: var(--green); }
+    .ev-abstract { background: #fff4e0; color: var(--amber); }
+    .ev-unknown { background: #f0f0f0; color: #666; }
+    .reason { background: #f0f6ff; border-left: 3px solid var(--accent); padding: 10px 14px;
+              border-radius: 0 8px 8px 0; margin: 12px 0; font-size: 0.92em; }
+    .section-h { display: flex; align-items: center; justify-content: space-between; cursor: pointer;
+                 padding: 10px 0; font-weight: 600; }
+    .section-h:hover { color: var(--accent); }
+    .section-body { padding: 4px 0 8px; }
+    .md { font-size: 0.95em; }
+    .md h2, .md h3 { margin: 14px 0 6px; font-size: 1.05em; color: var(--ink); }
+    .md h4 { margin: 12px 0 4px; font-size: 0.98em; }
+    .md p { margin: 8px 0; }
+    .md ul, .md ol { margin: 8px 0 8px 22px; }
+    .md blockquote { margin: 10px 0; padding: 8px 14px; color: var(--muted);
+                     border-left: 3px solid var(--line); background: #fafbfc; }
+    .md table { border-collapse: collapse; margin: 10px 0; font-size: 0.9em; }
+    .md th, .md td { border: 1px solid var(--line); padding: 6px 10px; }
+    .md pre { background: #f4f6f9; padding: 10px 12px; border-radius: 8px; overflow: auto; }
+    .sidebar .card h4 { margin-bottom: 10px; font-size: 0.95em; }
+    select, textarea, input[type="text"] { font: inherit; border: 1px solid var(--line);
+        border-radius: 6px; padding: 6px 10px; width: 100%; box-sizing: border-box; }
+    textarea { resize: vertical; }
+    .ops-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .tag-badge { display: inline-block; background: #eef2f8; border-radius: 10px;
+                 padding: 2px 8px; font-size: 0.78em; margin: 2px 4px 2px 0; }
+    .note-area { min-height: 90px; }
+    .small { font-size: 0.82em; }
+    .muted { color: var(--muted); }
+    .err { color: var(--red); }
+    .ok-msg { color: var(--green); }
+    .fulltext-box { white-space: pre-wrap; font-size: 0.88em; color: #444;
+                    max-height: 420px; overflow: auto; background: #fafbfc;
+                    padding: 12px 14px; border-radius: 8px; }
+    /* 对话区（复用 chat.js 的 DOM 结构） */
+    .chat-box { display: flex; flex-direction: column; gap: 8px; }
+    .chat-context { padding: 4px 2px; }
+    .chat-suggestions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { font-size: 0.78em; border-radius: 14px; padding: 4px 10px; background: #f2f4f8; border: none; }
+    .chat-messages { display: flex; flex-direction: column; gap: 10px; max-height: 480px;
+                     overflow: auto; padding: 4px 2px; }
+    .msg { max-width: 95%; padding: 8px 12px; border-radius: 10px; font-size: 0.88em; }
+    .msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+    .msg.assistant { align-self: flex-start; background: #f2f4f8; }
+    .msg.streaming { opacity: 0.75; }
+    .chat-empty { color: var(--muted); font-size: 0.85em; text-align: center; padding: 14px 0; }
+    .chat-input-row { display: flex; gap: 8px; }
+    .chat-input-row textarea { min-height: 56px; }
+    .link-btn { background: none; border: none; color: var(--accent); padding: 2px 4px; font-size: 0.85em; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+             background: var(--ink); color: #fff; padding: 8px 18px; border-radius: 20px;
+             font-size: 0.85em; opacity: 0; transition: opacity .3s; pointer-events: none; }
+    .toast.show { opacity: 0.95; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <a class="back" href="/" >← 返回控制台</a>
+    <span class="small muted" id="pageState"></span>
+  </div>
+
+  <div id="loading" class="small muted">加载中...</div>
+
+  <div class="layout" id="layout" hidden>
+    <!-- 主阅读区 -->
+    <div>
+      <div class="card">
+        <h1 class="title" id="aTitle"></h1>
+        <div class="meta" id="aMeta"></div>
+        <div class="row" id="aPills"></div>
+        <div class="reason" id="aReason" hidden></div>
+        <div class="row" id="aActions"></div>
+      </div>
+
+      <div class="card" id="conclusionCard" hidden>
+        <div class="section-h" onclick="Article.toggleBody('conclusionBody', this)">⚡ 一句话总结 <span class="muted small">▾</span></div>
+        <div class="section-body md" id="conclusionBody"></div>
+      </div>
+
+      <div class="card" id="analysisCard" hidden>
+        <div class="section-h" onclick="Article.toggleBody('analysisBody', this)">🤖 AI 结构化解读 <span class="muted small">▾</span></div>
+        <div class="section-body md" id="analysisBody"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-h" onclick="Article.toggleBody('abstractBody', this)">📄 原文摘要 <span class="muted small">▾</span></div>
+        <div class="section-body" id="abstractBody" hidden></div>
+      </div>
+
+      <div class="card" id="fulltextCard" hidden>
+        <div class="section-h" onclick="Article.toggleBody('fulltextBody', this)">📚 原文节选（全文依据）<span class="muted small">▸</span></div>
+        <div class="section-body" id="fulltextBody" hidden>
+          <div class="fulltext-box" id="fulltextBox"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 侧边辅助区 -->
+    <div class="sidebar">
+      <div class="card">
+        <h4>阅读管理</h4>
+        <select id="readStatus" onchange="Article.saveReadStatus()"></select>
+        <div class="ops-row">
+          <button class="secondary" id="starBtn" onclick="Article.toggleStar()">☆ 收藏</button>
+          <button class="secondary" onclick="Article.feedback('relevant')">👍 有用</button>
+          <button class="secondary" onclick="Article.feedback('irrelevant')">👎 不相关</button>
+        </div>
+        <div class="ops-row">
+          <button class="secondary" onclick="Article.downloadCitation('bibtex')">BibTeX</button>
+          <button class="secondary" onclick="Article.downloadCitation('ris')">RIS</button>
+        </div>
+        <div class="small muted" id="feedbackNote" style="margin-top:6px;"></div>
+      </div>
+
+      <div class="card">
+        <h4>我的标签</h4>
+        <div id="tagBadges"></div>
+        <input type="text" id="tagsInput" placeholder="逗号分隔，如：精读, 待复现" style="margin-top:6px;" />
+        <div class="ops-row">
+          <button class="secondary small" onclick="Article.saveTags()">保存标签</button>
+          <span class="small ok-msg" id="tagsMsg"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>我的笔记</h4>
+        <textarea id="noteArea" class="note-area" placeholder="阅读思路、待验证问题..."></textarea>
+        <div class="ops-row">
+          <button class="secondary" onclick="Article.saveNote()">保存笔记</button>
+          <span class="small ok-msg" id="noteMsg"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h4>文献问答</h4>
+        <div class="chat-box" id="chatBox">
+          <div class="chat-suggestions">
+            <button type="button" class="chip" onclick="Chat.askSuggestion('用通俗的语言解释一下本文的核心创新点？')">💡 核心创新点？</button>
+            <button type="button" class="chip" onclick="Chat.askSuggestion('这篇论文的结论对我们的课题有什么可借鉴之处？')">🔗 与我的课题关联？</button>
+          </div>
+          <div class="chat-messages" id="chatMessages">
+            <div class="chat-empty">加载中...</div>
+          </div>
+          <div class="chat-ops">
+            <button class="link-btn" onclick="Chat.retry()">重新生成</button>
+            <button class="link-btn" onclick="Chat.clear()">清空对话</button>
+          </div>
+          <div class="chat-input-row">
+            <textarea id="chatInput" placeholder="问问这篇文献…（Enter 发送）"></textarea>
+            <button class="primary" id="chatSend">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/article_page.js"></script>
+</body>
+</html>
