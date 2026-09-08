@@ -70,7 +70,7 @@ journals:
     max_articles: 100
 
   - name: "Phys. Chem. Chem. Phys. (PCCP)"
-    rss: "http://feeds.rsc.org/rss/cp"
+    rss: "https://feeds.rsc.org/rss/cp"
     publisher: "RSC"
     max_articles: 100
 
@@ -111,7 +111,7 @@ journals:
     max_articles: 100
 
   - name: "Catalysis Sci. & Tech."
-    rss: "http://feeds.rsc.org/rss/cy"
+    rss: "https://feeds.rsc.org/rss/cy"
     publisher: "RSC"
     max_articles: 100
 
@@ -126,7 +126,7 @@ journals:
     max_articles: 100
 
   - name: "J. Mater. Chem. A"
-    rss: "http://feeds.rsc.org/rss/ta"
+    rss: "https://feeds.rsc.org/rss/ta"
     publisher: "RSC"
     max_articles: 100
 
@@ -142,7 +142,7 @@ journals:
     max_articles: 100
 
   - name: "Chemical Science"
-    rss: "http://feeds.rsc.org/rss/sc"
+    rss: "https://feeds.rsc.org/rss/sc"
     publisher: "RSC"
     max_articles: 100
 

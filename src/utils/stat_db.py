@@ -480,7 +480,7 @@ function exportExcel() {{
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(html, encoding="utf-8")
-    print(f"✅ HTML 索引页已生成: {output_path}")
+    print(f"✅ HTML 索引页已生成: {output_path} (共 {total} 篇文章)", flush=True)
 
 
 # ── 主入口 ────────────────────────────────────────────────────

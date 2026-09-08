@@ -284,13 +284,28 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
 
     # ── Step 7: 先更新 HTML 索引（邮件需要附加最新版本）───────
     logger.info("Step 7: 更新数据库 HTML 索引")
+    # 使用绝对路径，避免工作目录不一致导致文件写到错误位置
+    html_index_path = Path("data/output/paper_index.html").resolve()
+    logger.info(f"  HTML 索引路径: {html_index_path}")
     try:
         from utils.stat_db import build_html_index
         _threshold = config.get("relevance_threshold", 5)
         with db.get_connection() as conn:
-            build_html_index(conn, _threshold, "data/output/paper_index.html")
+            # 查询数据库中有多少篇文章
+            cur = conn.execute("SELECT COUNT(*) FROM articles")
+            total_in_db = cur.fetchone()[0]
+            logger.info(f"  数据库中共有 {total_in_db} 篇文章")
+            build_html_index(conn, _threshold, str(html_index_path))
+        # 验证文件是否真的被更新了
+        if html_index_path.exists():
+            mtime = datetime.fromtimestamp(html_index_path.stat().st_mtime)
+            size = html_index_path.stat().st_size
+            logger.info(f"✅ HTML 索引已更新: {html_index_path}")
+            logger.info(f"   修改时间: {mtime.strftime('%Y-%m-%d %H:%M:%S')}, 大小: {size} bytes")
+        else:
+            logger.warning(f"⚠️ HTML 索引文件不存在: {html_index_path}")
     except Exception as e:
-        logger.warning(f"HTML 索引生成失败: {e}")
+        logger.exception(f"HTML 索引生成失败: {e}")
 
     # ── Step 8: 生成报告并推送 ─────────────────────────────────
     logger.info("Step 8: 生成报告并推送")
