@@ -27,14 +27,35 @@ class TestDailyPaperDigestCore(unittest.TestCase):
             "topic": "机器学习势函数 / MLIP",
         }
 
-        # 测试批量保存
-        saved = db.save_articles_batch([article1])
-        self.assertEqual(saved, 1)
+        # 测试批量保存（返回与输入对齐的 id 列表）
+        saved_ids = db.save_articles_batch([article1])
+        self.assertEqual(len(saved_ids), 1)
+        self.assertIsInstance(saved_ids[0], int)
+        article_id = saved_ids[0]
 
         # 检查 topic 是否保存成功
         conn = db.get_connection()
         row = conn.execute("SELECT topic FROM articles WHERE doi = ?", (article1["doi"],)).fetchone()
         self.assertEqual(row[0], "机器学习势函数 / MLIP")
+
+        # 新文章初始为未完成状态（processed=0），阶段状态默认空
+        row = conn.execute("SELECT processed, score_status FROM articles WHERE doi = ?",
+                           (article1["doi"],)).fetchone()
+        self.assertEqual(row[0], 0)
+        self.assertEqual(row[1], "")
+
+        # 阶段状态更新（白名单字段）
+        self.assertTrue(db.update_article_fields(
+            article_id, score_status="ok", relevance=9.0,
+            relevance_reason="命中", processed=1))
+        row = conn.execute("SELECT score_status, relevance_reason, updated_at FROM articles WHERE id = ?",
+                           (article_id,)).fetchone()
+        self.assertEqual(row[0], "ok")
+        self.assertEqual(row[1], "命中")
+        self.assertIsNotNone(row[2])
+
+        # 白名单之外的列不允许通过该接口修改
+        self.assertFalse(db.update_article_fields(article_id, doi="hack"))
 
         # 测试 DOI 精确查重
         is_dup, reason = db.check_duplicate({"doi": "10.1021/acs.jcim.12345", "title": "Other Title"})

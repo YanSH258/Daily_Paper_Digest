@@ -24,7 +24,7 @@ from core.analyzer import LLMAnalyzer
 from core.db import Database
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import classify_article
-from main import load_config, run_once, setup_logging, validate_config
+from main import load_config, load_config_from_obj, run_once, setup_logging, validate_config
 
 logger = logging.getLogger("web")
 
