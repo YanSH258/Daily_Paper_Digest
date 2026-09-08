@@ -30,6 +30,7 @@ setup(
         "console_scripts": [
             "daily-paper-digest=main:main",
             "stat-db=utils.stat_db:main",
+            "daily-paper-web=web_server:main",
         ],
     },
 )
