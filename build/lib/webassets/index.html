@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Paper Digest · 控制台</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="mark">Daily Paper Digest<i>.</i></span>
+      <span class="sub">文献库 · 控制台</span>
+    </div>
+    <nav>
+      <a class="nav-item" data-view="today" id="nav-today"><span class="idx">01</span> 今日精选</a>
+      <a class="nav-item" data-view="database" id="nav-database"><span class="idx">02</span> 文献库</a>
+      <a class="nav-item" data-view="reading" id="nav-reading"><span class="idx">03</span> 阅读清单</a>
+      <a class="nav-item" data-view="reports" id="nav-reports"><span class="idx">04</span> 历史日报</a>
+      <div class="nav-divider"></div>
+      <a class="nav-item nav-secondary" data-view="subscriptions" id="nav-subscriptions"><span class="idx">05</span> 订阅管理</a>
+      <a class="nav-item nav-secondary" data-view="tasks" id="nav-tasks"><span class="idx">06</span> 运行任务</a>
+      <a class="nav-item nav-secondary" data-view="settings" id="nav-settings"><span class="idx">07</span> 设置</a>
+    </nav>
+    <div class="sidebar-foot">
+      <a href="/paper-index" target="_blank">只读大盘 paper_index</a>
+      <div class="token-box">
+        <input id="tokenInput" type="password" placeholder="API Token（写操作需要）" />
+        <button class="secondary small-btn" id="tokenSave">保存</button>
+      </div>
+      <span id="tokenMsg" class="small muted"></span>
+      <span class="small muted">Daily Paper Digest</span>
+    </div>
+  </aside>
+
+  <main>
+    <!-- ══ 01 今日精选 ══ -->
+    <section class="view" id="view-today" hidden>
+      <div class="view-head" style="display:flex; justify-content:space-between; align-items:flex-end; gap:16px;">
+        <div>
+          <h2 id="todayTitle">今日精选</h2>
+          <p class="lede">围绕你的研究方向筛选：先读优先，其余快速略过。</p>
+        </div>
+        <input id="todayDate" type="date" class="today-date" onchange="Today.load()" />
+      </div>
+
+      <div class="today-overview card" id="todayOverview"></div>
+
+      <div id="todayError" class="err" style="margin:12px 0;" hidden></div>
+
+      <div id="todayTopWrap">
+        <h3 class="bucket-title">🎯 优先阅读</h3>
+        <div id="todayTop" class="today-list"></div>
+      </div>
+      <div id="todayNotableWrap">
+        <h3 class="bucket-title">👍 值得关注</h3>
+        <div id="todayNotable" class="today-list"></div>
+      </div>
+      <div id="todayBrowseWrap">
+        <h3 class="bucket-title">👀 快速浏览</h3>
+        <div id="todayBrowse" class="today-compact"></div>
+      </div>
+      <div id="todayProcessingWrap" hidden>
+        <h3 class="bucket-title">⏳ 处理中 / 失败待重试</h3>
+        <div id="todayProcessing" class="today-compact"></div>
+        <p class="small muted">这些文章尚未完成评分，将在下次运行时自动重试。</p>
+      </div>
+    </section>
+
+    <!-- ══ 02 文献库 ══ -->
+    <section class="view" id="view-database" hidden>
+      <div class="view-head">
+        <h2>文献库</h2>
+        <p class="lede">检索已入库的文献；点击标题打开详情，可星标收藏、写笔记、打标签，并与 AI 就这篇文献对话。</p>
+      </div>
+
+      <div class="card">
+        <div class="tabs" id="libraryTabs">
+          <button class="tab active" data-tab="all">全部文献</button>
+          <button class="tab" data-tab="starred">⭐ 我的收藏</button>
+        </div>
+        <div class="row" style="margin-bottom:16px;">
+          <input id="q" placeholder="关键词（标题/摘要/作者/期刊）" style="min-width:220px; flex:1;" />
+          <select id="journal"><option value="">全部期刊</option></select>
+          <select id="topic">
+            <option value="">全部方向</option>
+            <option>机器学习势函数 / MLIP</option>
+            <option>分子动力学 / MD</option>
+            <option>金属有机框架 / MOF</option>
+            <option>DFT / 第一性原理</option>
+            <option>催化 / 反应机理</option>
+            <option>材料性质预测</option>
+            <option>大模型 / AI for Science</option>
+            <option>量子化学 / 电子结构</option>
+            <option>纳米材料 / 表面</option>
+            <option>其他</option>
+          </select>
+          <select id="tagFilter"><option value="">全部标签</option></select>
+          <select id="readStatusFilter">
+            <option value="">全部阅读状态</option>
+            <option value="none">未加入清单</option>
+            <option value="queued">待读</option>
+            <option value="reading">在读</option>
+            <option value="read">已读</option>
+          </select>
+          <input id="minScore" type="number" min="0" max="10" step="0.1" value="0" style="width:88px;" title="最低评分" />
+          <label class="small"><input id="analyzedOnly" type="checkbox" /> 仅看有解读</label>
+          <button onclick="Library.search()">查询</button>
+          <div class="view-mode-toggle">
+            <button type="button" class="view-mode-btn active" id="viewModeCard" onclick="Library.setViewMode('card')" title="卡片视图">📰 卡片</button>
+            <button type="button" class="view-mode-btn" id="viewModeTable" onclick="Library.setViewMode('table')" title="表格视图">📋 表格</button>
+          </div>
+        </div>
+        <div id="summary" class="small" style="margin-bottom:12px;"></div>
+
+        <!-- 批量操作栏 -->
+        <div id="batchBar" class="batch-bar" hidden>
+          <span id="batchCount" class="small"></span>
+          <button class="secondary small-btn" onclick="Library.batchSetStatus('queued')">加入待读清单</button>
+          <button class="secondary small-btn" onclick="Library.batchSetStatus('read')">标记已读</button>
+          <button class="secondary small-btn" onclick="Library.batchExportCitation('bibtex')">导出 BibTeX</button>
+          <button class="secondary small-btn" onclick="Library.batchExportCitation('ris')">导出 RIS</button>
+          <button class="link-btn" onclick="Library.clearSelection()">取消选择</button>
+        </div>
+
+        <!-- 卡片视图容器 -->
+        <div id="articleCardContainer" class="article-cards-grid"></div>
+
+        <!-- 表格视图容器 -->
+        <div id="articleTableWrap" style="overflow:auto;" hidden>
+          <table id="articleTable">
+            <thead><tr><th><input type="checkbox" id="checkAll" onchange="Library.toggleCheckAll(this)" /></th><th></th><th>评分</th><th>方向</th><th>期刊</th><th>标题</th><th>标签</th><th>状态</th><th>日期</th><th>解读</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="pagination"></div>
+      </div>
+    </section>
+
+    <!-- ══ 03 阅读清单 ══ -->
+    <section class="view" id="view-reading" hidden>
+      <div class="view-head">
+        <h2>阅读清单</h2>
+        <p class="lede">稍后读、正在读、已读。默认展示待读与在读，按方向筛选，批量更新状态。</p>
+      </div>
+      <div class="card">
+        <div class="tabs" id="readingTabs">
+          <button class="tab" data-status="queued">📖 待读</button>
+          <button class="tab" data-status="reading">🔍 在读</button>
+          <button class="tab" data-status="read">✅ 已读</button>
+        </div>
+        <div class="row" style="margin:12px 0 16px;">
+          <select id="readingTopic" style="max-width:260px;">
+            <option value="">全部方向</option>
+          </select>
+          <span id="readingSummary" class="small"></span>
+        </div>
+        <div class="batch-bar" id="readingBatchBar" hidden>
+          <span id="readingBatchCount" class="small"></span>
+          <button class="secondary small-btn" onclick="Reading.batchSetStatus('reading')">开始读</button>
+          <button class="secondary small-btn" onclick="Reading.batchSetStatus('read')">标记已读</button>
+          <button class="secondary small-btn" onclick="Reading.batchExportCitation('bibtex')">导出 BibTeX</button>
+          <button class="link-btn" onclick="Reading.clearSelection()">取消选择</button>
+        </div>
+        <div id="readingList" class="reading-list"></div>
+        <div class="pagination" id="readingPagination"></div>
+      </div>
+    </section>
+
+    <!-- ══ 04 订阅管理 ══ -->
+    <section class="view" id="view-subscriptions" hidden>
+      <div class="view-head">
+        <h2>订阅管理</h2>
+        <p class="lede">管理 RSS 订阅源。所有订阅保存在数据库，参与每日抓取；可测试、停用、删除。</p>
+      </div>
+
+      <div class="card">
+        <h3>添加订阅</h3>
+        <div class="row">
+          <input id="jName" placeholder="期刊名称（可选）" style="min-width:180px;" />
+          <input id="jRss" placeholder="RSS 订阅链接（必填，如 https://feeds.rsc.org/rss/cp）" style="min-width:300px; flex:1;" />
+          <select id="jPublisher">
+            <option value="">自动识别出版商</option>
+            <option>ACS</option><option>Wiley</option><option>Nature</option>
+            <option>Elsevier</option><option>RSC</option><option>Springer</option>
+            <option>AIP</option><option>APS</option><option>IOP</option><option>MDPI</option>
+            <option>Science</option><option>arXiv</option><option>ChemRxiv</option><option>DEFAULT</option>
+          </select>
+          <button onclick="Journals.test()" class="secondary">测试链接</button>
+          <button onclick="Journals.add()">保存订阅</button>
+        </div>
+        <div id="journalMsg" class="small" style="margin-top:10px;"></div>
+        <details style="margin-top:14px;">
+          <summary class="small">批量导入（粘贴多条链接或 OPML）</summary>
+          <div style="margin-top:10px;">
+            <textarea id="importText" rows="5" style="width:100%; box-sizing:border-box;" placeholder="每行一个 RSS 链接，例如：&#10;https://www.nature.com/nchem.rss&#10;https://feeds.rsc.org/rss/cp&#10;&#10;也可以直接粘贴 OPML 的 XML 内容"></textarea>
+            <div class="row" style="margin-top:10px;">
+              <input type="file" id="importFile" accept=".opml,.xml,text/xml,text/plain" onchange="Journals.onImportFile(event)" />
+              <button onclick="Journals.import()">批量导入</button>
+            </div>
+            <div id="importMsg" class="small" style="margin-top:10px;"></div>
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
+        <h3>订阅列表</h3>
+        <div style="overflow:auto;">
+          <table id="journalTable">
+            <thead><tr><th>ID</th><th>名称</th><th>RSS</th><th>出版商</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ 05 历史日报 ══ -->
+    <section class="view" id="view-reports" hidden>
+      <div class="view-head">
+        <h2>历史日报</h2>
+        <p class="lede">按日期查看每日文献日报（发现数 / 推送数），点击预览在线阅读 HTML 版。</p>
+      </div>
+
+      <div class="card">
+        <h3>日报列表</h3>
+        <div style="overflow:auto;">
+          <table id="reportTable">
+            <thead><tr><th>日期</th><th>发现</th><th>推送</th><th>推送状态</th><th>生成时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" id="reportPreviewCard" hidden>
+        <h3>日报预览 · <span id="reportPreviewDate" class="mono"></span></h3>
+        <div class="row" style="margin-bottom:12px;">
+          <button class="secondary" onclick="Reports.openInNew()">在新窗口打开</button>
+          <button class="secondary" onclick="Reports.toggleMd()" id="reportMdBtn">查看 Markdown 源文件</button>
+        </div>
+        <iframe id="reportFrame" class="report-frame" title="日报预览"></iframe>
+      </div>
+    </section>
+
+    <!-- ══ 06 运行任务 ══ -->
+    <section class="view" id="view-tasks" hidden>
+      <div class="view-head">
+        <h2>运行任务</h2>
+        <p class="lede">手动触发一次抓取，或查看当前任务状态。</p>
+      </div>
+
+      <div class="card">
+        <h3>触发抓取</h3>
+        <div class="row">
+          <button onclick="Tasks.trigger('default')">运行（默认模式）</button>
+          <button onclick="Tasks.trigger('abstract')" class="secondary">运行（仅摘要模式）</button>
+          <button onclick="Tasks.trigger('fulltext')" class="secondary">运行（强制全文模式）</button>
+          <span id="runResult" class="small"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>任务状态</h3>
+        <div id="statusBox" class="small"></div>
+      </div>
+    </section>
+
+    <!-- ══ 07 设置 ══ -->
+    <section class="view" id="view-settings" hidden>
+      <div class="view-head">
+        <h2>设置</h2>
+        <p class="lede">直接修改配置并写回 config.yaml（保留注释），保存后立即生效，无需重启。</p>
+      </div>
+      <div class="settings-grid" id="settingsContent"></div>
+      <div class="card">
+        <h3>保存</h3>
+        <div class="row">
+          <button onclick="Settings.save()">保存设置</button>
+          <span id="settingsMsg" class="small"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ══ 文献详情抽屉 ══ -->
+<div class="drawer-overlay" id="drawerOverlay" hidden></div>
+<aside class="drawer" id="articleDrawer" hidden>
+  <div id="drawerContent"></div>
+</aside>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/today.js"></script>
+<script src="/static/js/reading.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/article_detail.js"></script>
+<script src="/static/js/library.js"></script>
+<script src="/static/js/journals.js"></script>
+<script src="/static/js/reports.js"></script>
+<script src="/static/js/tasks.js"></script>
+<script src="/static/js/settings.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
