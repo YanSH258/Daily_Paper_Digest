@@ -36,6 +36,11 @@ class TaskRunner:
         self._last_scheduler_date: Optional[str] = None
         self._scheduler_stop = threading.Event()
         self._scheduler_thread: Optional[threading.Thread] = None
+        self._db: Optional[Database] = None
+
+    def attach_db(self, db: Database) -> None:
+        """注入数据库实例，用于持久化任务运行记录。"""
+        self._db = db
         self.state: dict[str, Any] = {
             "running": False,
             "task_id": None,
@@ -88,10 +93,14 @@ class TaskRunner:
         cfg = self._make_run_cfg(mode)
         success = False
         error_msg = None
+        stats: Optional[dict[str, Any]] = None
+
+        if self._db is not None:
+            self._db.task_start(task_id, trigger=trigger, mode=mode, date_str=date_str)
 
         try:
             logger.info("任务启动: task_id=%s trigger=%s mode=%s", task_id, trigger, mode)
-            run_once(cfg, date_str=date_str)
+            stats = run_once(cfg, date_str=date_str, task_id=task_id)
             success = True
             logger.info("任务完成: task_id=%s", task_id)
         except Exception as e:  # pragma: no cover - 运行期保护
@@ -108,6 +117,14 @@ class TaskRunner:
             else:
                 self.state["failure_count"] += 1
                 self.state["last_error"] = error_msg
+
+        if self._db is not None:
+            status = "success" if success else "failed"
+            if success and stats and (stats.get("db_errors") or stats.get("scored_failed")
+                                      or stats.get("analyzed_failed")):
+                status = "partial"
+            self._db.task_finish(task_id, status=status, stats=stats, error=error_msg,
+                                 stage="done" if success else "failed")
 
     def get_state(self) -> dict[str, Any]:
         with self._lock:
@@ -162,6 +179,11 @@ class WebContext:
         validate_config(self.config)
         self.runner = TaskRunner(self.config)
         self.db = Database(self.config["database"]["path"])
+        self.runner.attach_db(self.db)
+        # 上次异常退出遗留的 running 任务标记为 interrupted
+        interrupted = self.db.mark_interrupted_tasks()
+        if interrupted:
+            logger.info("已将 %d 个遗留运行中的任务标记为 interrupted", interrupted)
         self.fetcher = JournalFetcher(self.config)
 
         output_cfg = self.config.get("output", {})
@@ -1146,6 +1168,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/journals/test":
+                if not self._require_token():
+                    return
                 data = _read_json_body(self)
                 payload, code = _test_journal(self.ctx, data)
                 self._json_response(payload, code=code)

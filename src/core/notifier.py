@@ -107,9 +107,12 @@ class Notifier:
 
     def notify(self, relevant_articles: List[Dict[str, Any]],
                all_articles: Optional[List[Dict[str, Any]]] = None,
-               date_str: Optional[str] = None) -> str:
+               date_str: Optional[str] = None) -> tuple[str, Dict[str, Optional[bool]]]:
         """
-        生成今日报告并推送
+        生成今日报告并推送。
+
+        返回 (md_path, push_results)：push_results 记录各渠道成功与否，
+        由调用方持久化到 daily_reports.push_results，支持后续只补发失败渠道。
         """
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
         all_articles = all_articles or relevant_articles
@@ -185,7 +188,47 @@ class Notifier:
                 summary_parts.append(f"{channel}: {status}")
             logger.info(f"推送渠道状态 — {' | '.join(summary_parts)}")
 
-        return str(md_path)
+        return str(md_path), push_results
+
+    def resend(self, date_str: str) -> tuple[str, Dict[str, Optional[bool]]]:
+        """重发已有日报（不重新抓取/评分/分析），供补发失败推送使用。
+
+        返回 (md_path, push_results)；当日无日报文件时抛 FileNotFoundError。
+        """
+        md_path = self.output_dir / f"{date_str}.md"
+        html_path = self.output_dir / f"{date_str}.html"
+        if not md_path.exists() and not html_path.exists():
+            raise FileNotFoundError(f"未找到 {date_str} 的日报文件: {md_path}")
+
+        push_results: Dict[str, Optional[bool]] = {}
+
+        email_cfg = self.output_cfg.get("email", {})
+        if email_cfg.get("enabled", False):
+            if html_path.exists():
+                content, is_html = html_path.read_text(encoding="utf-8"), True
+            else:
+                content, is_html = md_path.read_text(encoding="utf-8"), False
+            db_html = self.output_dir / "paper_index.html"
+            attachments = [db_html] if db_html.exists() else []
+            try:
+                self._send_email(content, date_str, email_cfg, is_html=is_html, attachments=attachments)
+                push_results["email"] = True
+            except Exception:
+                logger.exception(f"重发邮件失败: {date_str}")
+                push_results["email"] = False
+
+        feishu_cfg = self.output_cfg.get("feishu", {})
+        if feishu_cfg.get("enabled", False):
+            try:
+                text = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+                header = f"📚 化学文献日报 {date_str}（补发）\n\n"
+                self._send_feishu_text(header + text[:3000], feishu_cfg)
+                push_results["feishu"] = True
+            except Exception:
+                logger.exception(f"重发飞书失败: {date_str}")
+                push_results["feishu"] = False
+
+        return str(md_path), push_results
 
     # ──────────────────────────────────────────────
     # HTML 构建
@@ -556,6 +599,12 @@ class Notifier:
     # ──────────────────────────────────────────────
     # 飞书 Webhook
     # ──────────────────────────────────────────────
+
+    def _send_feishu_text(self, text: str, cfg: Dict[str, Any]) -> None:
+        """发送纯文本到飞书 Webhook（供重发/摘要场景复用）。"""
+        payload = {"msg_type": "text", "content": {"text": text}}
+        resp = requests.post(cfg["webhook_url"], json=payload, timeout=10)
+        resp.raise_for_status()
 
     def _send_feishu(self, relevant: List[Dict[str, Any]],
                      all_articles: List[Dict[str, Any]],

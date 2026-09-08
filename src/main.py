@@ -1,20 +1,23 @@
 """
 main.py - 主入口
-两阶段流程：
-  1. RSS摘要快速过滤相关性
-  2. 只对通过门槛的文章读取全文
-  3. 用全文做深度解读
+分阶段流水线：
+  1. RSS 抓取 → 批次内去重 → 数据库去重 → 立即入库基础记录
+  2. LLM 相关性评分（含失败重试）→ 全文获取 → 深度解读
+  3. 各阶段状态实时落库，支持中断续跑与失败补齐
 
 用法：
   python src/main.py                          # 立即运行一次
   python src/main.py --schedule               # 按 config.yaml 中的时间每日定时运行
   python src/main.py --date 2024-01-15        # 指定报告日期
   python src/main.py --config config/config.yaml  # 指定配置文件路径
+  python src/main.py --push-only 2024-01-15   # 只补发指定日期的日报推送
 """
 import os
 import sys
 import copy
+import uuid
 import time
+import hashlib
 import logging
 import argparse
 import concurrent.futures
@@ -28,7 +31,7 @@ import yaml
 
 from core.db       import Database
 from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
-from core.analyzer import LLMAnalyzer
+from core.analyzer import LLMAnalyzer, PROMPT_VERSION
 from core.notifier import Notifier, classify_article
 from fetchers.models import FetchResult
 
@@ -159,11 +162,67 @@ def load_journals_config(config: dict, db: Database) -> list[dict[str, Any]]:
     return journals
 
 
-def run_once(config: dict, date_str: Optional[str] = None) -> None:
+def _sha256(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def dedupe_batch(articles: list[dict]) -> list[dict]:
+    """批次内去重：同一 DOI/URL/标题只保留第一条。
+
+    同一文章常被多个订阅源同时收录，先在批次内去重再评分，
+    避免对同一篇文章重复调用 LLM 计费。
+    """
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for a in articles:
+        doi = (a.get("doi") or "").strip()
+        url = (a.get("url") or "").strip()
+        title = (a.get("title") or "").strip()
+        if doi:
+            key = f"doi:{doi.lower()}"
+        elif url:
+            key = f"url:{url}"
+        elif title:
+            key = "title:" + " ".join(title.lower().split())
+        else:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(a)
+    return unique
+
+
+def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None) -> dict:
+    """执行一次完整流水线，返回结构化运行结果。
+
+    分阶段状态实时落库（score_status / evidence_level / analysis_status），
+    评分或分析失败的文章保留在库中，下次运行自动补齐失败阶段。
+    外部调用方（如 TaskRunner）传入 task_id 时由其负责收尾任务记录；
+    否则 run_once 自己记录 start/finish。
+    """
     date_str  = date_str or datetime.now().strftime("%Y-%m-%d")
     threshold = config.get("relevance_threshold", 5)
+    retry_window_days = int(config.get("fetcher", {}).get("retry_window_days", 7))
 
-    logger.info(f"========== 开始运行: {date_str} ==========")
+    stats: dict[str, Any] = {
+        "date": date_str,
+        "fetched": 0, "batch_duplicates": 0, "db_duplicates": 0,
+        "new_articles": 0, "retried_score": 0, "retried_analysis": 0,
+        "scored_ok": 0, "scored_failed": 0,
+        "candidates": 0, "fulltext_fetched": 0, "abstract_completed": 0,
+        "analyzed_ok": 0, "analyzed_failed": 0, "analyzed_skipped": 0,
+        "saved": 0, "db_errors": 0,
+        "report_skipped_reason": None, "report_path": None,
+        "push_results": None,
+    }
+
+    own_task = False
+    if not task_id:
+        task_id = str(uuid.uuid4())
+        own_task = True
+
+    logger.info(f"========== 开始运行: {date_str} (task_id={task_id}) ==========")
 
     db       = Database(config["database"]["path"])
     config["journals"] = load_journals_config(config, db)
@@ -171,228 +230,307 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
     analyzer = LLMAnalyzer(config)
     notifier = Notifier(config)
 
-    # ── Step 1: 抓取 RSS ──────────────────────────────────────
-    logger.info("Step 1: 抓取期刊 RSS")
-    raw_articles = fetcher.fetch_all()
-    logger.info(f"  共抓取: {len(raw_articles)} 篇原始文章")
+    if own_task:
+        db.task_start(task_id, trigger="cli", mode="default", date_str=date_str)
 
-    # ── Step 2: 数据库去重 ────────────────────────────────────
-    logger.info("Step 2: 数据库去重")
-    new_articles = []
-    skipped_count = 0
-    for a in raw_articles:
-        is_dup, reason = db.check_duplicate(a)
-        if is_dup:
-            logger.debug(f"  跳过重复: {reason}")
-            skipped_count += 1
-        else:
-            new_articles.append(a)
-    logger.info(
-        f"  去重后: {len(new_articles)} 篇新文章（跳过 {skipped_count} 篇重复）"
-    )
+    def progress(stage: str) -> None:
+        if not own_task:
+            db.task_finish(task_id, status="running", stats=stats, stage=stage)
 
-    if not new_articles:
-        logger.info("没有新文章，流程结束。")
-        # 仍然生成空报告
-        notifier.notify([], all_articles=[], date_str=date_str)
-        return
+    try:
+        # ── Step 1: 抓取 RSS ──────────────────────────────────
+        logger.info("Step 1: 抓取期刊 RSS")
+        raw_articles = fetcher.fetch_all()
+        stats["fetched"] = len(raw_articles)
+        logger.info(f"  共抓取: {len(raw_articles)} 篇原始文章")
 
-    # ── Step 3: 第一阶段 - 用摘要快速过滤相关性 ──────────────
-    logger.info(f"Step 3: LLM 相关性过滤-第一阶段 (阈值={threshold}, 使用摘要)")
-    candidate_articles = []
-    scores = [None] * len(new_articles)
+        # ── Step 1.5: 批次内去重 ──────────────────────────────
+        raw_articles = dedupe_batch(raw_articles)
+        stats["batch_duplicates"] = stats["fetched"] - len(raw_articles)
+        logger.info(
+            f"  批次内去重后: {len(raw_articles)} 篇（合并多源重复 {stats['batch_duplicates']} 篇）"
+        )
 
-    def _score_one(idx_article):
-        idx, article = idx_article
-        logger.info(f"  [{idx+1}/{len(new_articles)}] 评分: {article['title'][:60]}...")
-        try:
-            score = analyzer.filter_relevance(article)
-            scores[idx] = score
-        except Exception as e:
-            logger.error(f"  评分失败 (idx={idx}): {e}")
-            scores[idx] = -1
+        # ── Step 2: 数据库去重 ────────────────────────────────
+        logger.info("Step 2: 数据库去重")
+        new_articles = []
+        for a in raw_articles:
+            is_dup, reason = db.check_duplicate(a)
+            if is_dup:
+                logger.debug(f"  跳过重复: {reason}")
+                stats["db_duplicates"] += 1
+            else:
+                new_articles.append(a)
+        stats["new_articles"] = len(new_articles)
+        logger.info(
+            f"  去重后: {len(new_articles)} 篇新文章（跳过 {stats['db_duplicates']} 篇重复）"
+        )
 
-    llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
-        list(executor.map(_score_one, enumerate(new_articles)))
+        # ── Step 2.5: 立即入库基础记录（processed=0）───────────
+        inserted_ids = db.save_articles_batch(new_articles)
+        stats["saved"] = sum(1 for i in inserted_ids if i is not None)
+        if stats["saved"] < len(new_articles):
+            stats["db_errors"] += 1
+            logger.error(f"  有 {len(new_articles) - stats['saved']} 篇文章入库失败")
+        for a, aid in zip(new_articles, inserted_ids):
+            a["id"] = aid
+        new_articles = [a for a in new_articles if a.get("id") is not None]
+        logger.info(f"  已入库基础记录 {stats['saved']} 篇（待评分）")
+        progress("saved_base")
 
-    for i, article in enumerate(new_articles):
-        score = scores[i] if scores[i] is not None else -1
-        article["relevance"] = score
-        if score >= threshold:
-            candidate_articles.append(article)
-            logger.info(f"    ✓ 入选: {article['title'][:60]} (score={score:.1f})")
-        else:
-            logger.info(f"    ✗ 过滤: {article['title'][:60]} (score={score:.1f})")
-
-    logger.info(f"  初筛通过: {len(candidate_articles)} 篇")
-
-    # ── Step 4: 第二阶段 - 对入选文章读取全文 ────────────────
-    logger.info("Step 4: 获取相关文章全文")
-    use_fulltext = config.get("fetcher", {}).get("use_fulltext", True)
-
-    if use_fulltext and candidate_articles:
-        # 筛选需要抓取全文的文章
-        articles_to_fetch = [
-            (i, a) for i, a in enumerate(candidate_articles)
-            if a.get("publisher", "DEFAULT") not in RSS_ONLY_PUBLISHERS
-        ]
-
-        # 并发批量获取全文
-        if articles_to_fetch:
-            only_articles = [a for _, a in articles_to_fetch]
-            perf_cfg = config.get("performance", {})
-            concurrency = perf_cfg.get("concurrency", 5)
-
-            logger.info(f"  并发全文获取（并发度={concurrency}，共 {len(only_articles)} 篇）")
-            fetch_results = fetcher.fetch_fulltext_batch(only_articles)
-
-            for (orig_idx, article), fetch_result in zip(articles_to_fetch, fetch_results):
-                logger.info(
-                    f"  [{orig_idx + 1}/{len(candidate_articles)}] 读取全文: "
-                    f"{article['title'][:55]}..."
-                )
-                if fetch_result is None:
-                    fetch_result = FetchResult()
-
-                article["fetch_status"]          = fetch_result.fetch_status
-                article["best_available_format"] = fetch_result.best_available_format
-                article["network_mode"] = fetch_result.network_mode
-                article["access_path"] = fetch_result.access_path
-
-                if fetch_result.text and len(fetch_result.text) > len(article.get("abstract", "")):
-                    article["abstract"]     = fetch_result.text
-                    article["has_fulltext"] = True
-                    article["evidence_level"] = fetch_result.evidence_level
-                    logger.info(
-                        f"    ✓ 全文 {len(fetch_result.text)} 字"
-                        f" [{fetch_result.best_available_format},"
-                        f" {fetch_result.network_mode}/{fetch_result.access_path}]"
-                    )
-                else:
-                    article["has_fulltext"] = False
-                    article["evidence_level"] = "ABSTRACT_ONLY"
-                    logger.info(
-                        f"    ⚠ 保持摘要 ({len(article.get('abstract',''))} 字)"
-                        f" [status={fetch_result.fetch_status}]"
-                    )
-
-        # 记录 RSS_ONLY 期刊
-        for i, article in enumerate(candidate_articles):
-            if article.get("publisher", "DEFAULT") in RSS_ONLY_PUBLISHERS:
-                logger.info(
-                    f"  [{i+1}/{len(candidate_articles)}] {article['journal']}: "
-                    f"RSS摘要已足够，跳过全文抓取"
-                )
-
-        # 打印请求统计
-        fetcher._request_manager.log_stats()
-    else:
-        logger.info("  全文抓取已关闭或无候选文章，跳过。")
-
-    # ── Step 5: LLM 深度解读 ──────────────────────────────────
-    logger.info("Step 5: LLM 深度解读")
-    relevant_articles = candidate_articles
-
-    # 统计需要解读的文章数
-    analyze_abstract_only = config.get("analyzer", {}).get("analyze_abstract_only", True)
-    fulltext_count = sum(1 for a in relevant_articles if a.get("has_fulltext", False))
-    abstract_only_count = len(relevant_articles) - fulltext_count
-    logger.info(
-        f"  待解读文章: 全文 {fulltext_count} 篇，"
-        f"仅摘要 {abstract_only_count} 篇 (仅摘要解读开关={analyze_abstract_only})"
-    )
-
-    def _analyze_one(idx_article):
-        idx, article = idx_article
-        has_ft = article.get("has_fulltext", False)
-
-        if not has_ft and not analyze_abstract_only:
+        # ── Step 2.6: 载入需要重试的历史文章 ──────────────────
+        retry = db.get_retry_articles(threshold, days=retry_window_days)
+        score_retry = retry.get("score_failed", [])
+        analysis_retry = retry.get("analysis_failed", [])
+        stats["retried_score"] = len(score_retry)
+        stats["retried_analysis"] = len(analysis_retry)
+        if score_retry or analysis_retry:
             logger.info(
-                f"  [{idx+1}/{len(relevant_articles)}] 跳过解读(仅摘要且开关未开启): "
+                f"  重试队列: 评分失败 {len(score_retry)} 篇，分析失败 {len(analysis_retry)} 篇"
+            )
+            for a in score_retry:
+                a["_retry_score"] = True
+
+        # ── Step 2.7: 缺摘要文章先补全，再评分（避免把缺信息误判为低相关）──
+        if new_articles:
+            from fetchers.oa_fetcher import get_openalex_abstract
+            unpaywall_email = config.get("unpaywall_email", "your@email.com")
+            for a in new_articles:
+                if a.get("abstract", "").strip() or not a.get("doi"):
+                    continue
+                try:
+                    completed = get_openalex_abstract(a["doi"])
+                except Exception as e:
+                    logger.debug(f"  摘要补全查询失败 ({a['doi']}): {e}")
+                    completed = None
+                if completed:
+                    a["abstract"] = completed
+                    db.update_article_fields(a["id"], abstract=completed)
+                    stats["abstract_completed"] += 1
+                    logger.info(f"  评分前摘要补全: {a['title'][:50]}... ({len(completed)} 字)")
+        progress("abstract_backfill")
+
+        # ── Step 3: LLM 相关性评分（新文章 + 评分失败重试）────
+        to_score = list(new_articles) + list(score_retry)
+        logger.info(f"Step 3: LLM 相关性评分 (阈值={threshold}，共 {len(to_score)} 篇)")
+        score_results: list[Any] = [None] * len(to_score)
+
+        def _score_one(idx_article):
+            idx, article = idx_article
+            logger.info(f"  [{idx+1}/{len(to_score)}] 评分: {article['title'][:60]}...")
+            try:
+                score_results[idx] = analyzer.filter_relevance(article)
+            except Exception as e:  # noqa: BLE001 - 单篇评分失败不阻断批次
+                logger.error(f"  评分失败 (idx={idx}): {e}")
+                score_results[idx] = e
+
+        llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
+            list(executor.map(_score_one, enumerate(to_score)))
+
+        candidate_articles: list[dict] = []
+        for article, res in zip(to_score, score_results):
+            if isinstance(res, dict):
+                ok = db.update_article_fields(
+                    article["id"],
+                    relevance=res["score"], relevance_reason=res["reason"],
+                    score_status="ok", score_model=res["model"], score_basis=res["basis"],
+                )
+                article.update({
+                    "relevance": res["score"], "relevance_reason": res["reason"],
+                    "score_status": "ok",
+                })
+                stats["scored_ok"] += 1
+                if not ok:
+                    stats["db_errors"] += 1
+                if res["score"] >= threshold:
+                    candidate_articles.append(article)
+                    logger.info(f"    ✓ 入选: {article['title'][:60]} (score={res['score']:.1f})")
+                else:
+                    # 评分完成且低于阈值：该文章处理结束
+                    db.update_article_fields(article["id"], processed=1)
+                    logger.info(f"    ✗ 过滤: {article['title'][:60]} (score={res['score']:.1f})")
+            else:
+                err = res if isinstance(res, Exception) else RuntimeError("未知评分错误")
+                ok = db.update_article_fields(
+                    article["id"], score_status="failed", score_error=str(err)[:500],
+                )
+                article["score_status"] = "failed"
+                stats["scored_failed"] += 1
+                if not ok:
+                    stats["db_errors"] += 1
+
+        # 分析失败重试的文章直接进入候选（评分已通过）
+        candidate_articles.extend(analysis_retry)
+        stats["candidates"] = len(candidate_articles)
+        logger.info(f"  初筛通过: {len(candidate_articles)} 篇")
+        progress("scored")
+
+        # ── Step 4: 对入选且尚无全文的文章获取全文 ────────────
+        logger.info("Step 4: 获取相关文章全文（摘要保持原文，全文独立存储）")
+        use_fulltext = config.get("fetcher", {}).get("use_fulltext", True)
+
+        if use_fulltext and candidate_articles:
+            articles_to_fetch = [
+                a for a in candidate_articles
+                if a.get("evidence_level") != "FULLTEXT"
+                and a.get("publisher", "DEFAULT") not in RSS_ONLY_PUBLISHERS
+            ]
+            if articles_to_fetch:
+                logger.info(f"  并发全文获取（共 {len(articles_to_fetch)} 篇）")
+                fetch_results = fetcher.fetch_fulltext_batch(articles_to_fetch)
+                for article, fr in zip(articles_to_fetch, fetch_results):
+                    if fr is None:
+                        fr = FetchResult()
+                    evidence_val = getattr(fr.evidence_level, "value", str(fr.evidence_level))
+                    updates: dict[str, Any] = {
+                        "fetch_status": getattr(fr.fetch_status, "value", str(fr.fetch_status)),
+                        "evidence_level": evidence_val,
+                        "network_mode": fr.network_mode,
+                        "access_path": fr.access_path,
+                        "fulltext_url": fr.source_url or None,
+                    }
+                    if fr.has_fulltext and fr.text:
+                        # 全文独立存储，摘要保持原文
+                        updates["fulltext_text"] = fr.text
+                        updates["content_hash"] = _sha256(fr.text)
+                        article["fulltext_text"] = fr.text
+                        stats["fulltext_fetched"] += 1
+                        logger.info(
+                            f"    ✓ 全文 {len(fr.text)} 字 [{fr.best_available_format},"
+                            f" {fr.network_mode}/{fr.access_path}]"
+                        )
+                    elif fr.text and len(fr.text) >= 100:
+                        # OpenAlex 等补全的摘要：写回 abstract 字段（不冒充全文）
+                        updates["abstract"] = fr.text
+                        article["abstract"] = fr.text
+                        stats["abstract_completed"] += 1
+                        logger.info(f"    ⚠ 摘要补全 {len(fr.text)} 字（不作为全文）")
+                    else:
+                        logger.info(
+                            f"    ⚠ 未获取到全文 [status={fr.fetch_status}]"
+                        )
+                    if not db.update_article_fields(article["id"], **updates):
+                        stats["db_errors"] += 1
+                    article["evidence_level"] = evidence_val
+        else:
+            logger.info("  全文抓取已关闭或无候选文章，跳过。")
+        progress("fulltext")
+
+        # ── Step 5: LLM 深度解读（含分析失败重试）─────────────
+        logger.info("Step 5: LLM 深度解读")
+        relevant_articles = candidate_articles
+        analyze_abstract_only = config.get("analyzer", {}).get("analyze_abstract_only", True)
+        fulltext_count = sum(1 for a in relevant_articles if a.get("evidence_level") == "FULLTEXT")
+        logger.info(
+            f"  待解读: 全文 {fulltext_count} 篇，"
+            f"仅摘要 {len(relevant_articles) - fulltext_count} 篇"
+            f" (仅摘要解读开关={analyze_abstract_only})"
+        )
+
+        def _analyze_one(idx_article):
+            idx, article = idx_article
+            has_ft = article.get("evidence_level") == "FULLTEXT"
+            if not has_ft and not analyze_abstract_only:
+                article["analysis_status"] = "skipped"
+                db.update_article_fields(article["id"], analysis_status="skipped", processed=1)
+                stats["analyzed_skipped"] += 1
+                return
+            mode_str = "全文" if has_ft else "仅摘要"
+            logger.info(
+                f"  [{idx+1}/{len(relevant_articles)}] 解读({mode_str}): "
                 f"{article['title'][:55]}..."
             )
-            article["analysis"] = None
-            return
+            try:
+                result = analyzer.analyze_article(article)
+            except Exception as e:  # noqa: BLE001 - 单篇解读失败不阻断批次
+                result = {"success": False, "analysis": "", "error": str(e), "evidence_level": "ERROR"}
+            if result.get("success"):
+                input_text = article.get("fulltext_text") or article.get("abstract") or ""
+                ok = db.update_article_fields(
+                    article["id"],
+                    analysis=result["analysis"], analysis_status="ok",
+                    analysis_model=analyzer.model, analysis_prompt_version=PROMPT_VERSION,
+                    analysis_input_hash=_sha256(input_text + "|" + PROMPT_VERSION),
+                    analyzed_at=datetime.now().isoformat(timespec="seconds"),
+                    processed=1,
+                )
+                article["analysis"] = result["analysis"]
+                article["analysis_status"] = "ok"
+                stats["analyzed_ok"] += 1
+                if not ok:
+                    stats["db_errors"] += 1
+            else:
+                # 失败不写伪文本，保留失败状态供下次重试
+                db.update_article_fields(
+                    article["id"], analysis_status="failed",
+                    analysis_error=str(result.get("error", ""))[:500],
+                )
+                article["analysis"] = None
+                article["analysis_status"] = "failed"
+                stats["analyzed_failed"] += 1
 
-        mode_str = "全文" if has_ft else "仅摘要"
-        logger.info(
-            f"  [{idx+1}/{len(relevant_articles)}] 解读({mode_str}): "
-            f"{article['title'][:55]}..."
-        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
+            list(executor.map(_analyze_one, enumerate(relevant_articles)))
+        progress("analyzed")
+
+        # ── Step 6: 更新 HTML 索引（邮件需要附加最新版本）─────
+        logger.info("Step 6: 更新数据库 HTML 索引")
+        html_index_path = notifier.output_dir / "paper_index.html"
+        logger.info(f"  HTML 索引路径: {html_index_path}")
         try:
-            result = analyzer.analyze_article(article)
-            article["analysis"] = result.get("analysis", "解读失败")
+            from utils.stat_db import build_html_index
+            with db.get_connection() as conn:
+                build_html_index(conn, threshold, str(html_index_path))
+            if html_index_path.exists():
+                logger.info(f"✅ HTML 索引已更新: {html_index_path}")
+            else:
+                logger.warning(f"⚠️ HTML 索引文件不存在: {html_index_path}")
         except Exception as e:
-            logger.error(f"  解读失败 (idx={idx}): {e}")
-            article["analysis"] = f"解读失败: {e}"
+            logger.exception(f"HTML 索引生成失败: {e}")
+        progress("index")
 
-    # 并发 LLM 解读（受 API 速率限制，建议并发度 2-3）
-    llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
-        list(executor.map(_analyze_one, enumerate(relevant_articles)))
+        # ── Step 7: 生成报告并推送 ─────────────────────────────
+        logger.info("Step 7: 生成报告并推送")
+        relevant_articles.sort(key=lambda a: -(a.get("relevance") or 0))
+        existing_report = db.get_report(date_str)
 
-    # ── Step 6: 保存数据库记录 ────────────────────────────────
-    logger.info("Step 6: 保存数据库记录")
-    # 把 analysis 挂到 new_articles 里对应的相关文章上，并提前计算 topic 分类
-    relevant_map = {a.get("doi") or a.get("url"): a for a in relevant_articles}
-    for article in new_articles:
-        key = article.get("doi") or article.get("url")
-        if key and key in relevant_map:
-            article["analysis"] = relevant_map[key].get("analysis")
-        if not article.get("topic"):
-            article["topic"] = classify_article(article)
-
-    # 批量入库，单事务提升写入性能
-    saved_count = db.save_articles_batch(new_articles)
-    logger.info(f"  已批量保存 {saved_count} 篇新文章到数据库")
-
-
-    # ── Step 7: 先更新 HTML 索引（邮件需要附加最新版本）───────
-    logger.info("Step 7: 更新数据库 HTML 索引")
-    # 输出目录统一由 config.output.output_dir 解析（与日报、附件一致）
-    html_index_path = notifier.output_dir / "paper_index.html"
-    logger.info(f"  HTML 索引路径: {html_index_path}")
-    try:
-        from utils.stat_db import build_html_index
-        _threshold = config.get("relevance_threshold", 5)
-        with db.get_connection() as conn:
-            # 查询数据库中有多少篇文章
-            cur = conn.execute("SELECT COUNT(*) FROM articles")
-            total_in_db = cur.fetchone()[0]
-            logger.info(f"  数据库中共有 {total_in_db} 篇文章")
-            build_html_index(conn, _threshold, str(html_index_path))
-        # 验证文件是否真的被更新了
-        if html_index_path.exists():
-            mtime = datetime.fromtimestamp(html_index_path.stat().st_mtime)
-            size = html_index_path.stat().st_size
-            logger.info(f"✅ HTML 索引已更新: {html_index_path}")
-            logger.info(f"   修改时间: {mtime.strftime('%Y-%m-%d %H:%M:%S')}, 大小: {size} bytes")
+        if (not new_articles and not score_retry and not analysis_retry
+                and existing_report is not None):
+            # 无任何新处理且当日报告已存在：保留已有内容，不覆盖不重推
+            reason = "无新增文章且当日报告已存在，跳过重新生成与推送"
+            stats["report_skipped_reason"] = reason
+            logger.info(f"  {reason}")
         else:
-            logger.warning(f"⚠️ HTML 索引文件不存在: {html_index_path}")
+            md_path, push_results = notifier.notify(
+                relevant_articles,
+                all_articles=new_articles,
+                date_str=date_str,
+            )
+            db.save_report(
+                report_date=date_str,
+                file_path=md_path,
+                total_found=len(new_articles),
+                total_pushed=len(relevant_articles),
+                push_results=push_results,
+            )
+            stats["report_path"] = md_path
+            stats["push_results"] = push_results
+
+        logger.info(
+            f"========== 完成！抓取: {stats['fetched']} → 新增: {stats['new_articles']} "
+            f"→ 相关: {len(relevant_articles)} =========="
+        )
+
+        if own_task:
+            has_failure = (stats["db_errors"] or stats["scored_failed"]
+                           or stats["analyzed_failed"])
+            db.task_finish(task_id, status="partial" if has_failure else "success", stats=stats)
+        return stats
     except Exception as e:
-        logger.exception(f"HTML 索引生成失败: {e}")
-
-    # ── Step 8: 生成报告并推送 ─────────────────────────────────
-    logger.info("Step 8: 生成报告并推送")
-    md_path = notifier.notify(
-        relevant_articles,
-        all_articles=new_articles,
-        date_str=date_str
-    )
-
-    db.save_report(
-        report_date=date_str,
-        file_path=md_path,
-        total_found=len(new_articles),
-        total_pushed=len(relevant_articles),
-    )
-
-    logger.info(f"========== 完成！报告: {md_path} ==========")
-    logger.info(
-        f"  抓取: {len(raw_articles)} → 去重: {len(new_articles)} "
-        f"→ 相关: {len(relevant_articles)}"
-    )
+        if own_task:
+            db.task_finish(task_id, status="failed", stats=stats, error=str(e))
+        raise
 
 # ── 定时调度 ──────────────────────────────────────────────────
 
@@ -417,16 +555,51 @@ def run_scheduler(config: dict):
 
 # ── CLI 入口 ──────────────────────────────────────────────────
 
+def push_only(config: dict, date_str: str) -> dict:
+    """只补发指定日期的日报推送，不重新抓取、评分或分析。"""
+    notifier = Notifier(config)
+    md_path, push_results = notifier.resend(date_str)
+    logger.info(f"补发完成: {push_results}")
+
+    db = Database(config["database"]["path"])
+    rep = db.get_report(date_str)
+    db.save_report(
+        report_date=date_str,
+        file_path=rep["file_path"] if rep else md_path,
+        total_found=rep["total_found"] if rep else 0,
+        total_pushed=rep["total_pushed"] if rep else 0,
+        push_results=push_results,
+    )
+    return {"date": date_str, "report_path": md_path, "push_results": push_results}
+
+
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="化学文献日报工具")
     parser.add_argument("--config",   default="config/config.yaml", help="配置文件路径")
     parser.add_argument("--schedule", action="store_true",   help="开启每日定时模式")
     parser.add_argument("--date",     default=None,          help="指定报告日期 (YYYY-MM-DD)")
+    parser.add_argument("--push-only", default=None, metavar="DATE",
+                        help="只补发指定日期的日报推送（不重新抓取/评分/分析）")
     args = parser.parse_args()
 
     config = load_config(args.config)
     validate_config(config)
+
+    # 启动时把上次异常退出遗留的 running 任务标记为 interrupted
+    try:
+        _db = Database(config["database"]["path"])
+        n = _db.mark_interrupted_tasks()
+        if n:
+            logger.info(f"已将 {n} 个遗留运行中的任务标记为 interrupted")
+        _db.close()
+    except Exception as e:
+        logger.warning(f"初始化任务记录失败: {e}")
+
+    if args.push_only:
+        result = push_only(config, args.push_only)
+        logger.info(f"推送结果: {result['push_results']}")
+        return
 
     if args.schedule:
         run_scheduler(config)

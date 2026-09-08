@@ -26,7 +26,7 @@ from typing import Any, Optional
 from bs4 import BeautifulSoup, Tag
 
 from fetchers import fetch_html, FetchResult, FetchStatus, BestFormat
-from fetchers.models import MAX_FULLTEXT_CHARS  # R2: 统一使用 fetchers.models 中的常量
+from fetchers.models import MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS  # 统一使用 fetchers.models 中的常量
 from fetchers.network import get_proxies
 from fetchers.oa_fetcher import get_oa_url, get_openalex_abstract
 from core.request_manager import RequestManager
@@ -312,8 +312,9 @@ def _parse_html_by_publisher(html: str, publisher: str) -> str:  # R3
     if not text:
         return ""
 
+    # 入库存储放宽到 MAX_STORED_FULLTEXT_CHARS，LLM 输入预算由 analyzer._smart_chunk 控制
     cleaned = _clean_text(text)
-    return cleaned[:MAX_FULLTEXT_CHARS] if len(cleaned) > MAX_FULLTEXT_CHARS else cleaned
+    return cleaned[:MAX_STORED_FULLTEXT_CHARS] if len(cleaned) > MAX_STORED_FULLTEXT_CHARS else cleaned
 
 
 class BrowserDriver:
@@ -473,6 +474,7 @@ class JournalFetcher:
                 oa_result = fetch_html(oa_url, timeout=self.timeout,
                                        request_manager=self._request_manager)
                 if oa_result.fetch_status == FetchStatus.SUCCESS:
+                    oa_result.source_url = oa_url
                     logger.info(f"    ✓ OA 全文 {len(oa_result.text)} 字")
                     return oa_result
                 else:
@@ -483,6 +485,7 @@ class JournalFetcher:
                                  selectors=selectors,
                                  request_manager=self._request_manager)
         if html_result.fetch_status == FetchStatus.SUCCESS:
+            html_result.source_url = canonical_url
             return html_result
 
         logger.warning(f"  HTML 请求失败 ({html_result.error_code})，尝试浏览器渲染...")  # R8
@@ -499,6 +502,7 @@ class JournalFetcher:
                     fetch_status=FetchStatus.SUCCESS,
                     network_mode=html_result.network_mode,
                     access_path=html_result.access_path,
+                    source_url=canonical_url,
                 )
 
         # ── 3. OpenAlex 摘要补全 ────────────────────────────────
@@ -512,6 +516,7 @@ class JournalFetcher:
                     fetch_status=FetchStatus.SUCCESS,
                     network_mode=html_result.network_mode,
                     access_path=html_result.access_path,
+                    source_url=f"https://doi.org/{doi}",
                 )
 
         logger.warning(f"  全文获取失败 ({html_result.error_code})，将使用摘要。")  # R9

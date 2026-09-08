@@ -1,6 +1,8 @@
 """
 db.py - SQLite 数据库模块，用于文章去重和历史记录
 """
+import json
+import shutil
 import sqlite3
 import hashlib
 import difflib
@@ -90,7 +92,33 @@ class Database:
                 processed   INTEGER DEFAULT 0,
                 title_hash  TEXT,
                 analysis    TEXT,
-                created_at  TEXT DEFAULT (datetime('now'))
+                created_at  TEXT DEFAULT (datetime('now')),
+                topic       TEXT,
+                starred     INTEGER DEFAULT 0,
+                note        TEXT,
+                tags        TEXT,
+                score_status  TEXT DEFAULT '',
+                score_error   TEXT,
+                score_model   TEXT,
+                score_basis   TEXT,
+                relevance_reason TEXT,
+                fetch_status  TEXT,
+                evidence_level TEXT,
+                fetch_source  TEXT,
+                network_mode  TEXT,
+                access_path   TEXT,
+                fulltext_url  TEXT,
+                fulltext_text TEXT,
+                content_hash  TEXT,
+                analysis_status TEXT DEFAULT '',
+                analysis_error  TEXT,
+                analysis_model  TEXT,
+                analysis_prompt_version TEXT,
+                analysis_input_hash TEXT,
+                analyzed_at   TEXT,
+                read_status   TEXT DEFAULT '',
+                relevance_feedback TEXT,
+                updated_at    TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daily_reports (
@@ -99,7 +127,8 @@ class Database:
                 file_path    TEXT,
                 total_found  INTEGER,
                 total_pushed INTEGER,
-                created_at   TEXT DEFAULT (datetime('now'))
+                created_at   TEXT DEFAULT (datetime('now')),
+                push_results TEXT
             );
 
             CREATE TABLE IF NOT EXISTS journals (
@@ -120,6 +149,20 @@ class Database:
                 content     TEXT NOT NULL,
                 created_at  TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS task_runs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id     TEXT UNIQUE,
+                trigger     TEXT,
+                mode        TEXT,
+                date_str    TEXT,
+                status      TEXT DEFAULT 'running',
+                stage       TEXT,
+                stats       TEXT,
+                error       TEXT,
+                started_at  TEXT DEFAULT (datetime('now')),
+                ended_at    TEXT
+            );
         """)
 
         # 启用 WAL 模式（仅文件数据库）
@@ -127,20 +170,45 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
 
-        # 迁移：兼容旧数据库
-        for col, definition in [
+        # 迁移：兼容旧数据库（幂等，可重复执行）
+        legacy_columns = [
             ("title_hash", "TEXT"),
             ("analysis", "TEXT"),
             ("topic", "TEXT"),
             ("starred", "INTEGER DEFAULT 0"),
             ("note", "TEXT"),
             ("tags", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE articles ADD COLUMN {col} {definition}")
-                conn.commit()
-            except sqlite3.OperationalError as e:
-                logger.debug("列 %s 已存在，跳过迁移: %s", col, e)
+        ]
+        stage_columns = [
+            # 评分阶段
+            ("score_status", "TEXT DEFAULT ''"),
+            ("score_error", "TEXT"),
+            ("score_model", "TEXT"),
+            ("score_basis", "TEXT"),
+            ("relevance_reason", "TEXT"),
+            # 全文与证据
+            ("fetch_status", "TEXT"),
+            ("evidence_level", "TEXT"),
+            ("fetch_source", "TEXT"),
+            ("network_mode", "TEXT"),
+            ("access_path", "TEXT"),
+            ("fulltext_url", "TEXT"),
+            ("fulltext_text", "TEXT"),
+            ("content_hash", "TEXT"),
+            # 分析阶段
+            ("analysis_status", "TEXT DEFAULT ''"),
+            ("analysis_error", "TEXT"),
+            ("analysis_model", "TEXT"),
+            ("analysis_prompt_version", "TEXT"),
+            ("analysis_input_hash", "TEXT"),
+            ("analyzed_at", "TEXT"),
+            # 阅读闭环
+            ("read_status", "TEXT DEFAULT ''"),
+            ("relevance_feedback", "TEXT"),
+            ("updated_at", "TEXT"),
+        ]
+        self._migrate_columns(conn, "articles", legacy_columns + stage_columns, backup_before=True)
+        self._migrate_columns(conn, "daily_reports", [("push_results", "TEXT")], backup_before=False)
 
         # 创建索引
         index_statements = [
@@ -171,6 +239,14 @@ class Database:
                 "topic 索引",
             ),
             (
+                "CREATE INDEX IF NOT EXISTS idx_articles_score_status ON articles(score_status)",
+                "score_status 索引（失败重试查询）",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_articles_read_status ON articles(read_status)",
+                "read_status 索引（阅读队列）",
+            ),
+            (
                 "CREATE INDEX IF NOT EXISTS idx_chat_messages_article "
                 "ON chat_messages(article_id, id)",
                 "chat_messages 文章索引",
@@ -184,6 +260,37 @@ class Database:
 
         conn.commit()
         logger.info("数据库初始化完成: %s", self.db_path)
+
+    def _migrate_columns(
+        self, conn: sqlite3.Connection, table: str, columns: list[tuple[str, str]],
+        backup_before: bool = False,
+    ) -> None:
+        """幂等加列迁移。文件库且确实需要加列时，先自动备份整个数据库。"""
+        try:
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except sqlite3.Error as e:
+            logger.warning("读取表 %s 结构失败: %s", table, e)
+            return
+        if not existing:
+            return  # 新建表，CREATE TABLE 已包含全部列
+        missing = [(c, d) for c, d in columns if c not in existing]
+        if not missing:
+            return
+        if backup_before and self._memory_conn is None:
+            try:
+                src = Path(self.db_path)
+                backup = src.with_name(f"{src.stem}.backup-{datetime.now():%Y%m%d-%H%M%S}{src.suffix}")
+                shutil.copy2(src, backup)
+                logger.info("检测到旧表结构，迁移前已自动备份数据库: %s", backup)
+            except Exception as e:
+                logger.error("数据库自动备份失败（继续迁移）: %s", e)
+        for col, definition in missing:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+                conn.commit()
+                logger.info("表 %s 迁移：新增列 %s", table, col)
+            except sqlite3.OperationalError as e:
+                logger.debug("列 %s.%s 已存在，跳过迁移: %s", table, col, e)
 
     def close(self) -> None:
         """关闭所有数据库连接。"""
@@ -383,10 +490,13 @@ class Database:
             logger.error("保存文章失败: %s", e)
             return False
 
-    def save_articles_batch(self, articles: list[dict[str, Any]]) -> int:
-        """批量保存文章（单次事务提交，极大减少磁盘 I/O）"""
+    def save_articles_batch(self, articles: list[dict[str, Any]]) -> list[Optional[int]]:
+        """批量保存文章基础记录（单次事务，processed=0 表示尚未完成处理）。
+
+        返回与输入对齐的 id 列表；被唯一约束忽略的重复项对应 id 为 None。
+        """
         if not articles:
-            return 0
+            return []
 
         params_list = []
         for article in articles:
@@ -401,7 +511,7 @@ class Database:
                 "pub_date": article.get("pub_date", ""),
                 "url": article.get("url", ""),
                 "abstract": article.get("abstract", ""),
-                "relevance": article.get("relevance", 0),
+                "relevance": article.get("relevance"),
                 "title_hash": _compute_title_hash(title) if title else None,
                 "analysis": article.get("analysis"),
                 "topic": article.get("topic"),
@@ -413,22 +523,141 @@ class Database:
                  relevance, processed, title_hash, analysis, topic)
             VALUES
                 (:doi, :title, :journal, :authors, :pub_date, :url,
-                 :abstract, :relevance, 1, :title_hash, :analysis, :topic)
+                 :abstract, :relevance, 0, :title_hash, :analysis, :topic)
         """
+
+        def _run(conn: sqlite3.Connection) -> list[Optional[int]]:
+            ids: list[Optional[int]] = []
+            for params in params_list:
+                cur = conn.execute(sql, params)
+                ids.append(cur.lastrowid if cur.rowcount > 0 else None)
+            return ids
+
         try:
             if self._memory_conn is not None:
                 with self._memory_lock:
-                    cur = self._memory_conn.executemany(sql, params_list)
+                    ids = _run(self._memory_conn)
                     self._memory_conn.commit()
-                    return cur.rowcount
-            else:
-                conn = self._conn()
-                with conn:
-                    cur = conn.executemany(sql, params_list)
-                return cur.rowcount
+                    return ids
+            conn = self._conn()
+            with conn:
+                return _run(conn)
         except sqlite3.Error as e:
             logger.error("批量保存文章失败: %s", e)
-            return 0
+            return [None] * len(articles)
+
+    # ── 分阶段状态更新（评分 / 全文 / 分析 / 阅读闭环）──────────
+
+    _ARTICLE_FIELD_WHITELIST = {
+        "relevance", "relevance_reason", "score_status", "score_error",
+        "score_model", "score_basis",
+        "fetch_status", "evidence_level", "fetch_source", "network_mode",
+        "access_path", "fulltext_url", "fulltext_text", "content_hash",
+        "abstract", "analysis", "analysis_status", "analysis_error", "analysis_model",
+        "analysis_prompt_version", "analysis_input_hash", "analyzed_at",
+        "read_status", "relevance_feedback", "processed", "topic",
+    }
+
+    def update_article_fields(self, article_id: int, **fields: Any) -> bool:
+        """按白名单更新 articles 的阶段状态字段，并刷新 updated_at。"""
+        updates = {k: v for k, v in fields.items() if k in self._ARTICLE_FIELD_WHITELIST}
+        if not updates:
+            return False
+        updates["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [article_id]
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        f"UPDATE articles SET {set_clause} WHERE id = ?", values)
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(f"UPDATE articles SET {set_clause} WHERE id = ?", values)
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("更新文章字段失败 (id=%s): %s", article_id, e)
+            return False
+
+    def get_retry_articles(self, threshold: float, days: int = 7) -> dict[str, list[dict[str, Any]]]:
+        """查询需要重试失败阶段的历史文章（评分失败 / 相关但分析失败）。"""
+        sql_base = (
+            "SELECT * FROM articles "
+            "WHERE COALESCE(created_at, datetime('now')) >= datetime('now', ?) AND "
+        )
+        params = (f"-{int(days)} days",)
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur_s = self._memory_conn.execute(
+                        sql_base + "score_status = 'failed'", params)
+                    score_rows = cur_s.fetchall()
+                    score_cols = [d[0] for d in cur_s.description]
+                    cur_a = self._memory_conn.execute(
+                        sql_base + "analysis_status = 'failed' AND COALESCE(relevance, 0) >= ?",
+                        params + (threshold,))
+                    analysis_rows = cur_a.fetchall()
+                    analysis_cols = [d[0] for d in cur_a.description]
+                return {
+                    "score_failed": [dict(zip(score_cols, r)) for r in score_rows],
+                    "analysis_failed": [dict(zip(analysis_cols, r)) for r in analysis_rows],
+                }
+            conn = self._conn()
+            cur_s = conn.execute(sql_base + "score_status = 'failed'", params)
+            score_rows = cur_s.fetchall()
+            score_cols = [d[0] for d in cur_s.description]
+            cur_a = conn.execute(
+                sql_base + "analysis_status = 'failed' AND COALESCE(relevance, 0) >= ?",
+                params + (threshold,))
+            analysis_rows = cur_a.fetchall()
+            analysis_cols = [d[0] for d in cur_a.description]
+            return {
+                "score_failed": [dict(zip(score_cols, r)) for r in score_rows],
+                "analysis_failed": [dict(zip(analysis_cols, r)) for r in analysis_rows],
+            }
+        except sqlite3.Error as e:
+            logger.error("查询重试文章失败: %s", e)
+            return {"score_failed": [], "analysis_failed": []}
+
+    def get_articles_by_ids(self, ids: list[int]) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        f"SELECT * FROM articles WHERE id IN ({placeholders})", list(ids))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(
+                f"SELECT * FROM articles WHERE id IN ({placeholders})", list(ids))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("按 id 查询文章失败: %s", e)
+            return []
+
+    def list_articles_by_created_date(self, date_str: str, limit: int = 500) -> list[dict[str, Any]]:
+        """按入库日期（created_at 的日期部分）列出文章，供今日精选使用。"""
+        try:
+            sql = (
+                "SELECT * FROM articles WHERE date(created_at) = ? "
+                "ORDER BY COALESCE(relevance, 0) DESC, id DESC LIMIT ?"
+            )
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (date_str, limit))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (date_str, limit))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("按日期查询文章失败: %s", e)
+            return []
 
     def get_duplicate_count(self) -> int:
         try:
@@ -482,27 +711,45 @@ class Database:
         file_path: str,
         total_found: int,
         total_pushed: int,
+        push_results: Optional[dict] = None,
     ) -> None:
         try:
-            params = (report_date, file_path, total_found, total_pushed)
+            params = (
+                report_date, file_path, total_found, total_pushed,
+                json.dumps(push_results, ensure_ascii=False) if push_results is not None else None,
+            )
+            sql = (
+                "INSERT OR REPLACE INTO daily_reports "
+                "(report_date, file_path, total_found, total_pushed, push_results) VALUES (?,?,?,?,?)"
+            )
             if self._memory_conn is not None:
                 with self._memory_lock:
-                    self._memory_conn.execute(
-                        "INSERT OR REPLACE INTO daily_reports "
-                        "(report_date, file_path, total_found, total_pushed) VALUES (?,?,?,?)",
-                        params,
-                    )
+                    self._memory_conn.execute(sql, params)
                     self._memory_conn.commit()
             else:
                 conn = self._conn()
-                conn.execute(
-                    "INSERT OR REPLACE INTO daily_reports "
-                    "(report_date, file_path, total_found, total_pushed) VALUES (?,?,?,?)",
-                    params,
-                )
+                conn.execute(sql, params)
                 conn.commit()
         except sqlite3.Error as e:
             logger.error("save_report 失败: %s", e)
+
+    def get_report(self, report_date: str) -> Optional[dict[str, Any]]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "SELECT * FROM daily_reports WHERE report_date = ?", (report_date,))
+                    row = cur.fetchone()
+                    cols = [d[0] for d in cur.description] if row else []
+            else:
+                cur = self._conn().execute(
+                    "SELECT * FROM daily_reports WHERE report_date = ?", (report_date,))
+                row = cur.fetchone()
+                cols = [d[0] for d in cur.description] if row else []
+            return dict(zip(cols, row)) if row else None
+        except sqlite3.Error as e:
+            logger.error("get_report 失败: %s", e)
+            return None
 
     def get_recent_articles(self, days: int = 7) -> list[dict[str, Any]]:
         try:
@@ -851,3 +1098,97 @@ class Database:
         except sqlite3.Error as e:
             logger.error("get_article_chat_count 查询失败: %s", e)
             return 0
+
+    # ── 任务运行记录（跨进程持久化）────────────────────────────
+
+    def task_start(self, task_id: str, trigger: str, mode: str, date_str: Optional[str] = None) -> None:
+        try:
+            sql = ("INSERT OR REPLACE INTO task_runs "
+                   "(task_id, trigger, mode, date_str, status, started_at) VALUES (?,?,?,?, 'running', ?)")
+            params = (task_id, trigger, mode, date_str, datetime.now().isoformat(timespec="seconds"))
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, params)
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("task_start 失败: %s", e)
+
+    def task_finish(
+        self,
+        task_id: str,
+        status: str,
+        stats: Optional[dict] = None,
+        error: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> None:
+        try:
+            sql = ("UPDATE task_runs SET status = ?, stats = ?, error = ?, stage = ?, "
+                   "ended_at = ? WHERE task_id = ?")
+            params = (
+                status,
+                json.dumps(stats, ensure_ascii=False) if stats is not None else None,
+                error,
+                stage,
+                datetime.now().isoformat(timespec="seconds"),
+                task_id,
+            )
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, params)
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("task_finish 失败: %s", e)
+
+    def mark_interrupted_tasks(self) -> int:
+        """启动时把上次遗留的 running 状态任务标记为 interrupted，返回条数。"""
+        try:
+            sql = ("UPDATE task_runs SET status = 'interrupted', ended_at = ? "
+                   "WHERE status = 'running'")
+            params = (datetime.now().isoformat(timespec="seconds"),)
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+                    return cur.rowcount
+            conn = self._conn()
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+        except sqlite3.Error as e:
+            logger.error("mark_interrupted_tasks 失败: %s", e)
+            return 0
+
+    def list_task_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT task_id, trigger, mode, date_str, status, stage, stats, error, "
+                   "started_at, ended_at FROM task_runs ORDER BY id DESC LIMIT ?")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+            else:
+                cur = self._conn().execute(sql, (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            items = []
+            for r in rows:
+                item = dict(zip(cols, r))
+                if item.get("stats"):
+                    try:
+                        item["stats"] = json.loads(item["stats"])
+                    except (TypeError, ValueError):
+                        pass
+                items.append(item)
+            return items
+        except sqlite3.Error as e:
+            logger.error("list_task_runs 失败: %s", e)
+            return []

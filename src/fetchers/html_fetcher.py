@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import requests
 from bs4 import BeautifulSoup
 
-from .models import FetchResult, FetchStatus, BestFormat, MAX_FULLTEXT_CHARS, MIN_FULLTEXT_LEN, MIN_ABSTRACT_LEN
+from .models import FetchResult, FetchStatus, BestFormat, MAX_STORED_FULLTEXT_CHARS, MIN_FULLTEXT_LEN, MIN_ABSTRACT_LEN
 from .network import get_network_info, DEFAULT_UA
 
 if TYPE_CHECKING:
@@ -198,7 +198,7 @@ def _extract_text(html: str, selectors: dict) -> str:
         if len(paras) >= 3:
             text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
             if len(text) >= MIN_FULLTEXT_LEN:
-                return text[:MAX_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS]
 
     # 2. Publisher 摘要选择器（作为降级）
     for sel in selectors.get("abstract", []):
@@ -206,7 +206,7 @@ def _extract_text(html: str, selectors: dict) -> str:
         if paras:
             text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
             if len(text) >= MIN_ABSTRACT_LEN:
-                return text[:MAX_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS]
 
     # 3. 通用容器选择器
     for container_sel in _GENERIC_CONTAINERS:
@@ -214,13 +214,13 @@ def _extract_text(html: str, selectors: dict) -> str:
         if container:
             text = re.sub(r'\s+', ' ', container.get_text(" ", strip=True)).strip()
             if len(text) >= MIN_FULLTEXT_LEN:
-                return text[:MAX_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS]
 
     # 4. 全页 <p> 回退
     paras = soup.find_all("p")
     if paras:
         text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
         if len(text) >= MIN_FULLTEXT_LEN:
-            return text[:MAX_FULLTEXT_CHARS]
+            return text[:MAX_STORED_FULLTEXT_CHARS]
 
     return ""

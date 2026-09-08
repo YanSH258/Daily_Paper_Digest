@@ -27,13 +27,15 @@ __all__ = [
 ]
 
 # ── 共享常量（支持环境变量注入，保留默认值作为 fallback）────────────────
-MAX_FULLTEXT_CHARS: int = int(os.environ.get("FETCHER_MAX_FULLTEXT_CHARS", "22000"))  # 全文截断上限
+MAX_FULLTEXT_CHARS: int = int(os.environ.get("FETCHER_MAX_FULLTEXT_CHARS", "22000"))  # LLM 输入预算参考上限
+MAX_STORED_FULLTEXT_CHARS: int = int(os.environ.get("FETCHER_MAX_STORED_FULLTEXT_CHARS", "100000"))  # 入库存储上限
 MIN_FULLTEXT_LEN: int   = int(os.environ.get("FETCHER_MIN_FULLTEXT_LEN",   "800"))   # 认定为"全文"的最少字符数
 MIN_ABSTRACT_LEN: int   = int(os.environ.get("FETCHER_MIN_ABSTRACT_LEN",   "100"))   # 认定为"摘要"的最少字符数
 
 # 常量合法性校验：防止因环境变量配置错误导致运行时逻辑异常
-assert MAX_FULLTEXT_CHARS > MIN_FULLTEXT_LEN > MIN_ABSTRACT_LEN > 0, (
-    f"常量配置非法：需满足 MAX_FULLTEXT_CHARS({MAX_FULLTEXT_CHARS}) > "
+assert MAX_STORED_FULLTEXT_CHARS >= MAX_FULLTEXT_CHARS > MIN_FULLTEXT_LEN > MIN_ABSTRACT_LEN > 0, (
+    f"常量配置非法：需满足 MAX_STORED_FULLTEXT_CHARS({MAX_STORED_FULLTEXT_CHARS}) >= "
+    f"MAX_FULLTEXT_CHARS({MAX_FULLTEXT_CHARS}) > "
     f"MIN_FULLTEXT_LEN({MIN_FULLTEXT_LEN}) > "
     f"MIN_ABSTRACT_LEN({MIN_ABSTRACT_LEN}) > 0"
 )
@@ -79,6 +81,7 @@ class FetchResult:
     source: Literal["auto", "manual"]                    = "auto"
     network_mode: Literal["public", "campus_proxy", "vpn"] = "public"
     access_path: Literal["direct", "proxy"]              = "direct"
+    source_url: str                  = ""   # 成功获取时实际使用的来源 URL（证据溯源）
 
     @property
     def has_fulltext(self) -> bool:

@@ -49,6 +49,9 @@ CHAT_ANALYSIS_MAX_CHARS: int = 6000
 CHAT_HISTORY_MESSAGES: int = 12
 CHAT_MAX_TOKENS: int = 4096
 
+# 分析提示词版本：改动提示词结构时递增，并记录进 articles.analysis_prompt_version
+PROMPT_VERSION: str = "v2"
+
 
 # ──────────────────────────────────────────────
 # 自定义异常类
@@ -69,13 +72,26 @@ class LLMResponseParseError(LLMError):
     """LLM 返回内容无法解析"""
 
 
+class LLMStreamError(LLMError):
+    """流式对话失败（含模型未返回内容）"""
+
+
 # ──────────────────────────────────────────────
 # TypedDict 返回值定义
 # ──────────────────────────────────────────────
 class AnalysisResult(TypedDict):
     success: bool
-    analysis: str
+    analysis: str      # 成功时为解读文本；失败时为空字符串（错误放 error 字段）
     evidence_level: str
+    error: str
+
+
+class ScoreResult(TypedDict):
+    score: float
+    reason: str
+    matched_topics: list
+    model: str
+    basis: str         # 'abstract' | 'title'
 
 
 # ──────────────────────────────────────────────
@@ -106,11 +122,16 @@ class LLMAnalyzer:
     # 公开接口
     # ──────────────────────────────────────────────
 
-    def filter_relevance(self, article: dict) -> Optional[float]:
-        """对单篇文章打相关性分数（0-10），返回 float；失败时返回 None"""
+    def filter_relevance(self, article: dict) -> ScoreResult:
+        """对单篇文章打相关性分数。
+
+        返回 ScoreResult（score/reason/matched_topics/model/basis）；
+        任何失败（调用或校验）抛出 LLMError 子类，由调用方决定失败状态。
+        """
         title: str = article.get("title", "")
         abstract: str = article.get("abstract", "")
         doi: str = article.get("doi", "")
+        basis = "abstract" if abstract.strip() else "title"
 
         if not abstract:
             abstract = "(摘要不可用，请仅凭标题判断)"
@@ -133,85 +154,57 @@ class LLMAnalyzer:
 {abstract}
 
 请只返回一个 JSON 对象，格式如下（不要有任何其他文字）：
-{{"score": <0-10的整数>, "reason": "<一句话说明理由>"}}"""
+{{"score": <0-10的整数>, "reason": "<一句话中文说明推荐理由>", "matched_topics": ["命中的研究方向，可为空数组"]}}"""
 
-        try:
-            result = self._call_llm(prompt, max_tokens=RELEVANCE_MAX_TOKENS)
-            data = self._parse_json(result)
-            score = float(data.get("score", 0))
-            reason: str = data.get("reason", "")
-            logger.debug(
-                "  相关性评分 %s/10 | title=%s | doi=%s | reason=%s",
-                score,
-                title,
-                doi,
-                reason,
-            )
-            return score
-        except LLMResponseParseError as e:
-            logger.error(
-                "[LLM_PARSE_ERROR] 相关性评分解析失败 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
-                exc_info=True,
-            )
-            return None
-        except LLMQuotaExhaustedError:
-            logger.error(
-                "[LLM_QUOTA] 相关性评分失败：配额耗尽 | title=%s | doi=%s | provider=%s | model=%s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                exc_info=True,
-            )
-            return None
-        except LLMTimeoutError:
-            logger.error(
-                "[LLM_TIMEOUT] 相关性评分失败：请求超时 | title=%s | doi=%s | provider=%s | model=%s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                exc_info=True,
-            )
-            return None
-        except LLMError as e:
-            logger.error(
-                "[LLM_ERROR] 相关性评分失败 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
-                exc_info=True,
-            )
-            return None
+        result = self._call_llm(prompt, max_tokens=RELEVANCE_MAX_TOKENS)
+        data = self._parse_json(result)
+
+        # ── 严格校验：缺失 / 非数值 / 越界 / NaN 一律视为解析失败 ──
+        if "score" not in data:
+            raise LLMResponseParseError("响应 JSON 缺少 score 字段")
+        raw_score = data.get("score")
+        if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+            raise LLMResponseParseError(f"score 不是数值: {raw_score!r}")
+        score = float(raw_score)
+        if score != score or score in (float("inf"), float("-inf")):
+            raise LLMResponseParseError(f"score 非有限数值: {raw_score!r}")
+        if not 0 <= score <= 10:
+            raise LLMResponseParseError(f"score 越界 (0-10): {score}")
+
+        reason = str(data.get("reason", "")).strip()[:500]
+        matched = [str(t) for t in (data.get("matched_topics") or []) if str(t).strip()][:10]
+        return ScoreResult(
+            score=round(score, 1),
+            reason=reason,
+            matched_topics=matched,
+            model=self.model,
+            basis=basis,
+        )
 
     def analyze_article(self, article: dict) -> AnalysisResult:
-        """对文章进行深度解读，返回结构化结果"""
+        """对文章进行深度解读，返回结构化结果。
+
+        失败时 success=False、analysis 为空字符串、error 带原因——
+        不再把失败文本伪装成解读内容入库。
+        """
         title: str = article.get("title", "")
         journal: str = article.get("journal", "")
         authors: str = ", ".join(article.get("authors", []))
         doi: str = article.get("doi", "")
-        has_fulltext: bool = article.get("has_fulltext", False)
+        has_fulltext: bool = article.get("evidence_level") == "FULLTEXT"
         topics_str: str = "\n".join(f"- {t}" for t in self.topics)
 
-        # ★ 智能切分全文，提取信息密度最高的部分喂给 LLM
-        raw_text: str = article.get("abstract", "（摘要不可用）")
+        # ★ 摘要与全文分离：全文来自独立的 fulltext_text 字段，摘要保持原文
         if has_fulltext:
-            content = self._smart_chunk(raw_text)
+            raw_text: str = article.get("fulltext_text") or article.get("abstract", "")
+            content, chunk_note = self._smart_chunk(raw_text)
             logger.debug(
                 "  全文切分: 原始 %d 字 → 输入 %d 字 | title=%s",
-                len(raw_text),
-                len(content),
-                title,
+                len(raw_text), len(content), title,
             )
         else:
-            content = raw_text
+            content = article.get("abstract", "") or "（摘要不可用）"
+            chunk_note = ""
 
         if has_fulltext:
             prompt = f"""你是一位经验丰富的化学领域研究人员，擅长阅读和解读化学论文。
@@ -304,6 +297,12 @@ class LLMAnalyzer:
             max(self.max_tokens, ANALYSIS_MIN_TOKENS), ANALYSIS_MAX_TOKENS
         )
 
+        if chunk_note:
+            prompt = prompt.replace(
+                "【论文正文（已提取关键段落）】",
+                f"【论文正文（已提取关键段落）】{chunk_note}",
+            )
+
         try:
             analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
             evidence_level = "FULLTEXT" if has_fulltext else "ABSTRACT_ONLY"
@@ -311,71 +310,36 @@ class LLMAnalyzer:
                 success=True,
                 analysis=analysis,
                 evidence_level=evidence_level,
-            )
-        except LLMQuotaExhaustedError as e:
-            logger.error(
-                "[LLM_QUOTA] 文章解读失败：配额耗尽 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
-                exc_info=True,
-            )
-            return AnalysisResult(
-                success=False,
-                analysis=f"解读失败（配额耗尽）: {e}",
-                evidence_level="ERROR",
-            )
-        except LLMTimeoutError as e:
-            logger.error(
-                "[LLM_TIMEOUT] 文章解读失败：请求超时 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
-                exc_info=True,
-            )
-            return AnalysisResult(
-                success=False,
-                analysis=f"解读失败（请求超时）: {e}",
-                evidence_level="ERROR",
-            )
-        except LLMResponseParseError as e:
-            logger.error(
-                "[LLM_PARSE_ERROR] 文章解读失败：响应解析错误 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
-                exc_info=True,
-            )
-            return AnalysisResult(
-                success=False,
-                analysis=f"解读失败（响应解析错误）: {e}",
-                evidence_level="ERROR",
+                error="",
             )
         except LLMError as e:
+            kind = type(e).__name__
             logger.error(
-                "[LLM_ERROR] 文章解读失败 | title=%s | doi=%s | provider=%s | model=%s: %s",
-                title,
-                doi,
-                self.provider,
-                self.model,
-                e,
+                "[LLM_ERROR] 文章解读失败 (%s) | title=%s | doi=%s | provider=%s | model=%s: %s",
+                kind, title, doi, self.provider, self.model, e,
                 exc_info=True,
             )
             return AnalysisResult(
                 success=False,
-                analysis=f"解读失败: {e}",
+                analysis="",
                 evidence_level="ERROR",
+                error=f"{kind}: {e}",
             )
 
     # ──────────────────────────────────────────────
     # 文献对话（流式）
     # ──────────────────────────────────────────────
+
+    def chat_context_summary(self, article: dict) -> str:
+        """返回对话上下文的依据说明（前端展示用）。"""
+        fulltext = (article.get("fulltext_text") or "").strip()
+        if fulltext:
+            excerpt, _ = self._smart_chunk(fulltext)
+            return f"全文节选 {len(excerpt)} 字（原文共 {len(fulltext)} 字）"
+        abstract = (article.get("abstract") or "").strip()
+        if abstract:
+            return f"仅摘要 {min(len(abstract), CHAT_ABSTRACT_MAX_CHARS)} 字"
+        return "标题与元数据（无摘要/全文）"
 
     def chat_with_article(
         self,
@@ -385,12 +349,13 @@ class LLMAnalyzer:
     ) -> Generator[str, None, None]:
         """针对单篇文献的多轮对话，流式 yield 回答文本片段。
 
-        article: 文献记录（title/journal/authors/abstract/analysis 等）
+        article: 文献记录（title/journal/authors/abstract/fulltext_text/analysis 等）
         history: 历史消息 [{role, content}, ...]
         question: 本次用户提问
+        失败时抛出 LLMStreamError，由调用方决定如何反馈（不产出伪回答文本）。
         """
+        fulltext = (article.get("fulltext_text") or "").strip()
         abstract = (article.get("abstract") or "").strip()
-        analysis = (article.get("analysis") or "").strip()
         authors = article.get("authors") or ""
         if isinstance(authors, list):
             authors = ", ".join(authors)
@@ -400,12 +365,21 @@ class LLMAnalyzer:
             f"期刊：{article.get('journal', '') or '未知'}",
             f"作者：{authors or '未知'}",
             f"DOI：{article.get('doi', '') or '无'}",
-            "\n【摘要】",
-            abstract[:CHAT_ABSTRACT_MAX_CHARS] if abstract else "（摘要不可用）",
         ]
+        if fulltext:
+            excerpt, _ = self._smart_chunk(fulltext)
+            doc_parts.append(
+                "\n【原文全文节选】\n" + excerpt
+                + "\n（以上为原文节选，回答时请注明依据的是节选内容）"
+            )
+        else:
+            doc_parts.append(
+                "\n【摘要】\n" + (abstract[:CHAT_ABSTRACT_MAX_CHARS] if abstract else "（摘要不可用）")
+            )
+        analysis = (article.get("analysis") or "").strip()
         if analysis:
             doc_parts.append(
-                "\n【已有的 AI 深度解读（供参考，可能有误，以原文摘要为准）】\n"
+                "\n【已有的 AI 深度解读（供参考，可能有误，以原文内容为准）】\n"
                 + analysis[:CHAT_ANALYSIS_MAX_CHARS]
             )
         document = "\n".join(doc_parts)
@@ -437,7 +411,11 @@ class LLMAnalyzer:
         messages: list[dict[str, str]],
         max_tokens: Optional[int] = None,
     ) -> Generator[str, None, None]:
-        """流式调用 LLM，逐段 yield 回答内容；出错时 yield 错误说明文本（不重试）。"""
+        """流式调用 LLM，逐段 yield 回答内容。
+
+        失败（认证/限流/超时/其他/未返回内容）抛出 LLMStreamError，
+        由调用方转换为明确的错误事件——不产出会被当作回答保存的伪文本。
+        """
         effective_max_tokens: int = max_tokens if max_tokens is not None else CHAT_MAX_TOKENS
         try:
             stream = self.client.chat.completions.create(
@@ -457,55 +435,56 @@ class LLMAnalyzer:
                     got_content = True
                     yield content
             if not got_content:
-                yield "（模型未返回内容，请稍后重试或检查模型配置。）"
+                raise LLMStreamError("模型未返回内容，请稍后重试或检查模型配置")
         except openai.AuthenticationError as e:
             logger.error(
                 "[LLM_AUTH_ERROR] 文献对话失败：认证错误 | provider=%s | model=%s: %s",
                 self.provider, self.model, e,
             )
-            yield "⚠️ 调用失败：API 认证失败，请检查 API key 或账户余额。"
+            raise LLMStreamError("API 认证失败，请检查 API key 或账户余额") from e
         except openai.RateLimitError as e:
             logger.error(
                 "[LLM_QUOTA] 文献对话失败：速率限制 | provider=%s | model=%s: %s",
                 self.provider, self.model, e,
             )
-            yield "⚠️ 调用失败：API 速率限制/配额不足，请稍后重试。"
+            raise LLMStreamError("API 速率限制/配额不足，请稍后重试") from e
         except openai.APITimeoutError as e:
             logger.error(
                 "[LLM_TIMEOUT] 文献对话失败：超时 | provider=%s | model=%s: %s",
                 self.provider, self.model, e,
             )
-            yield "⚠️ 调用失败：API 请求超时，请重试。"
-        except Exception as e:  # noqa: BLE001 - 流式调用需要兜底以保证前端总能收到反馈
+            raise LLMStreamError("API 请求超时，请重试") from e
+        except LLMStreamError:
+            raise
+        except Exception as e:  # noqa: BLE001 - 流式调用需要兜底以保证前端总能收到错误反馈
             logger.error(
                 "[LLM_ERROR] 文献对话失败 | provider=%s | model=%s: %s",
                 self.provider, self.model, e,
                 exc_info=True,
             )
-            yield f"⚠️ 调用失败：{e}"
+            raise LLMStreamError(f"{type(e).__name__}: {e}") from e
 
     # ──────────────────────────────────────────────
     # 智能全文切分
     # ──────────────────────────────────────────────
 
-    def _smart_chunk(self, text: str, max_chars: int = SMART_CHUNK_MAX_CHARS) -> str:
+    def _smart_chunk(self, text: str, max_chars: Optional[int] = None) -> tuple[str, str]:
         """
-        从全文中提取信息密度最高的段落喂给 LLM。
-        策略：摘要 + 引言开头 + 方法核心 + 结论
-        比直接截断前 N 字符质量高得多。
+        从全文中按章节选取信息密度最高的段落喂给 LLM，总长不超过 max_chars。
+        抓取层保存的正文可达 MAX_STORED_FULLTEXT_CHARS，因此必须先选区再输入。
+
+        返回 (节选文本, 覆盖范围说明)；说明会注入提示词，
+        让模型明确知道输入是节选以及覆盖了哪些章节。
         """
+        if not max_chars:
+            max_chars = SMART_CHUNK_MAX_CHARS
         if len(text) <= max_chars:
-            return text
+            return text, ""
 
-        # 各部分分配字符预算
-        budget: dict[str, int] = {
-            "intro":      CHUNK_BUDGET_INTRO,
-            "method":     CHUNK_BUDGET_METHOD,
-            "results":    CHUNK_BUDGET_RESULTS,
-            "conclusion": CHUNK_BUDGET_CONCLUSION,
+        # 各章节按总预算比例分配：方法与结果优先，引言/结论保底
+        proportions: dict[str, float] = {
+            "intro": 0.10, "method": 0.40, "results": 0.35, "conclusion": 0.15,
         }
-
-        # 常见章节标题的正则（不区分大小写）
         section_patterns: dict[str, str] = {
             "intro":      r'(introduction|background|motivation)',
             "method":     r'(method|approach|model|framework|computational|theory|calculation)',
@@ -513,34 +492,41 @@ class LLMAnalyzer:
             "conclusion": r'(conclusion|summary|discussion|outlook)',
         }
 
-        sections: dict[str, str] = {}
-        for key, pattern in section_patterns.items():
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                start = match.start()
-                chunk = text[start : start + budget[key]]
-                sections[key] = chunk
-
-        if not sections:
-            # 找不到任何章节标题，退化为：前1/3 + 后1/4
-            front = text[: max_chars // 2]
-            tail_start = max(0, len(text) - max_chars // 4)
-            tail = text[tail_start:]
-            return front + "\n...[中间内容已省略]...\n" + tail
-
-        # 按顺序拼接找到的段落
-        parts: list[str] = []
+        # 按顺序定位各章节区间；起始位置向后找，天然去重叠
+        ranges: list[tuple[str, int, int]] = []
+        pos = 0
         for key in ("intro", "method", "results", "conclusion"):
-            if key in sections:
-                parts.append(sections[key])
+            if pos >= len(text):
+                break
+            budget = int(max_chars * proportions[key])
+            match = re.search(section_patterns[key], text[pos:], re.IGNORECASE)
+            if not match:
+                continue
+            start = max(pos, pos + match.start())
+            end = min(start + budget, len(text))
+            if end - start < 200:  # 太短的区间没有信息价值
+                continue
+            ranges.append((key, start, end))
+            pos = end
 
-        result = "\n...\n".join(parts)
+        if not ranges:
+            front = text[: max_chars // 2]
+            tail = text[len(text) - max_chars // 4:]
+            note = "（未能识别章节标题，节选自全文开头与结尾）"
+            return front + "\n...[中间内容已省略]...\n" + tail, note
 
-        # 如果拼接后还是超长，截断
-        if len(result) > max_chars:
-            result = result[:max_chars]
-
-        return result
+        parts: list[str] = []
+        covered: list[str] = []
+        used = 0
+        for key, start, end in ranges:
+            parts.append(text[start:end])
+            covered.append(f"{key}≈{end - start}字")
+            used += end - start
+        note = (
+            f"【系统注：以下为全文节选，共约 {used} 字（全文 {len(text)} 字），"
+            f"覆盖：{', '.join(covered)}；未覆盖部分不在输入中，请勿引用】"
+        )
+        return "\n...\n".join(parts), note
 
     # ──────────────────────────────────────────────
     # 内部辅助方法
