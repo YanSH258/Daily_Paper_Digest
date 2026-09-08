@@ -5,7 +5,10 @@ const Today = {
   data: null,
 
   init() {
-    document.getElementById("todayDate").value = new Date().toISOString().slice(0, 10);
+    // 使用本地日期（toISOString 是 UTC，跨午夜时会与库中 localtime 日期错位一天）
+    const d = new Date();
+    const local = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    document.getElementById("todayDate").value = local;
   },
 
   async load() {
