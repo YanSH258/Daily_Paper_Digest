@@ -92,8 +92,12 @@ class Notifier:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.output_cfg = config.get("output", {})
-        # ★ 默认输出目录改为 data/output
-        self.output_dir = Path(self.output_cfg.get("output_dir", "data/output"))
+        # ★ 默认输出目录改为 data/output；相对路径锚定到项目根，避免工作目录影响
+        out_dir = self.output_cfg.get("output_dir", "data/output")
+        out_path = Path(out_dir)
+        if not out_path.is_absolute():
+            out_path = Path(__file__).resolve().parent.parent / out_path
+        self.output_dir = out_path
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.formats: List[str] = self.output_cfg.get("formats", ["markdown"])
 

@@ -24,7 +24,7 @@ from core.analyzer import LLMAnalyzer
 from core.db import Database
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import classify_article
-from main import load_config, run_once, validate_config
+from main import load_config, run_once, setup_logging, validate_config
 
 logger = logging.getLogger("web")
 
@@ -34,6 +34,8 @@ class TaskRunner:
         self._base_config = base_config
         self._lock = threading.Lock()
         self._last_scheduler_date: Optional[str] = None
+        self._scheduler_stop = threading.Event()
+        self._scheduler_thread: Optional[threading.Thread] = None
         self.state: dict[str, Any] = {
             "running": False,
             "task_id": None,
@@ -111,21 +113,36 @@ class TaskRunner:
         with self._lock:
             return dict(self.state)
 
-    def start_scheduler(self) -> None:
-        scheduler_cfg = self._base_config.get("scheduler", {})
-        run_time = scheduler_cfg.get("run_time", "08:00")
-        thread = threading.Thread(target=self._scheduler_loop, args=(run_time,), daemon=True)
+    def update_base_config(self, new_config: dict[str, Any]) -> None:
+        """配置保存后更新任务基线配置，让后续手动触发的任务使用新配置。"""
+        with self._lock:
+            self._base_config = new_config
+
+    def start_scheduler(self, run_time: Optional[str] = None) -> None:
+        if run_time is None:
+            run_time = self._base_config.get("scheduler", {}).get("run_time", "08:00")
+        # 停掉旧调度线程（若有），保证改时间后重启不会双线程重复触发
+        self._scheduler_stop.set()
+        self._scheduler_stop = threading.Event()
+        self._last_scheduler_date = None
+        thread = threading.Thread(
+            target=self._scheduler_loop,
+            args=(run_time, self._scheduler_stop),
+            daemon=True,
+            name="web-scheduler",
+        )
+        self._scheduler_thread = thread
         thread.start()
         logger.info("已启动网页端调度线程: run_time=%s", run_time)
 
-    def _scheduler_loop(self, run_time: str) -> None:
+    def _scheduler_loop(self, run_time: str, stop_event: threading.Event) -> None:
         try:
             hour, minute = map(int, run_time.split(":"))
         except ValueError:
             logger.error("scheduler.run_time 格式错误，应为 HH:MM，当前=%s", run_time)
             return
 
-        while True:
+        while not stop_event.is_set():
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
             if now.hour == hour and now.minute == minute and self._last_scheduler_date != today:
@@ -135,7 +152,7 @@ class TaskRunner:
                     logger.info("调度触发成功: %s", msg)
                 else:
                     logger.warning("调度触发跳过: %s", msg)
-            threading.Event().wait(30)
+            stop_event.wait(30)
 
 
 class WebContext:
@@ -313,7 +330,7 @@ _SETTINGS_FIELDS = [
     "relevance_threshold", "research_topics",
     "fetcher.use_fulltext", "fetcher.use_browser",
     "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
-    "scheduler.run_time", "web.api_token",
+    "scheduler.run_time", "web.api_token", "web.api_token_clear",
     "output.email_enabled", "output.email_recipients",
     "output.feishu_enabled", "output.feishu_webhook",
 ]
@@ -374,8 +391,16 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
     }
 
 
+_SETTINGS_LOCK = threading.Lock()
+
+
 def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """把白名单字段写回 config.yaml（ruamel 保留注释）。密钥留空 = 不修改。"""
+    """把白名单字段写回 config.yaml（ruamel 保留注释）。
+
+    密钥类字段（llm.api_key / web.api_token）留空 = 不修改；
+    web.api_token_clear=true = 显式清除 Token。
+    校验通过后才原子写入（临时文件 + rename），非法配置不会覆盖原文件。
+    """
     from ruamel.yaml import YAML
     from ruamel.yaml.comments import CommentedMap
 
@@ -387,105 +412,129 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
     yaml_io = YAML()
     yaml_io.preserve_quotes = True
     cfg_path = Path(ctx.config_path)
-    try:
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = yaml_io.load(f)
-        if cfg is None:
-            cfg = CommentedMap()
-    except FileNotFoundError:
-        return {"ok": False, "error": f"配置文件不存在: {cfg_path}"}, 400
 
-    def ensure(keys: list) -> CommentedMap:
-        node = cfg
-        for k in keys:
-            if k not in node or not isinstance(node[k], dict):
-                node[k] = CommentedMap()
-            node = node[k]
-        return node
+    with _SETTINGS_LOCK:
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = yaml_io.load(f)
+            if cfg is None:
+                cfg = CommentedMap()
+        except FileNotFoundError:
+            return {"ok": False, "error": f"配置文件不存在: {cfg_path}"}, 400
 
-    provider = str(updates.get("llm.provider") or cfg.get("llm", {}).get("provider") or "deepseek")
-    changed: list[str] = []
+        def ensure(keys: list) -> CommentedMap:
+            node = cfg
+            for k in keys:
+                if k not in node or not isinstance(node[k], dict):
+                    node[k] = CommentedMap()
+                node = node[k]
+            return node
 
-    try:
-        for key, value in updates.items():
-            if key == "llm.provider":
-                # 自定义提供方：任意字母/数字/下划线/短横线组合
-                s = str(value).strip()
-                if s and re.match(r"^[A-Za-z0-9_-]{1,32}$", s):
-                    ensure(["llm"])["provider"] = s
-                    changed.append(key)
-            elif key == "llm.model":
-                if value:
-                    ensure(["llm", provider])["model"] = str(value)
-                    changed.append(key)
-            elif key == "llm.base_url":
-                s = str(value).strip()
-                if s:
-                    if not s.lower().startswith(("http://", "https://")):
-                        return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
-                    ensure(["llm", provider])["base_url"] = s
-                    changed.append(key)
-            elif key == "llm.api_key":
-                if value:  # 留空 = 保持不变
-                    ensure(["llm", provider])["api_key"] = str(value)
-                    changed.append(key)
-            elif key == "relevance_threshold":
-                v = float(value)
-                if 0 <= v <= 10:
-                    cfg["relevance_threshold"] = v
-                    changed.append(key)
-            elif key == "research_topics":
-                topics = [str(t).strip() for t in (value or []) if str(t).strip()]
-                if topics:
-                    cfg["research_topics"] = topics
-                    changed.append(key)
-            elif key == "scheduler.run_time":
-                s = str(value).strip()
-                if re.match(r"^\d{1,2}:\d{2}$", s):
-                    ensure(["scheduler"])["run_time"] = s
-                    changed.append(key)
-            elif key == "web.api_token":
-                ensure(["web"])["api_token"] = str(value or "")
-                changed.append(key)
-            elif key == "output.email_enabled":
-                ensure(["output", "email"])["enabled"] = bool(value)
-                changed.append(key)
-            elif key == "output.email_recipients":
-                recips = [str(r).strip() for r in (value or []) if str(r).strip()]
-                ensure(["output", "email"])["recipients"] = recips
-                changed.append(key)
-            elif key == "output.feishu_enabled":
-                ensure(["output", "feishu"])["enabled"] = bool(value)
-                changed.append(key)
-            elif key == "output.feishu_webhook":
-                if value:
-                    ensure(["output", "feishu"])["webhook_url"] = str(value)
-                    changed.append(key)
-            elif key.startswith("fetcher."):
-                sub = key.split(".", 1)[1]
-                node = ensure(["fetcher"])
-                if sub == "max_articles_per_journal":
-                    node[sub] = max(1, int(value))
-                elif sub == "date_filter_days":
-                    node[sub] = max(0, int(value))
-                else:
-                    node[sub] = bool(value)
-                changed.append(key)
-    except (ValueError, TypeError) as e:
-        return {"ok": False, "error": f"字段值格式无效: {e}"}, 400
+        provider = str(updates.get("llm.provider") or cfg.get("llm", {}).get("provider") or "deepseek")
+        changed: list[str] = []
 
-    if not changed:
-        return {"ok": False, "error": "没有字段通过校验"}, 400
+        try:
+            for key, value in updates.items():
+                if key == "llm.provider":
+                    # 自定义提供方：任意字母/数字/下划线/短横线组合
+                    s = str(value).strip()
+                    if s and re.match(r"^[A-Za-z0-9_-]{1,32}$", s):
+                        ensure(["llm"])["provider"] = s
+                        changed.append(key)
+                elif key == "llm.model":
+                    if value:
+                        ensure(["llm", provider])["model"] = str(value)
+                        changed.append(key)
+                elif key == "llm.base_url":
+                    s = str(value).strip()
+                    if s:
+                        if not s.lower().startswith(("http://", "https://")):
+                            return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
+                        ensure(["llm", provider])["base_url"] = s
+                        changed.append(key)
+                elif key == "llm.api_key":
+                    if value:  # 留空 = 保持不变
+                        ensure(["llm", provider])["api_key"] = str(value)
+                        changed.append(key)
+                elif key == "relevance_threshold":
+                    v = float(value)
+                    if 0 <= v <= 10:
+                        cfg["relevance_threshold"] = v
+                        changed.append(key)
+                elif key == "research_topics":
+                    topics = [str(t).strip() for t in (value or []) if str(t).strip()]
+                    if topics:
+                        cfg["research_topics"] = topics
+                        changed.append(key)
+                elif key == "scheduler.run_time":
+                    s = str(value).strip()
+                    if re.match(r"^\d{1,2}:\d{2}$", s):
+                        ensure(["scheduler"])["run_time"] = s
+                        changed.append(key)
+                elif key == "web.api_token":
+                    if value:  # 留空 = 保持不变
+                        ensure(["web"])["api_token"] = str(value)
+                        changed.append(key)
+                elif key == "web.api_token_clear":
+                    if value:
+                        ensure(["web"])["api_token"] = ""
+                        changed.append("web.api_token")
+                elif key == "output.email_enabled":
+                    ensure(["output", "email"])["enabled"] = bool(value)
+                    changed.append(key)
+                elif key == "output.email_recipients":
+                    recips = [str(r).strip() for r in (value or []) if str(r).strip()]
+                    ensure(["output", "email"])["recipients"] = recips
+                    changed.append(key)
+                elif key == "output.feishu_enabled":
+                    ensure(["output", "feishu"])["enabled"] = bool(value)
+                    changed.append(key)
+                elif key == "output.feishu_webhook":
+                    if value:
+                        ensure(["output", "feishu"])["webhook_url"] = str(value)
+                        changed.append(key)
+                elif key.startswith("fetcher."):
+                    sub = key.split(".", 1)[1]
+                    node = ensure(["fetcher"])
+                    if sub == "max_articles_per_journal":
+                        node[sub] = max(1, int(value))
+                    elif sub == "date_filter_days":
+                        node[sub] = max(0, int(value))
+                    else:
+                        node[sub] = bool(value)
+                    changed.append(key)
+        except (ValueError, TypeError) as e:
+            return {"ok": False, "error": f"字段值格式无效: {e}"}, 400
 
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        yaml_io.dump(cfg, f)
+        if not changed:
+            return {"ok": False, "error": "没有字段通过校验"}, 400
 
-    # 写入成功后热重载（后续手动触发的任务会用新配置）
+        # ★ 写入前先用更新后的配置跑一次启动校验，非法配置不落盘
+        try:
+            validate_config(load_config_from_obj(cfg))
+        except Exception as e:
+            return {"ok": False, "error": f"配置校验未通过，未保存: {e}"}, 400
+
+        # ★ 原子写入：先写临时文件再 rename，避免半写状态损坏配置
+        tmp_path = cfg_path.with_suffix(cfg_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml_io.dump(cfg, f)
+        os.replace(tmp_path, cfg_path)
+
+    # 写入成功后热重载（后续任务/Token/调度均用新配置）
     try:
         ctx.config = load_config(ctx.config_path)
         validate_config(ctx.config)
     except Exception as e:
         return {"ok": True, "changed": changed, "warning": f"已写入文件，但重载校验失败: {e}"}, 200
+
+    # 热更新：任务基线配置与 API Token 立即生效；调度时间变更则重启调度线程
+    ctx.runner.update_base_config(ctx.config)
+    ctx.api_token = os.environ.get("WEB_API_TOKEN") or ctx.config.get("web", {}).get("api_token")
+    if "scheduler.run_time" in changed and ctx.enable_scheduler:
+        new_run_time = str(ctx.config.get("scheduler", {}).get("run_time", "08:00"))
+        ctx.runner.start_scheduler(run_time=new_run_time)
+        logger.info("scheduler.run_time 已变更，调度线程已按 %s 重启", new_run_time)
 
     return {"ok": True, "changed": changed}, 200
 
@@ -639,7 +688,19 @@ def _import_journals(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, A
 
 # ── 静态前端 ──────────────────────────────────────────────────
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+def _find_static_dir() -> Path:
+    """静态资源目录：源码运行时为 src/static；pip 安装后在 webassets 包内。"""
+    src_dir = Path(__file__).resolve().parent / "static"
+    if src_dir.is_dir():
+        return src_dir
+    import importlib.util
+    spec = importlib.util.find_spec("webassets")
+    if spec and spec.submodule_search_locations:
+        return Path(list(spec.submodule_search_locations)[0])
+    return src_dir
+
+
+STATIC_DIR = _find_static_dir()
 
 _STATIC_CONTENT_TYPES: dict[str, str] = {
     ".html": "text/html; charset=utf-8",
@@ -1145,6 +1206,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_web_server(config_path: str = "config/config.yaml", host: str = "0.0.0.0", port: int = 8080) -> None:
+    setup_logging()
     ctx = WebContext(config_path=config_path)
 
     server = ThreadingHTTPServer((host, port), Handler)

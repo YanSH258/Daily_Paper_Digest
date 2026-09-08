@@ -50,7 +50,8 @@ const Settings = {
       </div>
       <div class="card"><h3>调度</h3>
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
-        ${this.fieldRow("网页 API Token", `<input id="s_token" value="" placeholder="${c.web.api_token_set ? "已配置，留空保持不变；填 none 清除" : "未配置，可选"}" />`)}
+        ${this.fieldRow("网页 API Token", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "未配置，可选"}" />
+          ${c.web.api_token_set ? '<button type="button" class="secondary small-btn" onclick="Settings.clearToken()">清除 Token</button>' : ""}`)}
         <p class="small" style="margin:8px 0 0;">配置文件：<span class="mono">${API.esc(c.config_path)}</span>，保存即写回（保留注释）。</p>
       </div>
     `;
@@ -102,6 +103,22 @@ const Settings = {
     }
   },
 
+  async clearToken() {
+    if (!confirm("确定清除网页 API Token 吗？清除后所有写操作将不再需要 Token（直到重新设置）。")) return;
+    const msgEl = document.getElementById("settingsMsg");
+    try {
+      const data = await API.post("/api/settings", { "web.api_token_clear": true });
+      if (data.ok) {
+        msgEl.innerHTML = '<span class="ok">已清除 API Token（立即生效）</span>';
+        await this.load();
+      } else {
+        msgEl.innerHTML = `<span class="err">${API.esc(data.error || "清除失败")}</span>`;
+      }
+    } catch (e) {
+      msgEl.innerHTML = `<span class="err">清除失败: ${API.esc(e.message)}</span>`;
+    }
+  },
+
   async load() {
     try {
       const c = await API.get("/api/settings");
@@ -134,8 +151,10 @@ const Settings = {
       "output.feishu_enabled": chk("s_feishu"),
       "output.feishu_webhook": val("s_webhook").trim(),
       "scheduler.run_time": val("s_runtime").trim(),
-      "web.api_token": val("s_token") === "none" ? "" : val("s_token").trim(),
     };
+    // Token 留空 = 不修改；只有用户输入了新值才提交，避免保存其他设置时误清 Token
+    const newToken = val("s_token").trim();
+    if (newToken) payload["web.api_token"] = newToken;
     try {
       const data = await API.post("/api/settings", payload);
       if (data.ok) {

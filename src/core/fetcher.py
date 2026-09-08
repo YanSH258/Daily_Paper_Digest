@@ -713,6 +713,9 @@ class JournalFetcher:
                     logger.warning(f"浏览器渲染失败 [{publisher}]: {e}")
 
         with self._cache_lock:
+            # FIFO 淘汰，避免缓存无上限增长
+            if len(self._page_cache) >= _PAGE_CACHE_MAX_SIZE:
+                self._page_cache.pop(next(iter(self._page_cache)))
             self._page_cache[url] = found_text
         return found_text
 
@@ -732,6 +735,13 @@ class JournalFetcher:
             url = entry.get("link", "")
             doi = self._extract_doi(entry, url)
             detected_publisher = _get_publisher_from_doi(doi) or publisher
+            # 优先使用 RSS 条目的真实发布日期，缺省时回退为运行当天
+            pub_date = datetime.now().strftime("%Y-%m-%d")
+            for date_field in ("published_parsed", "updated_parsed"):
+                parsed = entry.get(date_field)
+                if parsed:
+                    pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
+                    break
             return {
                 "title":        title,
                 "journal":      journal_name,
@@ -740,7 +750,7 @@ class JournalFetcher:
                 "doi":          doi,
                 "abstract":     self._extract_rss_abstract(entry),
                 "authors":      self._extract_authors(entry),
-                "pub_date":     datetime.now().strftime("%Y-%m-%d"),
+                "pub_date":     pub_date,
                 "has_fulltext": False,
             }
         except Exception as e:

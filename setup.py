@@ -22,8 +22,10 @@ setup(
     name="daily-paper-digest",
     version="0.1.0",
     description="AI 驱动的化学/材料文献日报工具",
-    packages=find_packages(where="src"),
-    package_dir={"": "src"},
+    packages=find_packages(where="src") | {"webassets"},
+    package_dir={"": "src", "webassets": "src/static"},
+    package_data={"webassets": ["*.html", "*.ico", "css/*", "js/*"]},
+    py_modules=["main", "web_server"],
     python_requires=">=3.9",
     install_requires=requirements,
     entry_points={

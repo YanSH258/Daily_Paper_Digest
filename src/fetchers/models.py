@@ -6,6 +6,8 @@ fetchers/models.py - fetchers 包的常量与数据模型中心枢纽
 其他模块应统一从此处导入，而非在各自文件中重复定义。
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from enum import Enum

@@ -13,6 +13,7 @@ main.py - 主入口
 """
 import os
 import sys
+import copy
 import time
 import logging
 import argparse
@@ -32,30 +33,47 @@ from core.notifier import Notifier, classify_article
 from fetchers.models import FetchResult
 
 # ── 日志配置 ──────────────────────────────────────────────────
-LOG_DIR = Path("data/logs")
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(
-            LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log",
-            encoding="utf-8"
-        ),
-    ],
-)
+_logger_ready = False
+
+
+def setup_logging() -> None:
+    """初始化日志（幂等）。在 CLI 入口与 Web 服务入口调用。"""
+    global _logger_ready
+    if _logger_ready:
+        return
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(
+                LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log",
+                encoding="utf-8"
+            ),
+        ],
+    )
+    _logger_ready = True
+
+
 logger = logging.getLogger("main")
+
+
+def get_output_dir(config: dict) -> Path:
+    """统一的输出目录解析：config.output.output_dir，锚定到项目根目录。"""
+    out = config.get("output", {}).get("output_dir", "data/output")
+    p = Path(out)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p
 
 
 # ── 核心流程 ──────────────────────────────────────────────────
 
-def load_config(path: str = "config/config.yaml") -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        cfg: dict = yaml.safe_load(f)
-
-    # ── 环境变量覆盖（适配 GitHub Actions Secrets）──────────────
+def _apply_env_overrides(cfg: dict) -> dict:
+    """环境变量覆盖（适配 GitHub Actions Secrets），优先级高于配置文件。"""
     # LLM API Key: 优先读取环境变量 DEEPSEEK_API_KEY / QWEN_API_KEY
     provider = cfg.get("llm", {}).get("provider", "deepseek")
     env_key_map = {"deepseek": "DEEPSEEK_API_KEY", "qwen": "QWEN_API_KEY"}
@@ -65,17 +83,29 @@ def load_config(path: str = "config/config.yaml") -> dict:
         cfg.setdefault("llm", {}).setdefault(provider, {})["api_key"] = env_api_key
         logger.info("已从环境变量 %s 读取 API Key", env_key_name)
 
-    # Email 密码：优先读取环境变量 EMAIL_PASSWORD
+    # Email 密码：优先读取环境变量 EMAIL_PASSWORD（配置位于 output.email 下）
     env_email_pwd = os.environ.get("EMAIL_PASSWORD")
     if env_email_pwd:
-        cfg.setdefault("email", {})["password"] = env_email_pwd
+        cfg.setdefault("output", {}).setdefault("email", {})["password"] = env_email_pwd
 
-    # Feishu Webhook：优先读取环境变量 FEISHU_WEBHOOK_URL
+    # Feishu Webhook：优先读取环境变量 FEISHU_WEBHOOK_URL（配置位于 output.feishu 下）
     env_feishu = os.environ.get("FEISHU_WEBHOOK_URL")
     if env_feishu:
-        cfg.setdefault("feishu", {})["webhook_url"] = env_feishu
+        cfg.setdefault("output", {}).setdefault("feishu", {})["webhook_url"] = env_feishu
 
     return cfg
+
+
+def load_config(path: str = "config/config.yaml") -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg: dict = yaml.safe_load(f)
+    return _apply_env_overrides(cfg)
+
+
+def load_config_from_obj(cfg: dict) -> dict:
+    """基于内存中的配置对象（如 ruamel CommentedMap）生成应用环境变量后的副本，
+    供设置保存前做完整校验，不落盘。"""
+    return _apply_env_overrides(copy.deepcopy(cfg))
 
 
 def validate_config(config: dict) -> None:
@@ -320,8 +350,8 @@ def run_once(config: dict, date_str: Optional[str] = None) -> None:
 
     # ── Step 7: 先更新 HTML 索引（邮件需要附加最新版本）───────
     logger.info("Step 7: 更新数据库 HTML 索引")
-    # 使用绝对路径，避免工作目录不一致导致文件写到错误位置
-    html_index_path = Path("data/output/paper_index.html").resolve()
+    # 输出目录统一由 config.output.output_dir 解析（与日报、附件一致）
+    html_index_path = notifier.output_dir / "paper_index.html"
     logger.info(f"  HTML 索引路径: {html_index_path}")
     try:
         from utils.stat_db import build_html_index
@@ -388,6 +418,7 @@ def run_scheduler(config: dict):
 # ── CLI 入口 ──────────────────────────────────────────────────
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser(description="化学文献日报工具")
     parser.add_argument("--config",   default="config/config.yaml", help="配置文件路径")
     parser.add_argument("--schedule", action="store_true",   help="开启每日定时模式")
