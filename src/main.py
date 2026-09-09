@@ -33,6 +33,7 @@ from core.db       import Database
 from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from core.analyzer import LLMAnalyzer, PROMPT_VERSION
 from core.notifier import Notifier, classify_article
+from core.tracking import collect_tracking_articles, record_tracking_edges
 from fetchers.models import FetchResult
 
 # ── 日志配置 ──────────────────────────────────────────────────
@@ -86,6 +87,17 @@ def _apply_env_overrides(cfg: dict) -> dict:
     env_feishu = os.environ.get("FEISHU_WEBHOOK_URL")
     if env_feishu:
         cfg.setdefault("output", {}).setdefault("feishu", {})["webhook_url"] = env_feishu
+
+    # Zotero / Web of Science 凭据
+    env_zotero = os.environ.get("ZOTERO_API_KEY")
+    if env_zotero:
+        cfg.setdefault("zotero", {})["api_key"] = env_zotero
+    env_zuid = os.environ.get("ZOTERO_USER_ID")
+    if env_zuid:
+        cfg.setdefault("zotero", {})["user_id"] = env_zuid
+    env_wos = os.environ.get("WOS_API_KEY")
+    if env_wos:
+        cfg.setdefault("wos", {})["api_key"] = env_wos
 
     return cfg
 
@@ -142,10 +154,14 @@ def load_journals_config(config: dict, db: Database) -> list[dict[str, Any]]:
     rows = db.list_journals(enabled_only=True)
     journals = [
         {
+            "id": j.get("id"),
             "name": j.get("name") or "未命名订阅",
             "rss": j["rss"],
             "publisher": j.get("publisher") or "DEFAULT",
             "max_articles": int(j.get("max_articles") or 100),
+            "source_type": j.get("source_type") or "rss",
+            "query": j.get("query") or "",
+            "last_run": j.get("last_run") or "",
         }
         for j in rows
     ]
@@ -267,6 +283,14 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     analyzer = LLMAnalyzer(config)
     notifier = Notifier(config)
 
+    # 推荐质量闭环：注入用户历史偏好样例
+    fb = db.get_feedback_examples()
+    analyzer.set_feedback_examples(fb.get("liked", []), fb.get("disliked", []))
+    if fb.get("liked") or fb.get("disliked"):
+        logger.info(
+            f"  偏好注入: 喜欢 {len(fb['liked'])} 条 / 不喜欢 {len(fb['disliked'])} 条"
+        )
+
     # 跨进程互斥：CLI / 网页触发 / 定时任务同一时间只允许一个流水线实例
     # （先拿锁再记任务，锁失败不会留下悬空的 running 记录）
     _run_lock = RunLock(config)
@@ -282,9 +306,23 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     try:
         # ── Step 1: 抓取 RSS ──────────────────────────────────
         logger.info("Step 1: 抓取期刊 RSS")
-        raw_articles = fetcher.fetch_all()
+        raw_articles = fetcher.fetch_all(
+            health_callback=lambda jid, ok, err="": db.update_journal_health(jid, ok, err)
+        )
+        stats["fetched_rss"] = len(raw_articles)
+        logger.info(f"  RSS 共抓取: {len(raw_articles)} 篇原始文章")
+
+        # ── Step 1.2: 引文/作者追踪采集 ───────────────────────
+        tracking_articles, tracking_meta = [], {}
+        if config.get("tracking", {}).get("enabled", True):
+            try:
+                tracking_articles, tracking_meta = collect_tracking_articles(config, db)
+            except Exception as e:  # noqa: BLE001 - 追踪失败不阻断日常流水线
+                logger.error(f"追踪采集失败: {e}")
+            if tracking_articles:
+                logger.info(f"  追踪采集: 引文/作者新文章 {len(tracking_articles)} 篇")
+        raw_articles = list(raw_articles) + list(tracking_articles)
         stats["fetched"] = len(raw_articles)
-        logger.info(f"  共抓取: {len(raw_articles)} 篇原始文章")
 
         # ── Step 1.5: 批次内去重 ──────────────────────────────
         raw_articles = dedupe_batch(raw_articles)
@@ -320,6 +358,15 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         for a, aid in zip(new_articles, inserted_ids):
             a["id"] = aid
         new_articles = [a for a in new_articles if a.get("id") is not None]
+        # 追踪来源与引文关联落库
+        for a in new_articles:
+            via = a.get("discovered_via")
+            if via and via != "rss":
+                db.update_article_fields(a["id"], discovered_via=via)
+        if tracking_meta:
+            edges = record_tracking_edges(db, list(zip(inserted_ids, new_articles)), tracking_meta)
+            if edges:
+                stats["citation_edges"] = edges
         logger.info(f"  已入库基础记录 {stats['saved']} 篇（待评分）")
         progress("saved_base")
 
@@ -355,6 +402,44 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                     logger.info(f"  评分前摘要补全: {a['title'][:50]}... ({len(completed)} 字)")
         progress("abstract_backfill")
 
+        # ── Step 2.8: WOS 元数据增强（可选，需 WOS_API_KEY）────
+        if new_articles and (os.environ.get("WOS_API_KEY") or config.get("wos", {}).get("api_key")):
+            try:
+                from integrations.wos_client import WOSClient
+                wos = WOSClient(config)
+                enriched = 0
+                for a in new_articles[:30]:  # 限额，防止单次任务消耗过多配额
+                    if not (a.get("doi") or a.get("title")):
+                        continue
+                    try:
+                        updates = wos.enrich_article(a)
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"WOS 增强失败 ({a.get('doi')}): {e}")
+                        continue
+                    if updates:
+                        db.update_article_fields(a["id"], **updates)
+                        a.update(updates)
+                        enriched += 1
+                if enriched:
+                    logger.info(f"  WOS 元数据增强: {enriched} 篇")
+                    stats["wos_enriched"] = enriched
+            except ValueError as e:
+                logger.debug(f"WOS 增强跳过: {e}")
+        progress("wos_enrich")
+
+        # ── Step 2.9: 相似度先验（推荐质量闭环）───────────────
+        try:
+            from utils.similarity import build_profile, compute_prior
+            profile = build_profile(db.get_positive_profile_texts())
+            if profile:
+                for a in new_articles:
+                    prior = compute_prior(profile, a.get("title", "") + " " + (a.get("abstract") or ""))
+                    if prior is not None:
+                        a["sim_prior"] = prior
+                logger.info("  相似度先验: 已为候选计算（正样本画像就绪）")
+        except Exception as e:  # noqa: BLE001 - 先验失败不影响主流程
+            logger.debug(f"相似度先验跳过: {e}")
+
         # ── Step 3: LLM 相关性评分（新文章 + 评分失败重试）────
         to_score = list(new_articles) + list(score_retry)
         logger.info(f"Step 3: LLM 相关性评分 (阈值={threshold}，共 {len(to_score)} 篇)")
@@ -380,6 +465,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                     article["id"],
                     relevance=res["score"], relevance_reason=res["reason"],
                     score_status="ok", score_model=res["model"], score_basis=res["basis"],
+                    sim_prior=article.get("sim_prior"),
                 )
                 article.update({
                     "relevance": res["score"], "relevance_reason": res["reason"],
@@ -566,6 +652,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             f"========== 完成！抓取: {stats['fetched']} → 新增: {stats['new_articles']} "
             f"→ 相关: {len(relevant_articles)} =========="
         )
+        stats["tokens"] = dict(analyzer.usage)
 
         if own_task:
             has_failure = (stats["db_errors"] or stats["scored_failed"]
@@ -620,6 +707,43 @@ def push_only(config: dict, date_str: str) -> dict:
     return {"date": date_str, "report_path": md_path, "push_results": push_results}
 
 
+def run_weekly(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None) -> dict:
+    """生成文献周报（方向分布对比/阅读盘点/引文追踪/热词）。"""
+    from utils.weekly import build_weekly, _week_bounds
+    db = Database(config["database"]["path"])
+    md_path, html_path, label = build_weekly(config, db, date_str)
+    start, end, _ = _week_bounds(date_str or datetime.now().strftime("%Y-%m-%d"))
+    week_articles = db.list_articles_created_between(start, end)
+    relevant = [a for a in week_articles
+                if (a.get("relevance") or 0) >= config.get("relevance_threshold", 5)]
+    db.save_report(
+        report_date=f"week-{label}",
+        file_path=md_path,
+        total_found=len(week_articles),
+        total_pushed=len(relevant),
+        kind="weekly",
+    )
+    return {"label": label, "report_path": md_path, "html_path": html_path,
+            "total_found": len(week_articles), "total_pushed": len(relevant)}
+
+
+def backup_database(config: dict, keep: int = 7) -> str:
+    """备份数据库到 data/backups/，滚动保留最近 keep 份。"""
+    import shutil
+    src = Path(config["database"]["path"])
+    if not src.is_absolute():
+        src = Path(__file__).resolve().parent.parent / src
+    backup_dir = src.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    dest = backup_dir / f"{src.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}{src.suffix}"
+    shutil.copy2(src, dest)
+    backups = sorted(backup_dir.glob(f"{src.stem}-*{src.suffix}"))
+    for old in backups[:-keep] if keep > 0 else []:
+        old.unlink(missing_ok=True)
+    logger.info(f"数据库已备份: {dest}（保留最近 {keep} 份）")
+    return str(dest)
+
+
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="化学文献日报工具")
@@ -628,6 +752,8 @@ def main():
     parser.add_argument("--date",     default=None,          help="指定报告日期 (YYYY-MM-DD)")
     parser.add_argument("--push-only", default=None, metavar="DATE",
                         help="只补发指定日期的日报推送（不重新抓取/评分/分析）")
+    parser.add_argument("--weekly", action="store_true", help="生成本周文献周报")
+    parser.add_argument("--backup", action="store_true", help="备份数据库（滚动保留最近 N 份）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -646,6 +772,15 @@ def main():
     if args.push_only:
         result = push_only(config, args.push_only)
         logger.info(f"推送结果: {result['push_results']}")
+        return
+
+    if args.weekly:
+        run_weekly(config, date_str=args.date)
+        return
+
+    if args.backup:
+        keep = int(config.get("backup", {}).get("keep", 7))
+        backup_database(config, keep=keep)
         return
 
     if args.schedule:

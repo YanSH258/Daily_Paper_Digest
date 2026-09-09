@@ -1,0 +1,119 @@
+"""
+tracking.py - 引文追踪与作者追踪
+
+collect_tracking_articles() 产生的文章 dict 与 RSS 条目结构兼容，
+由主流水线统一去重、评分、入库；发现的关联关系（citation_edges）
+在文章入库后由 record_tracking_edges() 落库。
+"""
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, int]]:
+    """采集引文追踪与作者追踪的新文章。
+
+    返回 (articles, meta)：meta 为辅助信息 {"citing_doi -> seed_id", "doi -> author_name"}，
+    供入库后补 citation_edges 与日志使用。
+    """
+    from integrations import openalex
+
+    openalex.set_polite_email(config.get("unpaywall_email", "your@email.com"))
+    tracking_cfg = config.get("tracking", {}) or {}
+    if not tracking_cfg.get("enabled", True):
+        return [], {}
+
+    articles: list[dict] = []
+    meta: dict[str, Any] = {"citing_seed": {}, "author": {}}
+    seen_dois: set[str] = set()
+
+    # ── 引文追踪：收藏/关注的文献有了新引用 ──────────────────────
+    check_days = int(tracking_cfg.get("citation_check_days", 3))
+    seeds = db.get_watched_seeds()
+    for seed in seeds:
+        doi = (seed.get("doi") or "").strip()
+        if not doi:
+            continue
+        since = seed.get("last_checked_at") or _default_since(seed.get("created_at"), check_days)
+        try:
+            citing = openalex.get_citing_works(doi, from_date=since)
+        except Exception as e:  # noqa: BLE001 - 单篇失败不阻断
+            logger.warning("引文追踪失败 (%s): %s", doi, e)
+            continue
+        finally:
+            db.mark_seed_checked(seed["id"])
+        for work in citing:
+            w_doi = (work.get("doi") or "").strip()
+            if w_doi and w_doi.lower() in seen_dois:
+                continue
+            if w_doi:
+                seen_dois.add(w_doi.lower())
+            work["discovered_via"] = "citation_watch"
+            work["publisher"] = "DEFAULT"
+            articles.append(work)
+            if w_doi:
+                meta["citing_seed"][w_doi.lower()] = seed["id"]
+        if citing:
+            logger.info("引文追踪: %s 新增 %d 篇引用", seed["title"][:50], len(citing))
+
+    # ── 作者追踪：关注作者有新文章 ──────────────────────────────
+    from_date = (datetime.now() - timedelta(days=int(tracking_cfg.get("author_check_days", 3))
+                                            )).strftime("%Y-%m-%d")
+    for author in db.list_watch_authors(enabled_only=True):
+        oid = author.get("openalex_id")
+        if not oid:
+            continue
+        try:
+            works = openalex.get_author_recent_works(oid, from_date=from_date)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("作者追踪失败 (%s): %s", author["name"], e)
+            continue
+        finally:
+            db.mark_author_run(author["id"])
+        count = 0
+        for work in works:
+            w_doi = (work.get("doi") or "").strip()
+            if w_doi and w_doi.lower() in seen_dois:
+                continue
+            if w_doi:
+                seen_dois.add(w_doi.lower())
+            work["discovered_via"] = "author_watch"
+            work["publisher"] = "DEFAULT"
+            articles.append(work)
+            meta["author"][w_doi.lower()] = author["name"]
+            count += 1
+        if count:
+            logger.info("作者追踪: %s 新增 %d 篇", author["name"], count)
+
+    return articles, meta
+
+
+def record_tracking_edges(db, inserted: list[tuple[Optional[int], dict]],
+                          meta: dict[str, Any]) -> int:
+    """文章入库后补 citation_edges / discovered_via 元数据。
+
+    inserted: [(article_id, article_dict), ...]
+    """
+    edges = 0
+    citing_seed: dict = meta.get("citing_seed", {})
+    author_meta: dict = meta.get("author", {})
+    for aid, article in inserted:
+        if aid is None:
+            continue
+        doi = (article.get("doi") or "").strip().lower()
+        seed_id = citing_seed.get(doi)
+        if seed_id:
+            db.add_citation_edge(seed_id, aid)
+            edges += 1
+        author_name = author_meta.get(doi)
+        if author_name and not article.get("relevance_reason"):
+            article["relevance_reason"] = f"来自关注作者 {author_name} 的新文章"
+    return edges
+
+
+def _default_since(created_at: Optional[str], check_days: int) -> str:
+    if created_at:
+        return str(created_at)[:10]
+    return (datetime.now() - timedelta(days=check_days)).strftime("%Y-%m-%d")

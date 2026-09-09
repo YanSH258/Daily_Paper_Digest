@@ -118,7 +118,11 @@ class Database:
                 analyzed_at   TEXT,
                 read_status   TEXT DEFAULT '',
                 relevance_feedback TEXT,
-                updated_at    TEXT
+                updated_at    TEXT,
+                zotero_key    TEXT,
+                discovered_via TEXT DEFAULT 'rss',
+                sim_prior     REAL,
+                cited_count   INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS daily_reports (
@@ -128,7 +132,8 @@ class Database:
                 total_found  INTEGER,
                 total_pushed INTEGER,
                 created_at   TEXT DEFAULT (datetime('now')),
-                push_results TEXT
+                push_results TEXT,
+                kind         TEXT DEFAULT 'daily'
             );
 
             CREATE TABLE IF NOT EXISTS journals (
@@ -139,7 +144,12 @@ class Database:
                 max_articles INTEGER NOT NULL DEFAULT 100,
                 enabled     INTEGER NOT NULL DEFAULT 1,
                 source      TEXT NOT NULL DEFAULT 'web',
-                created_at  TEXT DEFAULT (datetime('now'))
+                created_at  TEXT DEFAULT (datetime('now')),
+                source_type TEXT DEFAULT 'rss',
+                query       TEXT,
+                last_run    TEXT,
+                consecutive_failures INTEGER DEFAULT 0,
+                last_error  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS chat_messages (
@@ -162,6 +172,61 @@ class Database:
                 error       TEXT,
                 started_at  TEXT DEFAULT (datetime('now')),
                 ended_at    TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS topics (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                research_question TEXT,
+                notes       TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS topic_papers (
+                topic_id    INTEGER NOT NULL,
+                article_id  INTEGER NOT NULL,
+                note        TEXT,
+                added_at    TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (topic_id, article_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS citation_edges (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                seed_id     INTEGER NOT NULL,
+                citing_id   INTEGER NOT NULL UNIQUE,
+                found_at    TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS watched_seeds (
+                article_id  INTEGER PRIMARY KEY,
+                active      INTEGER NOT NULL DEFAULT 1,
+                last_checked_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS watch_authors (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                openalex_id TEXT,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                last_run    TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS highlights (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id  INTEGER NOT NULL,
+                text        TEXT NOT NULL,
+                note        TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS compare_results (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind        TEXT NOT NULL DEFAULT 'compare',
+                article_ids TEXT,
+                content     TEXT NOT NULL,
+                model       TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
             );
         """)
 
@@ -206,9 +271,24 @@ class Database:
             ("read_status", "TEXT DEFAULT ''"),
             ("relevance_feedback", "TEXT"),
             ("updated_at", "TEXT"),
+            # 研究工作台（Zotero / 追踪 / 推荐）
+            ("zotero_key", "TEXT"),
+            ("discovered_via", "TEXT DEFAULT 'rss'"),
+            ("sim_prior", "REAL"),
+            ("cited_count", "INTEGER"),
         ]
         self._migrate_columns(conn, "articles", legacy_columns + stage_columns, backup_before=True)
-        self._migrate_columns(conn, "daily_reports", [("push_results", "TEXT")], backup_before=False)
+        self._migrate_columns(conn, "daily_reports", [
+            ("push_results", "TEXT"),
+            ("kind", "TEXT DEFAULT 'daily'"),
+        ], backup_before=False)
+        self._migrate_columns(conn, "journals", [
+            ("source_type", "TEXT DEFAULT 'rss'"),
+            ("query", "TEXT"),
+            ("last_run", "TEXT"),
+            ("consecutive_failures", "INTEGER DEFAULT 0"),
+            ("last_error", "TEXT"),
+        ], backup_before=False)
 
         # 创建索引
         index_statements = [
@@ -556,6 +636,7 @@ class Database:
         "abstract", "analysis", "analysis_status", "analysis_error", "analysis_model",
         "analysis_prompt_version", "analysis_input_hash", "analyzed_at",
         "read_status", "relevance_feedback", "processed", "topic",
+        "zotero_key", "discovered_via", "sim_prior", "cited_count",
     }
 
     def update_article_fields(self, article_id: int, **fields: Any) -> bool:
@@ -716,15 +797,17 @@ class Database:
         total_found: int,
         total_pushed: int,
         push_results: Optional[dict] = None,
+        kind: str = "daily",
     ) -> None:
         try:
             params = (
                 report_date, file_path, total_found, total_pushed,
                 json.dumps(push_results, ensure_ascii=False) if push_results is not None else None,
+                kind,
             )
             sql = (
                 "INSERT OR REPLACE INTO daily_reports "
-                "(report_date, file_path, total_found, total_pushed, push_results) VALUES (?,?,?,?,?)"
+                "(report_date, file_path, total_found, total_pushed, push_results, kind) VALUES (?,?,?,?,?,?)"
             )
             if self._memory_conn is not None:
                 with self._memory_lock:
@@ -1172,4 +1255,554 @@ class Database:
             return items
         except sqlite3.Error as e:
             logger.error("list_task_runs 失败: %s", e)
+            return []
+    # ── 推荐质量：反馈样例 ─────────────────────────────────────
+
+    def get_feedback_examples(self, n: int = 3) -> dict[str, list[dict[str, str]]]:
+        """取最近的喜欢/不喜欢样例，注入评分 prompt 作 few-shot。"""
+        out = {"liked": [], "disliked": []}
+        try:
+            sql = ("SELECT title, topic, relevance_feedback, COALESCE(starred,0) AS starred "
+                   "FROM articles WHERE relevance_feedback = ? ORDER BY updated_at DESC LIMIT ?")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    d_rows = self._memory_conn.execute(sql, ("irrelevant", n)).fetchall()
+                    l_rows = self._memory_conn.execute(
+                        "SELECT title, topic, relevance_feedback, COALESCE(starred,0) AS starred FROM articles "
+                        "WHERE relevance_feedback = 'relevant' OR starred = 1 "
+                        "ORDER BY updated_at DESC LIMIT ?", (n,)).fetchall()
+            else:
+                conn = self._conn()
+                d_rows = conn.execute(sql, ("irrelevant", n)).fetchall()
+                l_rows = conn.execute(
+                    "SELECT title, topic, relevance_feedback, COALESCE(starred,0) AS starred FROM articles "
+                    "WHERE relevance_feedback = 'relevant' OR starred = 1 "
+                    "ORDER BY updated_at DESC LIMIT ?", (n,)).fetchall()
+            for r in d_rows:
+                out["disliked"].append({"title": r[0], "topic": r[1] or ""})
+            for r in l_rows:
+                out["liked"].append({"title": r[0], "topic": r[1] or ""})
+            return out
+        except sqlite3.Error as e:
+            logger.error("get_feedback_examples 失败: %s", e)
+            return out
+
+    # ── Zotero 关联 ─────────────────────────────────────────────
+
+    def get_article_by_zotero_key(self, key: str) -> Optional[int]:
+        try:
+            sql = "SELECT id FROM articles WHERE zotero_key = ?"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    row = self._memory_conn.execute(sql, (key,)).fetchone()
+            else:
+                row = self._conn().execute(sql, (key,)).fetchone()
+            return row[0] if row else None
+        except sqlite3.Error as e:
+            logger.error("get_article_by_zotero_key 失败: %s", e)
+            return None
+
+    # ── 引文追踪 ────────────────────────────────────────────────
+
+    def set_watch_seed(self, article_id: int, active: bool) -> bool:
+        try:
+            sql = ("INSERT INTO watched_seeds (article_id, active) VALUES (?, ?) "
+                   "ON CONFLICT(article_id) DO UPDATE SET active = excluded.active")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, (article_id, 1 if active else 0))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, (article_id, 1 if active else 0))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("set_watch_seed 失败: %s", e)
+            return False
+
+    def get_watched_seeds(self) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT a.id, a.doi, a.title, a.journal, a.created_at, s.active, s.last_checked_at "
+                   "FROM watched_seeds s JOIN articles a ON a.id = s.article_id "
+                   "WHERE s.active = 1 ORDER BY s.article_id")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_watched_seeds 失败: %s", e)
+            return []
+
+    def is_seed_watched(self, article_id: int) -> bool:
+        try:
+            sql = "SELECT active FROM watched_seeds WHERE article_id = ?"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    row = self._memory_conn.execute(sql, (article_id,)).fetchone()
+            else:
+                row = self._conn().execute(sql, (article_id,)).fetchone()
+            return bool(row and row[0])
+        except sqlite3.Error as e:
+            logger.error("is_seed_watched 失败: %s", e)
+            return False
+
+    def mark_seed_checked(self, article_id: int) -> None:
+        try:
+            sql = ("INSERT INTO watched_seeds (article_id, active, last_checked_at) "
+                   "VALUES (?, 1, ?) ON CONFLICT(article_id) DO UPDATE SET last_checked_at = excluded.last_checked_at")
+            now = datetime.now().isoformat(timespec="seconds")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, (article_id, now))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, (article_id, now))
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("mark_seed_checked 失败: %s", e)
+
+    def add_citation_edge(self, seed_id: int, citing_id: int) -> bool:
+        try:
+            sql = "INSERT OR IGNORE INTO citation_edges (seed_id, citing_id) VALUES (?, ?)"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, (seed_id, citing_id))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, (seed_id, citing_id))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("add_citation_edge 失败: %s", e)
+            return False
+
+    def get_citation_edges_since(self, days: int = 7) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT e.seed_id, e.citing_id, e.found_at, sa.title AS seed_title, "
+                   "ca.title AS citing_title, ca.doi AS citing_doi, ca.url AS citing_url, "
+                   "ca.relevance AS citing_relevance "
+                   "FROM citation_edges e "
+                   "JOIN articles sa ON sa.id = e.seed_id "
+                   "JOIN articles ca ON ca.id = e.citing_id "
+                   "WHERE e.found_at >= datetime('now', ?) ORDER BY e.found_at DESC")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (f"-{int(days)} days",))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (f"-{int(days)} days",))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_citation_edges_since 失败: %s", e)
+            return []
+
+    # ── 作者追踪 ────────────────────────────────────────────────
+
+    def add_watch_author(self, name: str, openalex_id: Optional[str] = None) -> Optional[int]:
+        try:
+            sql = "INSERT INTO watch_authors (name, openalex_id) VALUES (?, ?)"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (name.strip(), openalex_id))
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            conn = self._conn()
+            cur = conn.execute(sql, (name.strip(), openalex_id))
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            logger.error("add_watch_author 失败: %s", e)
+            return None
+
+    def list_watch_authors(self, enabled_only: bool = True) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT id, name, openalex_id, enabled, last_run, created_at FROM watch_authors "
+                   + ("WHERE enabled = 1 " if enabled_only else "") + "ORDER BY id")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_watch_authors 失败: %s", e)
+            return []
+
+    def delete_watch_author(self, author_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute("DELETE FROM watch_authors WHERE id = ?", (author_id,))
+                    self._memory_conn.commit()
+                    return cur.rowcount > 0
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM watch_authors WHERE id = ?", (author_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error("delete_watch_author 失败: %s", e)
+            return False
+
+    def mark_author_run(self, author_id: int) -> None:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        "UPDATE watch_authors SET last_run = ? WHERE id = ?",
+                        (datetime.now().isoformat(timespec="seconds"), author_id))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute("UPDATE watch_authors SET last_run = ? WHERE id = ?",
+                             (datetime.now().isoformat(timespec="seconds"), author_id))
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("mark_author_run 失败: %s", e)
+
+    # ── 研究专题 ────────────────────────────────────────────────
+
+    def create_topic(self, name: str, research_question: str = "", notes: str = "") -> Optional[int]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "INSERT INTO topics (name, research_question, notes) VALUES (?,?,?)",
+                        (name.strip(), research_question, notes))
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            conn = self._conn()
+            cur = conn.execute("INSERT INTO topics (name, research_question, notes) VALUES (?,?,?)",
+                               (name.strip(), research_question, notes))
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            logger.error("create_topic 失败: %s", e)
+            return None
+
+    def list_topics(self) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT t.id, t.name, t.research_question, t.notes, t.created_at, "
+                   "COUNT(p.article_id) AS paper_count "
+                   "FROM topics t LEFT JOIN topic_papers p ON p.topic_id = t.id "
+                   "GROUP BY t.id ORDER BY t.id DESC")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql)
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_topics 失败: %s", e)
+            return []
+
+    def get_topic(self, topic_id: int) -> Optional[dict[str, Any]]:
+        try:
+            sql = "SELECT id, name, research_question, notes, created_at FROM topics WHERE id = ?"
+            papers_sql = ("SELECT a.id, a.title, a.journal, a.topic, a.relevance, a.read_status, "
+                          "a.evidence_level, a.has_analysis FROM topic_papers p "
+                          "JOIN articles a ON a.id = p.article_id WHERE p.topic_id = ? "
+                          "ORDER BY COALESCE(a.relevance, 0) DESC")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (topic_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    cols = [d[0] for d in cur.description]
+                    pcur = self._memory_conn.execute(papers_sql, (topic_id,))
+                    pcols = [d[0] for d in pcur.description]
+                    papers = [dict(zip(pcols, r)) for r in pcur.fetchall()]
+            else:
+                conn = self._conn()
+                cur = conn.execute(sql, (topic_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                pcur = conn.execute(papers_sql, (topic_id,))
+                pcols = [d[0] for d in pcur.description]
+                papers = [dict(zip(pcols, r)) for r in pcur.fetchall()]
+            topic = dict(zip(cols, row))
+            topic["papers"] = papers
+            return topic
+        except sqlite3.Error as e:
+            logger.error("get_topic 失败: %s", e)
+            return None
+
+    def update_topic(self, topic_id: int, name: str, research_question: str, notes: str) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        "UPDATE topics SET name = ?, research_question = ?, notes = ? WHERE id = ?",
+                        (name, research_question, notes, topic_id))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute("UPDATE topics SET name = ?, research_question = ?, notes = ? WHERE id = ?",
+                             (name, research_question, notes, topic_id))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("update_topic 失败: %s", e)
+            return False
+
+    def delete_topic(self, topic_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute("DELETE FROM topic_papers WHERE topic_id = ?", (topic_id,))
+                    self._memory_conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute("DELETE FROM topic_papers WHERE topic_id = ?", (topic_id,))
+                conn.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("delete_topic 失败: %s", e)
+            return False
+
+    def add_topic_papers(self, topic_id: int, article_ids: list[int]) -> int:
+        added = 0
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    for aid in article_ids:
+                        cur = self._memory_conn.execute(
+                            "INSERT OR IGNORE INTO topic_papers (topic_id, article_id) VALUES (?, ?)",
+                            (topic_id, aid))
+                        added += cur.rowcount
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                for aid in article_ids:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO topic_papers (topic_id, article_id) VALUES (?, ?)",
+                        (topic_id, aid))
+                    added += cur.rowcount
+                conn.commit()
+            return added
+        except sqlite3.Error as e:
+            logger.error("add_topic_papers 失败: %s", e)
+            return added
+
+    def remove_topic_paper(self, topic_id: int, article_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "DELETE FROM topic_papers WHERE topic_id = ? AND article_id = ?",
+                        (topic_id, article_id))
+                    self._memory_conn.commit()
+                    return cur.rowcount > 0
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM topic_papers WHERE topic_id = ? AND article_id = ?",
+                               (topic_id, article_id))
+            conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error("remove_topic_paper 失败: %s", e)
+            return False
+
+    # ── 划线摘录 ────────────────────────────────────────────────
+
+    def add_highlight(self, article_id: int, text: str, note: str = "") -> Optional[int]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "INSERT INTO highlights (article_id, text, note) VALUES (?,?,?)",
+                        (article_id, text.strip(), note))
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            conn = self._conn()
+            cur = conn.execute("INSERT INTO highlights (article_id, text, note) VALUES (?,?,?)",
+                               (article_id, text.strip(), note))
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            logger.error("add_highlight 失败: %s", e)
+            return None
+
+    def get_highlights(self, article_id: int) -> list[dict[str, Any]]:
+        try:
+            sql = "SELECT id, text, note, created_at FROM highlights WHERE article_id = ? ORDER BY id DESC"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (article_id,))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (article_id,))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("get_highlights 失败: %s", e)
+            return []
+
+    def delete_highlight(self, highlight_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute("DELETE FROM highlights WHERE id = ?", (highlight_id,))
+                    self._memory_conn.commit()
+                    return cur.rowcount > 0
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM highlights WHERE id = ?", (highlight_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error("delete_highlight 失败: %s", e)
+            return False
+
+    # ── 对比 / 草稿结果 ─────────────────────────────────────────
+
+    def save_result(self, kind: str, article_ids: list[int], content: str, model: str = "") -> Optional[int]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "INSERT INTO compare_results (kind, article_ids, content, model) VALUES (?,?,?,?)",
+                        (kind, json.dumps(article_ids), content, model))
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            conn = self._conn()
+            cur = conn.execute(
+                "INSERT INTO compare_results (kind, article_ids, content, model) VALUES (?,?,?,?)",
+                (kind, json.dumps(article_ids), content, model))
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.Error as e:
+            logger.error("save_result 失败: %s", e)
+            return None
+
+    def get_result(self, result_id: int) -> Optional[dict[str, Any]]:
+        try:
+            sql = "SELECT id, kind, article_ids, content, model, created_at FROM compare_results WHERE id = ?"
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (result_id,))
+                    row = cur.fetchone()
+                    cols = [d[0] for d in cur.description]
+            else:
+                cur = self._conn().execute(sql, (result_id,))
+                row = cur.fetchone()
+                cols = [d[0] for d in cur.description]
+            if not row:
+                return None
+            item = dict(zip(cols, row))
+            try:
+                item["article_ids"] = json.loads(item.get("article_ids") or "[]")
+            except (TypeError, ValueError):
+                pass
+            return item
+        except sqlite3.Error as e:
+            logger.error("get_result 失败: %s", e)
+            return None
+
+    def list_results(self, limit: int = 20) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT id, kind, article_ids, content, model, created_at FROM compare_results "
+                   "ORDER BY id DESC LIMIT ?")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (limit,))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+            else:
+                cur = self._conn().execute(sql, (limit,))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            items = []
+            for r in rows:
+                item = dict(zip(cols, r))
+                item["content"] = (item.get("content") or "")[:120]
+                try:
+                    item["article_ids"] = json.loads(item.get("article_ids") or "[]")
+                except (TypeError, ValueError):
+                    pass
+                items.append(item)
+            return items
+        except sqlite3.Error as e:
+            logger.error("list_results 失败: %s", e)
+            return []
+
+    # ── 期刊源健康度 ────────────────────────────────────────────
+
+    def update_journal_health(self, journal_id: int, ok: bool, error: str = "") -> None:
+        try:
+            if ok:
+                sql = ("UPDATE journals SET last_run = ?, consecutive_failures = 0, "
+                       "last_error = NULL WHERE id = ?")
+            else:
+                sql = ("UPDATE journals SET last_run = ?, "
+                       "consecutive_failures = COALESCE(consecutive_failures, 0) + 1, "
+                       "last_error = ? WHERE id = ?")
+            params = (datetime.now().isoformat(timespec="seconds"),
+                      error[:300] if not ok else None, journal_id) if not ok else \
+                     (datetime.now().isoformat(timespec="seconds"), journal_id)
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, params)
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("update_journal_health 失败: %s", e)
+
+    def list_articles_created_between(self, start: str, end: str) -> list[dict[str, Any]]:
+        """按入库日期区间（本地时区，含头不含尾）列出文章。"""
+        try:
+            sql = ("SELECT * FROM articles WHERE date(created_at, 'localtime') >= ? "
+                   "AND date(created_at, 'localtime') < ? "
+                   "ORDER BY COALESCE(relevance, 0) DESC")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (start, end))
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+            else:
+                cur = self._conn().execute(sql, (start, end))
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            items = []
+            for r in rows:
+                item = dict(zip(cols, r))
+                item.pop("fulltext_text", None)
+                items.append(item)
+            return items
+        except sqlite3.Error as e:
+            logger.error("list_articles_created_between 失败: %s", e)
+            return []
+
+    def get_positive_profile_texts(self, limit: int = 60) -> list[str]:
+        """取星标/已读/认可文献的摘要，用于构建相似度偏好画像。"""
+        try:
+            sql = ("SELECT abstract FROM articles "
+                   "WHERE starred = 1 OR read_status IN ('reading', 'read') "
+                   "OR relevance_feedback = 'relevant' "
+                   "ORDER BY updated_at DESC, id DESC LIMIT ?")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    rows = self._memory_conn.execute(sql, (limit,)).fetchall()
+            else:
+                rows = self._conn().execute(sql, (limit,)).fetchall()
+            return [r[0] for r in rows if r[0]]
+        except sqlite3.Error as e:
+            logger.error("get_positive_profile_texts 失败: %s", e)
             return []

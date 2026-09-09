@@ -19,7 +19,7 @@ import concurrent.futures
 import feedparser
 import requests
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -391,22 +391,95 @@ class JournalFetcher:
         self._request_manager = RequestManager(config=config)
         self._browser_lock = threading.Lock()
 
-    def fetch_all(self) -> list[dict]:  # R3
+    def fetch_all(self, health_callback=None) -> list[dict]:
+        """并发抓取所有订阅源（RSS / arXiv / OpenAlex 检索式）。
+
+        health_callback(journal_id, ok, error="") 用于更新源健康度。
+        """
         journals = self.config.get("journals", [])
-        all_articles = []
-        for journal in journals:
+        concurrency = max(1, int((self.config.get("performance", {}) or {})
+                                 .get("rss_concurrency", 4)))
+        results: list[list[dict]] = [[] for _ in journals]
+
+        def _one(idx_journal: tuple[int, dict]) -> None:
+            idx, journal = idx_journal
             name = journal.get("name", "Unknown")
-            rss_url = journal.get("rss", "")
-            if not rss_url:
-                continue
-            logger.info(f"正在抓取: {name}")
+            source_type = journal.get("source_type", "rss")
             try:
-                articles = self._fetch_journal(journal)
-                all_articles.extend(articles)
-            except Exception as e:
+                if source_type == "arxiv":
+                    arts = self._fetch_arxiv_source(journal)
+                elif source_type == "openalex":
+                    arts = self._fetch_openalex_source(journal)
+                else:
+                    rss_url = journal.get("rss", "")
+                    if not rss_url:
+                        return
+                    arts = self._fetch_journal(journal)
+                results[idx] = arts
+                logger.info(f"正在抓取: {name} → {len(arts)} 篇")
+                if health_callback and journal.get("id"):
+                    health_callback(journal["id"], True)
+            except Exception as e:  # noqa: BLE001 - 单源失败不阻断其他源
                 logger.error(f"  {name} 抓取失败: {e}")
-            time.sleep(self.delay)
-        return all_articles
+                if health_callback and journal.get("id"):
+                    health_callback(journal["id"], False, str(e))
+
+        if concurrency > 1 and len(journals) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(concurrency, len(journals))) as executor:
+                list(executor.map(_one, enumerate(journals)))
+        else:
+            for idx, journal in enumerate(journals):
+                _one((idx, journal))
+        return [a for r in results for a in r]
+
+    def _fetch_arxiv_source(self, journal: dict) -> list[dict]:
+        """arXiv API 分类订阅（query 如 cat:cond-mat.mtrl-sci）。"""
+        query = journal.get("query") or journal.get("rss") or ""
+        per_max = int(journal.get("max_articles", self.max_per_journal))
+        url = (f"http://export.arxiv.org/api/query?search_query={quote(query)}"
+               f"&sortBy=submittedDate&sortOrder=descending&max_results={per_max}")
+        feed = feedparser.parse(url)
+        if not feed or not feed.entries:
+            return []
+        articles = []
+        for entry in feed.entries[:per_max]:
+            art = self._parse_entry(entry, journal.get("name", "arXiv"), "arXiv")
+            if art:
+                art["url"] = entry.get("link", art.get("url", ""))
+                articles.append(art)
+        return self._apply_date_filter(articles)
+
+    def _fetch_openalex_source(self, journal: dict) -> list[dict]:
+        """OpenAlex 检索式订阅，按 last_run 水位线增量拉取。"""
+        from integrations import openalex as oa
+        openalex.set_polite_email(self.unpaywall_email)
+        query = journal.get("query") or journal.get("rss") or ""
+        from_date = journal.get("last_run") or ""
+        works = oa.search_works(query, from_date=from_date,
+                                limit=int(journal.get("max_articles", self.max_per_journal)))
+        articles = []
+        for w in works:
+            articles.append({
+                "title": w["title"],
+                "journal": journal.get("name", w.get("journal", "")),
+                "publisher": "DEFAULT",
+                "url": w["url"],
+                "doi": w["doi"],
+                "abstract": w["abstract"],
+                "authors": w["authors"],
+                "pub_date": w["pub_date"] or datetime.now().strftime("%Y-%m-%d"),
+                "has_fulltext": False,
+                "cited_count": w.get("cited_count"),
+                "discovered_via": "openalex_query",
+            })
+        return articles
+
+    def _apply_date_filter(self, articles: list[dict]) -> list[dict]:
+        if self.date_filter_days > 0:
+            cutoff = (datetime.now() - timedelta(days=self.date_filter_days)).strftime("%Y-%m-%d")
+            return [a for a in articles if a.get("pub_date", "9999") >= cutoff]
+        return articles
 
     def test_feed(self, rss_url: str, publisher: str = "DEFAULT") -> dict:
         """测试某个 RSS 链接是否可抓取（供 Web 端「测试链接」使用）。"""

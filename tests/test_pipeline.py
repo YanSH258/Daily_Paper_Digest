@@ -30,7 +30,7 @@ class FakeFetcher:
     def __init__(self, config):
         pass
 
-    def fetch_all(self):
+    def fetch_all(self, health_callback=None):
         return [dict(a) for a in ARTICLES]
 
     def fetch_fulltext_batch(self, arts):
@@ -50,6 +50,9 @@ class FakeAnalyzer:
     analyze_calls = {}
 
     def __init__(self, config):
+        pass
+
+    def set_feedback_examples(self, liked, disliked):
         pass
 
     def filter_relevance(self, a):

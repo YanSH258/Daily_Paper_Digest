@@ -112,11 +112,19 @@ class LLMAnalyzer:
             base_url=provider_cfg["base_url"],
         )
         self.model: str = provider_cfg.get("model", "deepseek-v4-flash")
+        # 反馈注入（推荐质量闭环）：liked/disliked 样例由流水线设置
+        self.feedback_examples: dict[str, list[dict[str, str]]] = {"liked": [], "disliked": []}
+        # Token 用量统计（成本观测）
+        self.usage: dict[str, int] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
         logger.info(
             "[LLM_INIT] LLM 已初始化: provider=%s, model=%s",
             self.provider,
             self.model,
         )
+
+    def set_feedback_examples(self, liked: list[dict], disliked: list[dict]) -> None:
+        """注入用户偏好样例（标题+方向），评分时作为 few-shot 参考。"""
+        self.feedback_examples = {"liked": liked or [], "disliked": disliked or []}
 
     # ──────────────────────────────────────────────
     # 公开接口
@@ -137,6 +145,12 @@ class LLMAnalyzer:
             abstract = "(摘要不可用，请仅凭标题判断)"
 
         topics_str: str = "\n".join(f"- {t}" for t in self.topics)
+        feedback_str = self._feedback_prompt_section()
+        prior_str = ""
+        sim_prior = article.get("sim_prior")
+        if sim_prior is not None:
+            prior_str = (f"\n【系统相似度参考】该文献与你收藏/精读文献的文本相似度约为 "
+                         f"{float(sim_prior):.1f}/10（仅作参考，请独立判断）。\n")
         prompt = f"""你是一位化学领域的专业研究人员。
 请判断下面这篇论文与以下研究方向的相关性，给出 0-10 的整数评分：
 - 10：与研究方向高度相关，必读
@@ -146,7 +160,7 @@ class LLMAnalyzer:
 
 【研究方向】
 {topics_str}
-
+{feedback_str}{prior_str}
 【论文标题】
 {title}
 
@@ -180,6 +194,22 @@ class LLMAnalyzer:
             model=self.model,
             basis=basis,
         )
+
+    def _feedback_prompt_section(self) -> str:
+        """把用户历史反馈拼成 prompt 段落（推荐质量闭环）。"""
+        fb = self.feedback_examples or {}
+        parts = []
+        if fb.get("disliked"):
+            items = "\n".join(f"- [{x.get('topic') or '未知方向'}] {x.get('title', '')[:80]}"
+                              for x in fb["disliked"][:3])
+            parts.append(f"用户近期明确标记为【不相关】的文章（这类方向应倾向低分）：\n{items}")
+        if fb.get("liked"):
+            items = "\n".join(f"- [{x.get('topic') or '未知方向'}] {x.get('title', '')[:80]}"
+                              for x in fb["liked"][:3])
+            parts.append(f"用户近期【收藏/认可】的文章（这类方向应倾向高分）：\n{items}")
+        if not parts:
+            return ""
+        return "\n【用户偏好参考（根据其历史反馈）】\n" + "\n".join(parts) + "\n"
 
     def analyze_article(self, article: dict) -> AnalysisResult:
         """对文章进行深度解读，返回结构化结果。
@@ -529,6 +559,88 @@ class LLMAnalyzer:
         return "\n...\n".join(parts), note
 
     # ──────────────────────────────────────────────
+    # 研究工具：多论文对比 / Related Work 草稿 / 方向建议
+    # ──────────────────────────────────────────────
+
+    def _articles_context(self, articles: list[dict], max_chars_each: int = 8000) -> str:
+        parts = []
+        for i, a in enumerate(articles, 1):
+            body = (a.get("fulltext_text") or "").strip() or (a.get("abstract") or "").strip()
+            parts.append(
+                f"[{i}] {a.get('title', '')}\n"
+                f"DOI: {a.get('doi', '') or '无'} | 期刊: {a.get('journal', '')} | "
+                f"日期: {a.get('pub_date', '')}\n{body[:max_chars_each]}"
+            )
+        return "\n\n".join(parts)
+
+    def compare_articles(self, articles: list[dict]) -> str:
+        """生成结构化对比（markdown 表），每个维度标注来源编号。"""
+        ctx = self._articles_context(articles)
+        n = len(articles)
+        prompt = f"""你是化学/材料领域的资深研究人员。请对比下面 {n} 篇论文。
+
+{ctx}
+
+严格按以下 markdown 输出（不要额外开场白）：
+
+## 对比概览
+一句话说明这批论文的关系（同题竞争/互补/方法演进）。
+
+## 对比表
+| 维度 | {" | ".join(f"[{i+1}] {articles[i].get('title','')[:24]}" for i in range(n))} |
+|------|{'------|' * n}（研究对象 / 核心方法 / 数据与体系 / 主要结果 / 局限）
+
+每个单元格末尾必须标注来源编号，如 "（[2]）"。
+
+## 关键差异
+3-5 条要点，每条注明依据哪几篇。
+## 对我的启发
+结合研究方向给出 2-3 条可执行的启发。"""
+        return self._call_llm(prompt, max_tokens=ANALYSIS_MAX_TOKENS)
+
+    def related_work_draft(self, articles: list[dict], focus: str = "") -> str:
+        """生成带编号引用的 Related Work 草稿段落。"""
+        ctx = self._articles_context(articles)
+        focus_str = f"\n写作侧重：{focus}\n" if focus else ""
+        prompt = f"""你是学术论文写作助手。基于以下 {len(articles)} 篇论文，撰写一段可用于论文
+Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
+要求：
+1. 按逻辑脉络组织（不要逐篇罗列）；
+2. 每处引用用 [n] 标注，n 对应下面文献的编号，只准引用给出的文献；
+3. 语气客观、术语保留英文；
+4. 输出末尾附"参考文献"列表：[n] 标题. 期刊, 年份. https://doi.org/DOI
+
+{ctx}"""
+        return self._call_llm(prompt, max_tokens=ANALYSIS_MAX_TOKENS)
+
+    def suggest_topics(self, recent_liked: list[dict], current_topics: list[str]) -> dict[str, list[str]]:
+        """根据近期高分/收藏文献建议研究方向增删。返回 {"add": [...], "keep_or_remove": [...]}。"""
+        ctx = self._articles_context(recent_liked[:20], max_chars_each=1500)
+        topics_str = "、".join(current_topics) or "（无）"
+        prompt = f"""你是科研方向规划助手。
+
+【用户当前研究方向】
+{topics_str}
+
+【用户近期高评分/收藏的文献（标题+摘要节选）】
+{ctx}
+
+请分析这些文献反映出的兴趣演化，返回一个 JSON（不要其他文字）：
+{{"add": ["建议新增的研究方向关键词（英文短语，2-4 个）"],
+  "remove": ["现有方向中已明显冷清、建议移除的（可空数组）"],
+  "reason": "<50字以内的说明>"}}"""
+        result = self._call_llm(prompt, max_tokens=800)
+        try:
+            data = self._parse_json(result)
+            return {
+                "add": [str(x) for x in (data.get("add") or [])][:5],
+                "remove": [str(x) for x in (data.get("remove") or [])][:5],
+                "reason": str(data.get("reason", "")),
+            }
+        except LLMResponseParseError:
+            return {"add": [], "remove": [], "reason": result[:200]}
+
+    # ──────────────────────────────────────────────
     # 内部辅助方法
     # ──────────────────────────────────────────────
 
@@ -553,6 +665,12 @@ class LLMAnalyzer:
                 )
 
                 choice = response.choices[0]
+                # Token 用量统计（成本观测）
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    self.usage["calls"] += 1
+                    self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+                    self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
                 raw_content = getattr(choice.message, "content", "") or ""
                 # 如果 content 为空且存在 reasoning_content，尝试使用它
                 if not raw_content and hasattr(choice.message, "reasoning_content"):
