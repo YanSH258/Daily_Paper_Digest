@@ -46,6 +46,7 @@ class FakeFetcher:
 
 class FakeAnalyzer:
     model = "fake-model"
+    usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
     score_calls = {}    # 类级计数：跨 run_once 调用共享，模拟真实调用历史
     analyze_calls = {}
 
