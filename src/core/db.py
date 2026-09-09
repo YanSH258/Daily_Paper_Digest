@@ -1511,7 +1511,7 @@ class Database:
         try:
             sql = "SELECT id, name, research_question, notes, created_at FROM topics WHERE id = ?"
             papers_sql = ("SELECT a.id, a.title, a.journal, a.topic, a.relevance, a.read_status, "
-                          "a.evidence_level, a.has_analysis FROM topic_papers p "
+                          "a.evidence_level FROM topic_papers p "
                           "JOIN articles a ON a.id = p.article_id WHERE p.topic_id = ? "
                           "ORDER BY COALESCE(a.relevance, 0) DESC")
             if self._memory_conn is not None:

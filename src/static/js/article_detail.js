@@ -83,6 +83,10 @@ const Detail = {
         <span class="badge ${Number(a.relevance || 0) >= 7 ? "green" : "muted"}">⭐ ${Number(a.relevance || 0).toFixed(1)}</span>
         ${evidenceBadge}
         <a class="ext-link" href="/article/${a.id}" target="_blank">📖 完整阅读页</a>
+        ${a.zotero_key
+          ? `<a class="ext-link" href="https://www.zotero.org/users/${Settings._zUserId || '0'}/items/${API.esc(a.zotero_key)}" target="_blank" title="${API.esc(a.zotero_key)}">Zotero ✓</a>`
+          : `<a class="ext-link" onclick="Detail.pushZotero()">推送 Zotero</a>`}
+        <label class="small"><input type="checkbox" id="watchSeed" ${Detail.watched ? "checked" : ""} onchange="Detail.toggleWatch(this.checked)" /> 关注新引用</label>
         ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
         ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener">DOI ↗</a>` : ""}
       </div>
@@ -188,6 +192,27 @@ const Detail = {
     } catch (e) {
       alert("操作失败: " + e.message);
     }
+  },
+
+  async pushZotero() {
+    const a = this.article;
+    if (!a) return;
+    try {
+      const resp = await API.post(`/api/articles/${a.id}/zotero`, {});
+      if (resp.ok) {
+        this.article.zotero_key = resp.key;
+        this.render(this.article);
+        alert(resp.already ? "该文献已在 Zotero 中" : "已推送到 Zotero ✓");
+      } else alert(resp.error || "推送失败");
+    } catch (e) { alert("推送失败: " + e.message); }
+  },
+
+  async toggleWatch(active) {
+    const a = this.article;
+    if (!a) return;
+    try {
+      await API.post(`/api/articles/${a.id}/watch`, { active });
+    } catch (e) { alert("操作失败: " + e.message); }
   },
 
   async saveReadStatus() {

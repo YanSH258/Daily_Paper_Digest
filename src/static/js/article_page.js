@@ -22,6 +22,8 @@ const Article = {
       document.getElementById("loading").hidden = true;
       document.getElementById("layout").hidden = false;
       this.render(a);
+      this.loadWatchState();
+      this.loadHighlights();
       Chat.init(a.id);
     } catch (e) {
       document.getElementById("loading").innerHTML = `<span class="err">加载失败: ${API.esc(e.message)}</span>`;
@@ -114,6 +116,13 @@ const Article = {
       : '<span class="small muted">暂无标签</span>';
     document.getElementById("tagsInput").value = tags.join(", ");
     document.getElementById("noteArea").value = a.note || "";
+
+    // Zotero 状态
+    const zBtn = document.getElementById("zoteroBtn");
+    if (a.zotero_key) {
+      zBtn.textContent = "✓ 已在 Zotero";
+      document.getElementById("zoteroNote").textContent = "条目 key: " + a.zotero_key;
+    }
   },
 
   splitSections(md) {
@@ -131,6 +140,67 @@ const Article = {
     }
     if (cur) sections.push(cur);
     return sections;
+  },
+
+  async loadWatchState() {
+    try {
+      const data = await API.get(`/api/articles/${this.id}`);
+      this.watched = !!data.watched;
+      const cb = document.getElementById("watchCitations");
+      if (cb) cb.checked = this.watched;
+    } catch (e) { /* 忽略 */ }
+  },
+
+  async toggleWatch(active) {
+    try { await API.post(`/api/articles/${this.id}/watch`, { active }); }
+    catch (e) { alert("操作失败: " + e.message); }
+  },
+
+  async pushZotero() {
+    try {
+      const resp = await API.post(`/api/articles/${this.id}/zotero`, {});
+      if (resp.ok) {
+        this.a.zotero_key = resp.key;
+        document.getElementById("zoteroBtn").textContent = resp.already ? "✓ 已在 Zotero" : "✓ 已推送";
+        document.getElementById("zoteroNote").textContent = "条目 key: " + resp.key;
+      } else alert(resp.error || "推送失败");
+    } catch (e) { alert("推送失败: " + e.message); }
+  },
+
+  renderHighlights(items) {
+    const box = document.getElementById("hlList");
+    if (!box) return;
+    box.innerHTML = items.length
+      ? items.map((h) => `<div class="reading-row" style="align-items:flex-start;">
+            <div class="reading-row-main"><div class="small">“${API.esc(h.text.slice(0, 160))}”</div>
+            ${h.note ? `<div class="small muted">${API.esc(h.note)}</div>` : ""}</div>
+            <button class="secondary" onclick="Article.removeHighlight(${h.id})">删</button>
+          </div>`).join("")
+      : '<div class="small muted">在上方全文节选中选中文字即可收藏。</div>';
+  },
+
+  async loadHighlights() {
+    try {
+      const data = await API.get(`/api/articles/${this.id}/highlights`);
+      this.renderHighlights(data.items || []);
+    } catch (e) { /* 忽略 */ }
+  },
+
+  async removeHighlight(id) {
+    try { await API.del("/api/highlights/" + id); this.loadHighlights(); }
+    catch (e) { alert("删除失败: " + e.message); }
+  },
+
+  async saveSelection() {
+    const sel = window.getSelection().toString().trim();
+    if (!sel) return;
+    try {
+      const resp = await API.post(`/api/articles/${this.id}/highlights`, { text: sel });
+      if (resp.ok) {
+        document.getElementById("hlSaveBtn").hidden = true;
+        this.loadHighlights();
+      } else alert(resp.error || "收藏失败");
+    } catch (e) { alert("收藏失败: " + e.message); }
   },
 
   toggleBody(id, header) {
@@ -217,4 +287,14 @@ const Article = {
   },
 };
 
-document.addEventListener("DOMContentLoaded", () => Article.init());
+document.addEventListener("DOMContentLoaded", () => {
+  Article.init();
+  const box = document.getElementById("fulltextBox");
+  const btn = document.getElementById("hlSaveBtn");
+  if (box && btn) {
+    box.addEventListener("mouseup", () => {
+      const sel = window.getSelection().toString().trim();
+      btn.hidden = !(sel && sel.length > 5);
+    });
+  }
+});

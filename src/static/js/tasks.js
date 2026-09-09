@@ -17,7 +17,10 @@ const Tasks = {
         ${running} task_id=<span class="mono">${API.esc(s.task_id || "-")}</span>
         trigger=${API.esc(s.trigger || "-")} mode=${API.esc(s.mode || "-")}<br>
         started=${API.esc(s.started_at || "-")} ended=${API.esc(s.ended_at || "-")}<br>
-        runs=${API.esc(s.run_count)} success=${API.esc(s.success_count)} failure=${API.esc(s.failure_count)}
+        runs=${API.esc(s.run_count)} success=${API.esc(s.success_count)} failure=${API.esc(s.failure_count)}<br>
+        ${s.last_stats && s.last_stats.tokens
+          ? `最近任务 LLM 用量: 调用 ${API.esc(s.last_stats.tokens.calls)} 次 / ` +
+            `输入 ${API.esc(s.last_stats.tokens.prompt_tokens)} + 输出 ${API.esc(s.last_stats.tokens.completion_tokens)} tokens<br>` : ""}
         ${err}
       `;
     } catch (e) {

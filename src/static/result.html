@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>研究结果 · Daily Paper Digest</title>
+  <style>
+    :root { --bg:#f7f8fa; --card:#fff; --ink:#2c3e50; --muted:#7a8699; --line:#e4e8ee; --accent:#2f6fed; --red:#c0392b; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+           background:var(--bg); color:var(--ink); line-height:1.7; }
+    body.dark { --bg:#1a1f27; --card:#232a35; --ink:#d7dde6; --muted:#8b96a5; --line:#333d4d; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 22px 24px; margin-bottom: 16px; }
+    .md h2 { margin: 14px 0 8px; font-size: 1.1em; }
+    .md table { border-collapse: collapse; margin: 12px 0; font-size: 0.88em; width: 100%; }
+    .md th, .md td { border: 1px solid var(--line); padding: 6px 10px; }
+    .md th { background: rgba(47,111,237,.08); }
+    .md pre { background: rgba(127,127,127,.08); padding: 10px 12px; border-radius: 8px; overflow: auto; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom: 12px; }
+    button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--card);
+             color:var(--ink); border-radius:6px; padding:6px 12px; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    a { color: var(--accent); }
+    .small { font-size: 0.84em; }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row" style="justify-content:space-between;">
+    <a href="/" class="small">← 返回控制台</a>
+    <div class="row" style="margin:0;">
+      <span class="small muted" id="meta"></span>
+      <button class="primary" onclick="Result.copyMd()">复制 Markdown</button>
+    </div>
+  </div>
+  <div class="card"><div class="md" id="content">加载中...</div></div>
+</div>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/chat.js"></script>
+<script src="/static/js/result.js"></script>
+</body>
+</html>

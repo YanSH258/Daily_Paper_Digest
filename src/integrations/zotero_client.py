@@ -105,18 +105,27 @@ class ZoteroClient:
 
     # ── 查重 ────────────────────────────────────────────────────
     def find_item_by_doi(self, doi: str) -> Optional[str]:
-        """按 DOI 查已有条目，返回 item key；Zotero 端幂等的关键。"""
+        """按 DOI 查已有条目，返回 item key；Zotero 端幂等的关键。
+
+        注意：Zotero 搜索索引对新写入条目有秒级延迟，因此这里只作为
+        兜底（首次推送历史旧库时用）；应用层会先查本地 zotero_key 字段。
+        """
         if not doi:
             return None
-        try:
-            items = self.zot.items(q=f'"{doi}"', qmode="everything", limit=10)
-        except Exception as e:  # noqa: BLE001 - 查重失败不阻断推送
-            logger.warning("Zotero DOI 查重失败（继续推送）: %s", e)
-            return None
-        for item in items:
-            data = item.get("data", {})
-            if str(data.get("doi", "")).strip().lower() == doi.strip().lower():
-                return data.get("key")
+        doi = doi.strip().lower()
+        for attempt in range(2):
+            try:
+                items = self.zot.items(q=doi, qmode="everything", limit=10)
+            except Exception as e:  # noqa: BLE001 - 查重失败不阻断推送
+                logger.warning("Zotero DOI 查重失败（继续推送）: %s", e)
+                return None
+            for item in items:
+                data = item.get("data", {})
+                if str(data.get("doi", "")).strip().lower() == doi:
+                    return data.get("key")
+            if attempt == 0:
+                import time
+                time.sleep(1.5)  # 等搜索索引跟上
         return None
 
     # ── 推送 ────────────────────────────────────────────────────

@@ -17,14 +17,20 @@
       <a class="nav-item" data-view="today" id="nav-today"><span class="idx">01</span> 今日精选</a>
       <a class="nav-item" data-view="database" id="nav-database"><span class="idx">02</span> 文献库</a>
       <a class="nav-item" data-view="reading" id="nav-reading"><span class="idx">03</span> 阅读清单</a>
-      <a class="nav-item" data-view="reports" id="nav-reports"><span class="idx">04</span> 历史日报</a>
+      <a class="nav-item" data-view="topics" id="nav-topics"><span class="idx">04</span> 研究专题</a>
+      <a class="nav-item" data-view="trends" id="nav-trends"><span class="idx">05</span> 趋势</a>
+      <a class="nav-item" data-view="reports" id="nav-reports"><span class="idx">06</span> 日报与周报</a>
       <div class="nav-divider"></div>
-      <a class="nav-item nav-secondary" data-view="subscriptions" id="nav-subscriptions"><span class="idx">05</span> 订阅管理</a>
-      <a class="nav-item nav-secondary" data-view="tasks" id="nav-tasks"><span class="idx">06</span> 运行任务</a>
-      <a class="nav-item nav-secondary" data-view="settings" id="nav-settings"><span class="idx">07</span> 设置</a>
+      <a class="nav-item nav-secondary" data-view="tracking" id="nav-tracking"><span class="idx">07</span> 追踪</a>
+      <a class="nav-item nav-secondary" data-view="subscriptions" id="nav-subscriptions"><span class="idx">08</span> 订阅管理</a>
+      <a class="nav-item nav-secondary" data-view="tasks" id="nav-tasks"><span class="idx">09</span> 运行任务</a>
+      <a class="nav-item nav-secondary" data-view="settings" id="nav-settings"><span class="idx">10</span> 设置</a>
     </nav>
     <div class="sidebar-foot">
-      <a href="/paper-index" target="_blank">只读大盘 paper_index</a>
+      <div class="row" style="gap:6px; align-items:center;">
+        <a href="/paper-index" target="_blank">只读大盘 paper_index</a>
+        <button class="secondary small-btn" id="darkToggle" onclick="App.toggleDark()" title="深色模式">🌙</button>
+      </div>
       <div class="token-box">
         <input id="tokenInput" type="password" placeholder="API Token（写操作需要）" />
         <button class="secondary small-btn" id="tokenSave">保存</button>
@@ -119,8 +125,13 @@
           <span id="batchCount" class="small"></span>
           <button class="secondary small-btn" onclick="Library.batchSetStatus('queued')">加入待读清单</button>
           <button class="secondary small-btn" onclick="Library.batchSetStatus('read')">标记已读</button>
-          <button class="secondary small-btn" onclick="Library.batchExportCitation('bibtex')">导出 BibTeX</button>
-          <button class="secondary small-btn" onclick="Library.batchExportCitation('ris')">导出 RIS</button>
+          <select id="batchTopicSelect" style="max-width:160px;" class="small-btn"><option value="">选择专题…</option></select>
+          <button class="secondary small-btn" onclick="Library.batchAddToTopic()">加入专题</button>
+          <button class="secondary small-btn" onclick="Library.batchPushZotero()">推送 Zotero</button>
+          <button class="secondary small-btn" onclick="Library.runCompare()">AI 对比</button>
+          <button class="secondary small-btn" onclick="Library.runRelatedWork()">草稿段落</button>
+          <button class="secondary small-btn" onclick="Library.batchExportCitation('bibtex')">BibTeX</button>
+          <button class="secondary small-btn" onclick="Library.batchExportCitation('ris')">RIS</button>
           <button class="link-btn" onclick="Library.clearSelection()">取消选择</button>
         </div>
 
@@ -215,6 +226,61 @@
       </div>
     </section>
 
+    <!-- ══ 04 研究专题 ══ -->
+    <section class="view" id="view-topics" hidden>
+      <div class="view-head" style="display:flex; justify-content:space-between; align-items:flex-end;">
+        <div>
+          <h2>研究专题</h2>
+          <p class="lede">围绕课题组织论文集合、研究问题与待验证点。</p>
+        </div>
+        <button onclick="Topics.showCreate()">＋ 新建专题</button>
+      </div>
+      <div class="card" id="topicCreateCard" hidden>
+        <h3>新建专题</h3>
+        <div class="field"><label>名称</label><input id="topicName" placeholder="如：MLIP 跨体系泛化" /></div>
+        <div class="field"><label>研究问题</label><input id="topicQuestion" placeholder="我具体想解决什么" /></div>
+        <div class="field"><label>备注</label><textarea id="topicNotes" rows="2"></textarea></div>
+        <div class="row"><button onclick="Topics.create()">创建</button><button class="secondary" onclick="Topics.hideCreate()">取消</button></div>
+      </div>
+      <div id="topicsList" class="today-list"></div>
+      <div id="topicDetail" hidden></div>
+    </section>
+
+    <!-- ══ 05 趋势 ══ -->
+    <section class="view" id="view-trends" hidden>
+      <div class="view-head">
+        <h2>趋势</h2>
+        <p class="lede">入库量、方向分布与源质量的长期变化。</p>
+      </div>
+      <div class="card"><h3>月度入库 / 相关数</h3><div id="trendMonthly" class="trend-bars"></div></div>
+      <div class="card"><h3>期刊相关率排行</h3><div id="trendJournals" class="trend-bars"></div></div>
+      <div class="row" style="gap:16px;">
+        <div class="card" style="flex:1;"><h3>发现来源</h3><div id="trendVia" class="trend-bars"></div></div>
+        <div class="card" style="flex:1;"><h3>阅读状态</h3><div id="trendRead" class="trend-bars"></div></div>
+      </div>
+    </section>
+
+    <!-- ══ 07 追踪 ══ -->
+    <section class="view" id="view-tracking" hidden>
+      <div class="view-head">
+        <h2>追踪</h2>
+        <p class="lede">关注文献的新引用、关注作者的新文章，会自动进入评分流水线。</p>
+      </div>
+      <div class="card">
+        <h3>关注作者</h3>
+        <div class="row">
+          <input id="authorSearch" placeholder="输入作者姓名检索 OpenAlex" style="flex:1;" />
+          <button class="secondary" onclick="Tracking.searchAuthor()">检索</button>
+        </div>
+        <div id="authorCandidates" class="row" style="margin:8px 0;"></div>
+        <div id="authorList" class="reading-list"></div>
+      </div>
+      <div class="card">
+        <h3>引文追踪中的文献</h3>
+        <div id="seedList" class="reading-list"></div>
+      </div>
+    </section>
+
     <!-- ══ 05 历史日报 ══ -->
     <section class="view" id="view-reports" hidden>
       <div class="view-head">
@@ -223,10 +289,13 @@
       </div>
 
       <div class="card">
-        <h3>日报列表</h3>
+        <div class="row" style="justify-content:space-between;">
+          <h3>报告列表</h3>
+          <button onclick="Reports.genWeekly()">生成本周周报</button>
+        </div>
         <div style="overflow:auto;">
           <table id="reportTable">
-            <thead><tr><th>日期</th><th>发现</th><th>推送</th><th>推送状态</th><th>生成时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>类型</th><th>日期</th><th>发现</th><th>推送</th><th>推送状态</th><th>生成时间</th><th>操作</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -292,6 +361,9 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/today.js"></script>
 <script src="/static/js/reading.js"></script>
+<script src="/static/js/topics.js"></script>
+<script src="/static/js/tracking.js"></script>
+<script src="/static/js/trends.js"></script>
 <script src="/static/js/chat.js"></script>
 <script src="/static/js/article_detail.js"></script>
 <script src="/static/js/library.js"></script>

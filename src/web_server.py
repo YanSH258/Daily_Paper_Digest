@@ -54,6 +54,7 @@ class TaskRunner:
             "run_count": 0,
             "success_count": 0,
             "failure_count": 0,
+            "last_stats": None,
         }
 
     def _make_run_cfg(self, mode: str) -> dict[str, Any]:
@@ -100,7 +101,11 @@ class TaskRunner:
 
         try:
             logger.info("任务启动: task_id=%s trigger=%s mode=%s", task_id, trigger, mode)
-            stats = run_once(cfg, date_str=date_str, task_id=task_id)
+            if mode == "weekly":
+                from main import run_weekly
+                stats = run_weekly(cfg, date_str=date_str, task_id=task_id)
+            else:
+                stats = run_once(cfg, date_str=date_str, task_id=task_id)
             success = True
             logger.info("任务完成: task_id=%s", task_id)
         except Exception as e:  # pragma: no cover - 运行期保护
@@ -111,6 +116,8 @@ class TaskRunner:
             self.state["running"] = False
             self.state["ended_at"] = datetime.now().isoformat(timespec="seconds")
             self.state["run_count"] += 1
+            if stats is not None:
+                self.state["last_stats"] = stats
             if success:
                 self.state["success_count"] += 1
                 self.state["last_success_at"] = self.state["ended_at"]
@@ -274,7 +281,8 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         sql = (
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
             "starred, tags, created_at, topic, relevance_reason, score_status, "
-            "evidence_level, analysis_status, read_status, relevance_feedback "
+            "evidence_level, analysis_status, read_status, relevance_feedback, "
+            "zotero_key, discovered_via, cited_count, sim_prior "
             f"FROM articles WHERE {where_clause} "
             "ORDER BY relevance DESC, created_at DESC "
             "LIMIT ? OFFSET ?"
@@ -420,6 +428,7 @@ def _get_article_detail(ctx: WebContext, article_id: int) -> Optional[dict[str, 
         item["topic"] = classify_article(item)
         item["has_analysis"] = bool(item.get("analysis"))
         item["chat_count"] = ctx.db.get_article_chat_count(article_id)
+        item["watched"] = ctx.db.is_seed_watched(article_id)
         return item
     finally:
         conn.close()
@@ -429,7 +438,7 @@ def _list_reports(ctx: WebContext, limit: int = 30) -> list[dict[str, Any]]:
     conn = ctx.connect_db()
     try:
         rows = conn.execute(
-            "SELECT report_date, file_path, total_found, total_pushed, push_results, created_at "
+            "SELECT report_date, file_path, total_found, total_pushed, push_results, kind, created_at "
             "FROM daily_reports ORDER BY report_date DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -452,9 +461,12 @@ _SETTINGS_FIELDS = [
     "relevance_threshold", "research_topics",
     "fetcher.use_fulltext", "fetcher.use_browser",
     "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
-    "scheduler.run_time", "web.api_token", "web.api_token_clear",
+    "scheduler.run_time", "web.api_token", "web.api_token_clear", "web.protect_read",
     "output.email_enabled", "output.email_recipients",
     "output.feishu_enabled", "output.feishu_webhook",
+    "zotero.enabled", "zotero.user_id", "zotero.api_key", "zotero.collection",
+    "zotero.include_note", "zotero.attach_oa_pdf",
+    "tracking.enabled", "tracking.citation_check_days", "tracking.author_check_days",
 ]
 
 
@@ -469,6 +481,8 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
     email = output.get("email", {}) or {}
     feishu = output.get("feishu", {}) or {}
     web = c.get("web", {}) or {}
+    zotero = c.get("zotero", {}) or {}
+    tracking_cfg = c.get("tracking", {}) or {}
 
     # 已配置的 provider 列表（供前端切换时回填 base_url / model）
     known_providers: dict[str, dict[str, Any]] = {}
@@ -502,6 +516,20 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
         "web": {
             "api_token_set": bool(web.get("api_token")),
             "enable_scheduler": web.get("enable_scheduler", False),
+            "protect_read": bool(web.get("protect_read", False)),
+        },
+        "zotero": {
+            "enabled": bool(zotero.get("enabled")),
+            "user_id": zotero.get("user_id", ""),
+            "api_key_set": bool(zotero.get("api_key")),
+            "collection": zotero.get("collection", ""),
+            "include_note": bool(zotero.get("include_note", True)),
+            "attach_oa_pdf": bool(zotero.get("attach_oa_pdf", True)),
+        },
+        "tracking": {
+            "enabled": bool(tracking_cfg.get("enabled", True)),
+            "citation_check_days": tracking_cfg.get("citation_check_days", 3),
+            "author_check_days": tracking_cfg.get("author_check_days", 3),
         },
         "output": {
             "email_enabled": bool(email.get("enabled")),
@@ -601,6 +629,28 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     if value:
                         ensure(["web"])["api_token"] = ""
                         changed.append("web.api_token")
+                elif key == "web.protect_read":
+                    ensure(["web"])["protect_read"] = bool(value)
+                    changed.append(key)
+                elif key.startswith("zotero."):
+                    sub = key.split(".", 1)[1]
+                    node = ensure(["zotero"])
+                    if sub in ("enabled", "include_note", "attach_oa_pdf"):
+                        node[sub] = bool(value)
+                    elif sub == "api_key":
+                        if value:  # 留空 = 保持不变
+                            node[sub] = str(value)
+                    else:
+                        node[sub] = str(value or "").strip()
+                    changed.append(key)
+                elif key.startswith("tracking."):
+                    sub = key.split(".", 1)[1]
+                    node = ensure(["tracking"])
+                    if sub == "enabled":
+                        node[sub] = bool(value)
+                    else:
+                        node[sub] = max(1, int(value))
+                    changed.append(key)
                 elif key == "output.email_enabled":
                     ensure(["output", "email"])["enabled"] = bool(value)
                     changed.append(key)
@@ -945,6 +995,144 @@ def _test_llm(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], in
     }, 200
 
 
+# ── 研究工作台：Zotero / 追踪 / 专题 / 对比 / 趋势 / 高亮 ─────
+
+def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
+    item = _get_article_detail(ctx, article_id)
+    if item is None:
+        return {"ok": False, "error": "article not found"}, 404
+    if item.get("zotero_key"):
+        return {"ok": True, "key": item["zotero_key"], "already": True}, 200
+    try:
+        from integrations.zotero_client import ZoteroClient
+        client = ZoteroClient(ctx.config)
+        key = client.push_article(item)
+    except Exception as e:  # noqa: BLE001 - 推送失败原因需要回传前端
+        logger.error("Zotero 推送失败: %s", e, exc_info=True)
+        return {"ok": False, "error": f"推送失败: {e}"}, 500
+    ctx.db.update_article_fields(article_id, zotero_key=key)
+    return {"ok": True, "key": key}, 200
+
+
+def _zotero_batch(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()][:100]
+    if not ids:
+        return {"ok": False, "error": "ids 不能为空"}, 400
+    try:
+        from integrations.zotero_client import ZoteroClient
+        client = ZoteroClient(ctx.config)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}, 400
+    pushed, skipped, failed = 0, 0, []
+    for aid in ids:
+        item = _get_article_detail(ctx, aid)
+        if item is None:
+            failed.append({"id": aid, "error": "not found"})
+            continue
+        if item.get("zotero_key"):
+            skipped += 1
+            continue
+        try:
+            key = client.push_article(item)
+            ctx.db.update_article_fields(aid, zotero_key=key)
+            pushed += 1
+        except Exception as e:  # noqa: BLE001
+            failed.append({"id": aid, "error": str(e)[:200]})
+    return {"ok": True, "pushed": pushed, "skipped": skipped, "failed": failed}, 200
+
+
+def _zotero_test(ctx: WebContext) -> tuple[dict[str, Any], int]:
+    try:
+        from integrations.zotero_client import ZoteroClient
+        client = ZoteroClient(ctx.config)
+        return client.test_connection(), 200
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}, 200
+
+
+def _set_watch(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    active = bool(data.get("active"))
+    ctx.db.set_watch_seed(article_id, active)
+    return {"ok": True, "id": article_id, "active": active}, 200
+
+
+def _author_search(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    from integrations import openalex
+    openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+    name = str(data.get("name") or "").strip()
+    if len(name) < 2:
+        return {"ok": False, "error": "name 过短"}, 400
+    return {"ok": True, "items": openalex.search_authors(name, limit=6)}, 200
+
+
+def _topics_list(ctx: WebContext) -> dict[str, Any]:
+    return {"items": ctx.db.list_topics()}
+
+
+def _topic_detail(ctx: WebContext, topic_id: int):
+    topic = ctx.db.get_topic(topic_id)
+    if topic is None:
+        return {"error": "topic not found"}, 404
+    return topic, 200
+
+
+def _run_tool(ctx: WebContext, data: dict[str, Any], kind: str) -> tuple[dict[str, Any], int]:
+    ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()]
+    max_ids = 4 if kind == "compare" else 8
+    ids = ids[:max_ids]
+    if len(ids) < 2:
+        return {"ok": False, "error": "至少选择 2 篇文献"}, 400
+    items = ctx.db.get_articles_by_ids(ids)
+    if len(items) < 2:
+        return {"ok": False, "error": "文献不足"}, 400
+    try:
+        analyzer = LLMAnalyzer(ctx.config)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"LLM 初始化失败: {e}"}, 500
+    try:
+        if kind == "compare":
+            content = analyzer.compare_articles(items)
+        else:
+            content = analyzer.related_work_draft(items, str(data.get("focus") or ""))
+    except Exception as e:  # noqa: BLE001
+        logger.error("研究工具生成失败: %s", e, exc_info=True)
+        return {"ok": False, "error": f"生成失败: {e}"}, 500
+    rid = ctx.db.save_result(kind, ids, content, analyzer.model)
+    return {"ok": True, "id": rid}, 200
+
+
+def _trends_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
+    months = _to_int(query.get("months", ["6"])[0], 6, 2, 24)
+    threshold = float(ctx.config.get("relevance_threshold", 4))
+    conn = ctx.connect_db()
+    try:
+        monthly = conn.execute(
+            "SELECT strftime('%Y-%m', date(created_at, 'localtime')) AS m, COUNT(*), "
+            "SUM(CASE WHEN COALESCE(relevance, 0) >= ? THEN 1 ELSE 0 END) "
+            "FROM articles GROUP BY m ORDER BY m DESC LIMIT ?",
+            (threshold, months)).fetchall()
+        journals = conn.execute(
+            "SELECT journal, COUNT(*) AS total, "
+            "SUM(CASE WHEN COALESCE(relevance, 0) >= ? THEN 1 ELSE 0 END) AS relevant "
+            "FROM articles WHERE journal IS NOT NULL AND journal != '' "
+            "GROUP BY journal ORDER BY relevant DESC LIMIT 12",
+            (threshold,)).fetchall()
+        via = conn.execute(
+            "SELECT COALESCE(discovered_via, 'rss') AS src, COUNT(*) FROM articles "
+            "GROUP BY src ORDER BY 2 DESC").fetchall()
+        statuses = conn.execute(
+            "SELECT COALESCE(read_status, '') AS st, COUNT(*) FROM articles GROUP BY st").fetchall()
+        return {
+            "monthly": [{"month": r[0], "total": r[1], "relevant": r[2] or 0} for r in monthly],
+            "journals": [{"journal": r[0], "total": r[1], "relevant": r[2] or 0} for r in journals],
+            "discovered_via": [{"via": r[0], "count": r[1]} for r in via],
+            "read_status": [{"status": r[0] or "未加入清单", "count": r[1]} for r in statuses],
+        }
+    finally:
+        conn.close()
+
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "DailyPaperWeb/0.1"
 
@@ -1100,8 +1288,18 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
+            # web.protect_read=true 时 GET API 也要求 Token（静态页面除外）
+            if (path.startswith("/api/") and path != "/healthz"
+                    and (self.ctx.config.get("web", {}) or {}).get("protect_read")):
+                if not self._require_token():
+                    return
+
             if path == "/" or path == "/dashboard":
                 self._serve_static_file("index.html")
+                return
+
+            if path.startswith("/results/"):
+                self._serve_static_file("result.html")
                 return
 
             if path.startswith("/article/"):
@@ -1146,6 +1344,51 @@ class Handler(BaseHTTPRequestHandler):
                     "output_dir": str(self.ctx.output_dir),
                     "db_path": str(self.ctx.db_path),
                 })
+                return
+
+            if path == "/api/topics":
+                self._json_response(_topics_list(self.ctx))
+                return
+
+            if path.startswith("/api/topics/") and path.count("/") == 3:
+                tid = path.removeprefix("/api/topics/")
+                if not tid.isdigit():
+                    self._json_response({"error": "invalid topic id"}, code=400)
+                    return
+                topic, code = _topic_detail(self.ctx, int(tid))
+                self._json_response(topic, code=code)
+                return
+
+            if path == "/api/watch/authors":
+                self._json_response({"items": self.ctx.db.list_watch_authors(enabled_only=False)})
+                return
+
+            if path == "/api/stats/trends":
+                self._json_response(_trends_view(self.ctx, query))
+                return
+
+            if path == "/api/results":
+                self._json_response({"items": self.ctx.db.list_results()})
+                return
+
+            if path.startswith("/api/results/"):
+                rid = path.removeprefix("/api/results/")
+                if not rid.isdigit():
+                    self._json_response({"error": "invalid result id"}, code=400)
+                    return
+                item = self.ctx.db.get_result(int(rid))
+                if item is None:
+                    self._json_response({"error": "not found"}, code=404)
+                    return
+                self._json_response(item)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/highlights"):
+                aid_raw = path.removeprefix("/api/articles/").removesuffix("/highlights")
+                if not aid_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                self._json_response({"items": self.ctx.db.get_highlights(int(aid_raw))})
                 return
 
             if path == "/api/today":
@@ -1219,8 +1462,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = _read_json_body(self)
                 mode = str(data.get("mode", "default"))
                 date_str = data.get("date")
-                if mode not in {"default", "abstract", "fulltext"}:
-                    self._json_response({"error": "mode must be one of default/abstract/fulltext"}, code=400)
+                if mode not in {"default", "abstract", "fulltext", "weekly"}:
+                    self._json_response({"error": "mode must be one of default/abstract/fulltext/weekly"}, code=400)
                     return
 
                 ok, msg = self.ctx.runner.start_run(trigger="manual", mode=mode, date_str=date_str)
@@ -1308,12 +1551,152 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(payload, code=code)
                 return
 
+            if path.startswith("/api/articles/") and path.endswith("/zotero"):
+                if not self._require_token():
+                    return
+                aid_raw = path.removeprefix("/api/articles/").removesuffix("/zotero")
+                if not aid_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                payload, code = _zotero_push(self.ctx, int(aid_raw))
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/zotero/batch":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _zotero_batch(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/zotero/test":
+                if not self._require_token():
+                    return
+                payload, code = _zotero_test(self.ctx)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/watch"):
+                if not self._require_token():
+                    return
+                aid_raw = path.removeprefix("/api/articles/").removesuffix("/watch")
+                if not aid_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                payload, code = _set_watch(self.ctx, int(aid_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/watch/authors/search":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _author_search(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/watch/authors":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                name = str(data.get("name") or "").strip()
+                if not name:
+                    self._json_response({"error": "name 不能为空"}, code=400)
+                    return
+                aid = self.ctx.db.add_watch_author(name, data.get("openalex_id"))
+                self._json_response({"ok": aid is not None, "id": aid}, code=200)
+                return
+
+            if path == "/api/topics":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                name = str(data.get("name") or "").strip()
+                if not name:
+                    self._json_response({"error": "name 不能为空"}, code=400)
+                    return
+                tid = self.ctx.db.create_topic(name, str(data.get("research_question") or ""),
+                                               str(data.get("notes") or ""))
+                self._json_response({"ok": tid is not None, "id": tid}, code=200)
+                return
+
+            if path.startswith("/api/topics/") and path.endswith("/papers"):
+                if not self._require_token():
+                    return
+                tid = path.removeprefix("/api/topics/").removesuffix("/papers")
+                if not tid.isdigit():
+                    self._json_response({"error": "invalid topic id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                added = self.ctx.db.add_topic_papers(
+                    int(tid), [int(i) for i in (data.get("ids") or []) if str(i).isdigit()])
+                self._json_response({"ok": True, "added": added}, code=200)
+                return
+
+            if path.startswith("/api/topics/"):
+                if not self._require_token():
+                    return
+                tid = path.removeprefix("/api/topics/")
+                if not tid.isdigit():
+                    self._json_response({"error": "invalid topic id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                name = str(data.get("name") or "").strip()
+                if not name:
+                    self._json_response({"error": "name 不能为空"}, code=400)
+                    return
+                ok = self.ctx.db.update_topic(int(tid), name,
+                                              str(data.get("research_question") or ""),
+                                              str(data.get("notes") or ""))
+                self._json_response({"ok": ok}, code=200)
+                return
+
+            if path == "/api/compare" or path == "/api/related-work":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _run_tool(self.ctx, data, "compare" if path == "/api/compare" else "related")
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/suggest-topics":
+                if not self._require_token():
+                    return
+                try:
+                    analyzer = LLMAnalyzer(self.ctx.config)
+                    recent = [a for a in self.ctx.db.list_articles_created_between(
+                        "2000-01-01", "2999-01-01")
+                        if (a.get("relevance") or 0) >= 7][:20]
+                    result = analyzer.suggest_topics(recent, self.ctx.config.get("research_topics", []))
+                    self._json_response({"ok": True, **result})
+                except Exception as e:  # noqa: BLE001
+                    self._json_response({"ok": False, "error": str(e)}, code=500)
+                return
+
             if path == "/api/articles/batch":
                 if not self._require_token():
                     return
                 data = _read_json_body(self)
                 payload, code = _batch_update(self.ctx, data)
                 self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/highlights"):
+                if not self._require_token():
+                    return
+                aid_raw = path.removeprefix("/api/articles/").removesuffix("/highlights")
+                if not aid_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                data = _read_json_body(self)
+                text = str(data.get("text") or "").strip()
+                if not text:
+                    self._json_response({"error": "text 不能为空"}, code=400)
+                    return
+                hid = self.ctx.db.add_highlight(int(aid_raw), text[:2000], str(data.get("note") or ""))
+                self._json_response({"ok": hid is not None, "id": hid}, code=200)
                 return
 
             if path == "/api/articles/citation":
@@ -1407,6 +1790,48 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.ctx.db.clear_chat_messages(int(article_id_raw))
                 self._json_response({"ok": True, "id": int(article_id_raw)})
+                return
+
+            if path.startswith("/api/topics/") and path.endswith("/papers"):
+                if not self._require_token():
+                    return
+                rest = path.removeprefix("/api/topics/").removesuffix("/papers")
+                parts = rest.split("/")
+                if len(parts) != 2 or not all(x.isdigit() for x in parts):
+                    self._json_response({"error": "invalid path"}, code=400)
+                    return
+                ok = self.ctx.db.remove_topic_paper(int(parts[0]), int(parts[1]))
+                self._json_response({"ok": ok}, code=200)
+                return
+
+            if path.startswith("/api/topics/"):
+                if not self._require_token():
+                    return
+                tid = path.removeprefix("/api/topics/")
+                if not tid.isdigit():
+                    self._json_response({"error": "invalid topic id"}, code=400)
+                    return
+                self._json_response({"ok": self.ctx.db.delete_topic(int(tid))}, code=200)
+                return
+
+            if path.startswith("/api/watch/authors/"):
+                if not self._require_token():
+                    return
+                aid = path.removeprefix("/api/watch/authors/")
+                if not aid.isdigit():
+                    self._json_response({"error": "invalid author id"}, code=400)
+                    return
+                self._json_response({"ok": self.ctx.db.delete_watch_author(int(aid))}, code=200)
+                return
+
+            if path.startswith("/api/highlights/"):
+                if not self._require_token():
+                    return
+                hid = path.removeprefix("/api/highlights/")
+                if not hid.isdigit():
+                    self._json_response({"error": "invalid highlight id"}, code=400)
+                    return
+                self._json_response({"ok": self.ctx.db.delete_highlight(int(hid))}, code=200)
                 return
 
             if path.startswith("/api/journals/"):

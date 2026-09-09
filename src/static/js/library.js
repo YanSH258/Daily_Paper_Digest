@@ -88,7 +88,8 @@ const Library = {
     const summaryEl = document.getElementById("summary");
     summaryEl.textContent = "查询中...";
     try {
-      const data = await API.get("/api/articles?" + params.toString());
+      try { history.replaceState(null, "", "#" + params.toString()); } catch (e) {}
+    const data = await API.get("/api/articles?" + params.toString());
       this.total = data.total ?? data.items.length;
       this.renderCards(data.items);
       this.renderRows(data.items);
@@ -244,6 +245,50 @@ const Library = {
       if (resp.ok) { this.selection.clear(); this.load(); }
       else alert(resp.error || "批量更新失败");
     } catch (e) { alert("批量更新失败: " + e.message); }
+  },
+
+  async batchPushZotero() {
+    if (!this.selection.size) return;
+    if (!confirm(`确定把选中的 ${this.selection.size} 篇推送到 Zotero 吗？`)) return;
+    try {
+      const resp = await API.post("/api/zotero/batch", { ids: [...this.selection] });
+      alert(`推送完成：成功 ${resp.pushed}，已存在 ${resp.skipped}` +
+            (resp.failed.length ? `，失败 ${resp.failed.length}` : ""));
+      this.load();
+    } catch (e) { alert("推送失败: " + e.message); }
+  },
+
+  async batchAddToTopic() {
+    const tid = document.getElementById("batchTopicSelect").value;
+    if (!tid) return alert("请先在批量栏选择专题");
+    if (!this.selection.size) return;
+    try {
+      const resp = await API.post(`/api/topics/${tid}/papers`, { ids: [...this.selection] });
+      if (resp.ok) { alert(`已加入专题（新增 ${resp.added} 篇）`); this.load(); }
+      else alert(resp.error || "加入失败");
+    } catch (e) { alert("加入失败: " + e.message); }
+  },
+
+  async runCompare() {
+    if (this.selection.size < 2 || this.selection.size > 4)
+      return alert("AI 对比需要选择 2-4 篇文献");
+    if (!confirm("将调用 LLM 生成对比（约 30-60 秒），继续？")) return;
+    try {
+      const resp = await API.post("/api/compare", { ids: [...this.selection] });
+      if (resp.ok) window.open("/results/" + resp.id, "_blank");
+      else alert(resp.error || "生成失败");
+    } catch (e) { alert("生成失败: " + e.message); }
+  },
+
+  async runRelatedWork() {
+    if (this.selection.size < 2) return alert("草稿段落需要至少选择 2 篇文献");
+    const focus = prompt("写作侧重（可留空）", "") ;
+    if (focus === null) return;
+    try {
+      const resp = await API.post("/api/related-work", { ids: [...this.selection], focus });
+      if (resp.ok) window.open("/results/" + resp.id, "_blank");
+      else alert(resp.error || "生成失败");
+    } catch (e) { alert("生成失败: " + e.message); }
   },
 
   async batchExportCitation(fmt) {

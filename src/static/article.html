@@ -126,6 +126,8 @@
         <div class="section-h" onclick="Article.toggleBody('fulltextBody', this)">📚 原文节选（全文依据）<span class="muted small">▸</span></div>
         <div class="section-body" id="fulltextBody" hidden>
           <div class="fulltext-box" id="fulltextBox"></div>
+          <div class="ops-row"><button class="secondary" onclick="Article.saveSelection()" hidden id="hlSaveBtn">⭐ 收藏选中文字</button></div>
+          <div id="hlList" style="margin-top:10px;"></div>
         </div>
       </div>
     </div>
@@ -143,7 +145,13 @@
         <div class="ops-row">
           <button class="secondary" onclick="Article.downloadCitation('bibtex')">BibTeX</button>
           <button class="secondary" onclick="Article.downloadCitation('ris')">RIS</button>
+          <button class="secondary" onclick="Article.downloadCitation('gbt')">GB/T</button>
         </div>
+        <div class="ops-row">
+          <button class="primary" id="zoteroBtn" onclick="Article.pushZotero()">推送 Zotero</button>
+          <label class="small"><input type="checkbox" id="watchCitations" onchange="Article.toggleWatch(this.checked)" /> 关注新引用</label>
+        </div>
+        <div class="small muted" id="zoteroNote"></div>
         <div class="small muted" id="feedbackNote" style="margin-top:6px;"></div>
       </div>
 

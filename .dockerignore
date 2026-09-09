@@ -1,0 +1,13 @@
+# 构建上下文排除
+.git
+.venv
+venv
+.deps
+data
+config/config.yaml
+build
+dist
+*.egg-info
+__pycache__
+.pytest_cache
+tests

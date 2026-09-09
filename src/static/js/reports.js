@@ -15,10 +15,11 @@ const Reports = {
       const data = await API.get("/api/reports");
       tbody.innerHTML = "";
       if (!data.items.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="small">暂无日报记录。</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="small">暂无报告记录。</td></tr>';
         return;
       }
       for (const r of data.items) {
+        const isWeekly = r.kind === "weekly";
         const md = this.baseName(r.file_path);
         const html = md.replace(/\.md$/, ".html");
         const tr = document.createElement("tr");
@@ -30,6 +31,7 @@ const Reports = {
           } catch (e) { /* 忽略 */ }
         }
         tr.innerHTML = `
+          <td>${isWeekly ? '<span class="pill">周报</span>' : '<span class="pill">日报</span>'}</td>
           <td class="mono">${API.esc(r.report_date)}</td>
           <td>${API.esc(r.total_found ?? "-")}</td>
           <td>${API.esc(r.total_pushed ?? "-")}</td>
@@ -67,6 +69,15 @@ const Reports = {
     const showingMd = frame.src.endsWith(".md");
     frame.src = showingMd ? this.current.htmlUrl : this.current.mdUrl;
     btn.textContent = showingMd ? "查看 Markdown 源文件" : "返回 HTML 版";
+  },
+
+  async genWeekly() {
+    if (!confirm("将汇总本周文献生成周报（不调用 LLM、不推送），继续？")) return;
+    try {
+      const resp = await API.post("/api/run", { mode: "weekly" });
+      if (resp.ok) alert("周报已开始生成，稍后在列表中刷新查看。");
+      else alert(resp.error || "触发失败");
+    } catch (e) { alert("触发失败: " + e.message); }
   },
 
   async resend(date, btn) {

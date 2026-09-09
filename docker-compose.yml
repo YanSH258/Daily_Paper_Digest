@@ -1,0 +1,18 @@
+services:
+  web:
+    build: .
+    container_name: daily-paper-digest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+    environment:
+      # 敏感凭据建议用环境变量注入（也可写在 config.yaml 中）
+      - ZOTERO_API_KEY=${ZOTERO_API_KEY:-}
+      - ZOTERO_USER_ID=${ZOTERO_USER_ID:-}
+      - WOS_API_KEY=${WOS_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD:-}
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL:-}
+    restart: unless-stopped

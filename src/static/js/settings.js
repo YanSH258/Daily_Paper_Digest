@@ -10,6 +10,8 @@ const Settings = {
     const f = c.fetcher || {};
     const out = c.output || {};
     const sched = c.scheduler || {};
+    const zot = c.zotero || {};
+    const track = c.tracking || {};
     const llm = c.llm || {};
     const known = llm.providers || {};
     const knownNames = Object.keys(known);
@@ -48,10 +50,28 @@ const Settings = {
         ${this.fieldRow("飞书", `<label class="small"><input id="s_feishu" type="checkbox" ${out.feishu_enabled ? "checked" : ""} /> 启用</label>`)}
         ${this.fieldRow("飞书 Webhook", `<input id="s_webhook" value="${API.esc(out.feishu_webhook || "")}" placeholder="启用飞书后填写" />`)}
       </div>
+      <div class="card"><h3>Zotero</h3>
+        ${this.fieldRow("推送开关", `<label class="small"><input id="s_zot_on" type="checkbox" ${zot.enabled ? "checked" : ""} /> 启用推送</label>`)}
+        ${this.fieldRow("User ID", `<input id="s_zot_uid" value="${API.esc(zot.user_id || "")}" placeholder="留空自动解析" />`)}
+        ${this.fieldRow("API Key", `<input id="s_zot_key" type="password" placeholder="${zot.api_key_set ? "已配置，留空保持不变" : "zotero.org/settings/keys 申请"}" />`)}
+        ${this.fieldRow("目标 Collection", `<input id="s_zot_coll" value="${API.esc(zot.collection || "")}" placeholder="collection key（可用测试连接查看）" />`)}
+        ${this.fieldRow("附带笔记", `<label class="small"><input id="s_zot_note" type="checkbox" ${zot.include_note ? "checked" : ""} /> 推送时附阅读笔记与AI速记</label>`)}
+        ${this.fieldRow("OA PDF 附件", `<label class="small"><input id="s_zot_pdf" type="checkbox" ${zot.attach_oa_pdf ? "checked" : ""} /> 尝试挂 OA PDF（PDF 存 Zotero，不存本地）</label>`)}
+        <div class="row" style="margin-top:12px;">
+          <button class="secondary" onclick="Settings.testZotero()">测试连接</button>
+          <span id="zotTestMsg" class="small"></span>
+        </div>
+      </div>
+      <div class="card"><h3>追踪</h3>
+        ${this.fieldRow("引文/作者追踪", `<label class="small"><input id="s_track_on" type="checkbox" ${track.enabled ? "checked" : ""} /> 启用（随每日任务自动执行）</label>`)}
+        ${this.fieldRow("引用检查间隔（天）", `<input id="s_track_cit" type="number" min="1" value="${API.esc(track.citation_check_days ?? 3)}" />`)}
+        ${this.fieldRow("作者检查间隔（天）", `<input id="s_track_au" type="number" min="1" value="${API.esc(track.author_check_days ?? 3)}" />`)}
+      </div>
       <div class="card"><h3>调度</h3>
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
         ${this.fieldRow("网页 API Token", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "未配置，可选"}" />
           ${c.web.api_token_set ? '<button type="button" class="secondary small-btn" onclick="Settings.clearToken()">清除 Token</button>' : ""}`)}
+        ${this.fieldRow("保护读取", `<label class="small"><input id="s_protect" type="checkbox" ${c.web.protect_read ? "checked" : ""} /> 开启后 GET 数据接口也需 Token（公网访问建议开启）</label>`)}
         <p class="small" style="margin:8px 0 0;">配置文件：<span class="mono">${API.esc(c.config_path)}</span>，保存即写回（保留注释）。</p>
       </div>
     `;
@@ -100,6 +120,23 @@ const Settings = {
       }
     } catch (e) {
       msgEl.innerHTML = `<span class="err">✗ 测试失败: ${API.esc(e.message)}</span>`;
+    }
+  },
+
+  async testZotero() {
+    const msgEl = document.getElementById("zotTestMsg");
+    msgEl.textContent = "测试中...";
+    try {
+      const data = await API.post("/api/zotero/test", {});
+      if (data.ok) {
+        const names = (data.collections || []).slice(0, 8).map((c) => `${c.name}(${c.key})`).join("，");
+        msgEl.innerHTML = `<span class="ok">✓ ${API.esc(data.username)}（${API.esc(String(data.user_id))}）</span>` +
+          (names ? `<div class="small muted">Collections：${API.esc(names)}</div>` : "");
+      } else {
+        msgEl.innerHTML = `<span class="err">✗ ${API.esc(data.error || "失败")}</span>`;
+      }
+    } catch (e) {
+      msgEl.innerHTML = `<span class="err">✗ ${API.esc(e.message)}</span>`;
     }
   },
 
@@ -155,6 +192,17 @@ const Settings = {
     // Token 留空 = 不修改；只有用户输入了新值才提交，避免保存其他设置时误清 Token
     const newToken = val("s_token").trim();
     if (newToken) payload["web.api_token"] = newToken;
+    payload["web.protect_read"] = chk("s_protect");
+    payload["zotero.enabled"] = chk("s_zot_on");
+    payload["zotero.user_id"] = val("s_zot_uid").trim();
+    const zotKey = val("s_zot_key").trim();
+    if (zotKey) payload["zotero.api_key"] = zotKey;
+    payload["zotero.collection"] = val("s_zot_coll").trim();
+    payload["zotero.include_note"] = chk("s_zot_note");
+    payload["zotero.attach_oa_pdf"] = chk("s_zot_pdf");
+    payload["tracking.enabled"] = chk("s_track_on");
+    payload["tracking.citation_check_days"] = parseInt(val("s_track_cit")) || 3;
+    payload["tracking.author_check_days"] = parseInt(val("s_track_au")) || 3;
     try {
       const data = await API.post("/api/settings", payload);
       if (data.ok) {

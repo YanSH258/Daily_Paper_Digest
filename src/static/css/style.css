@@ -348,3 +348,36 @@ details[open] summary::before { content: "− "; }
 /* ══════ 导航分组 ══════ */
 .nav-divider { height: 1px; background: var(--border); margin: 10px 16px; }
 .nav-secondary .idx { color: var(--muted-fg, #94a0b3); }
+
+/* ══════ 趋势条形图 ══════ */
+.trend-bars { display: flex; flex-direction: column; gap: 6px; }
+.trend-row { display: flex; align-items: center; gap: 10px; }
+.trend-label { min-width: 130px; font-size: 0.82em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trend-track { flex: 1; height: 14px; background: #eef1f6; border-radius: 7px; overflow: hidden; position: relative; }
+.trend-fill { height: 100%; background: #b9cbe8; }
+.trend-fill.accent { background: var(--accent); opacity: .85; }
+
+/* ══════ 键盘焦点 / 轻提示 ══════ */
+.kb-focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toast-bar { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+             background: var(--ink, #2c3e50); color: #fff; padding: 8px 18px; border-radius: 20px;
+             font-size: 0.85em; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 999; }
+.toast-bar.show { opacity: .95; }
+
+/* ══════ 深色模式 ══════ */
+body.dark { background: #14181f; }
+body.dark .shell { background: #14181f; }
+body.dark .sidebar { background: #1a2029 !important; border-color: #2a3341; }
+body.dark .nav-item { color: #c7d0dc; }
+body.dark .nav-item.active { background: #2f6fed; color: #fff; }
+body.dark main, body.dark .view, body.dark .card, body.dark .batch-bar { background: #1e252f; color: #d7dde6; }
+body.dark .card { border-color: #2c3542; }
+body.dark h1, body.dark h2, body.dark h3, body.dark h4, body.dark .feed-card-title,
+body.dark .today-card-title a, body.dark .reading-row-title, body.dark .title-link,
+body.dark .lede, body.dark .journal-tag, body.dark .topic-tag, body.dark .date-tag { color: #d7dde6; }
+body.dark input, body.dark select, body.dark textarea { background: #232c38; color: #d7dde6; border-color: #35404f; }
+body.dark button { background: #232c38; color: #d7dde6; border-color: #35404f; }
+body.dark .trend-track { background: #2a3441; }
+body.dark .today-reason { background: #233046; }
+body.dark .batch-bar { background: #233046; border-color: #2f4468; }
+body.dark .empty-state, body.dark .small.muted, body.dark .muted { color: #8b96a5 !important; }

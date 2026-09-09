@@ -66,10 +66,26 @@ def format_ris(a: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_gbt7714(a: dict[str, Any]) -> str:
+    """GB/T 7714-2015 顺序编码制：作者. 题名[J]. 刊名, 年, 卷(期): 页码."""
+    authors = _authors_list(a)
+    if len(authors) > 3:
+        author_str = ", ".join(authors[:3]) + ", 等"
+    else:
+        author_str = ", ".join(authors) or "佚名"
+    year = _year(a)
+    parts = [f"{author_str}. {a.get('title') or '无题'}[J]. {a.get('journal') or ''}, {year}"]
+    if a.get("doi"):
+        parts.append(f"DOI: {a['doi']}")
+    return ". ".join(parts) + "."
+
+
 def format_article_citation(a: dict[str, Any], fmt: str = "bibtex") -> str:
     fmt = (fmt or "bibtex").lower()
     if fmt == "ris":
         return format_ris(a)
+    if fmt == "gbt" or fmt == "gbt7714":
+        return format_gbt7714(a)
     if fmt == "bibtex":
         return format_bibtex(a)
     raise ValueError(f"不支持的引用格式: {fmt}")
