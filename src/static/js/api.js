@@ -28,13 +28,18 @@ const API = {
         const j = await res.json();
         if (j && (j.error || j.message)) msg = j.error || j.message;
       } catch (e) { /* 忽略非 JSON 错误体 */ }
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.status = res.status;
+      if (res.status === 401) {
+        err.needToken = true;
+      }
+      throw err;
     }
     return res.json();
   },
 
   get(url) {
-    return this.json(url);
+    return this.json(url, { headers: this.headers(false) });
   },
 
   post(url, body) {

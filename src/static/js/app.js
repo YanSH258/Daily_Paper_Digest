@@ -3,13 +3,6 @@
 
 const App = {
   _cursor: 0,
-  toggleDark() {
-    const dark = !document.body.classList.contains("dark");
-    document.body.classList.toggle("dark", dark);
-    localStorage.setItem("dsh_theme", dark ? "dark" : "light");
-    const btn = document.getElementById("darkToggle");
-    if (btn) btn.textContent = dark ? "☀️" : "🌙";
-  },
 };
 
 const VIEW_LOADERS = {
@@ -36,18 +29,6 @@ function showView(name) {
   if (loader) loader();
 }
 
-function initTokenBox() {
-  const input = document.getElementById("tokenInput");
-  const save = document.getElementById("tokenSave");
-  const msg = document.getElementById("tokenMsg");
-  input.value = API.token();
-  save.addEventListener("click", () => {
-    API.setToken(input.value.trim());
-    msg.textContent = "已保存到浏览器";
-    setTimeout(() => { msg.textContent = ""; }, 2000);
-  });
-}
-
 function init() {
   document.querySelectorAll(".nav-item").forEach((n) => {
     n.addEventListener("click", () => showView(n.dataset.view));
@@ -60,8 +41,6 @@ function init() {
   Library.init();
   Reading.init();
   Today.init();
-  initTokenBox();
-  initDarkMode();
   initShortcuts();
 
   // 从 URL hash 恢复文献库筛选（分享/返回不丢状态）
@@ -94,13 +73,6 @@ function init() {
     // 任务状态轮询：仅更新 DOM，不打扰其他视图
     if (typeof Tasks !== "undefined") Tasks.loadStatus();
   }, 5000);
-}
-
-function initDarkMode() {
-  const theme = localStorage.getItem("dsh_theme") || "light";
-  document.body.classList.toggle("dark", theme === "dark");
-  const btn = document.getElementById("darkToggle");
-  if (btn) btn.textContent = theme === "dark" ? "☀️" : "🌙";
 }
 
 function initShortcuts() {

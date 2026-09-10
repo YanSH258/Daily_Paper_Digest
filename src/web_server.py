@@ -1515,6 +1515,10 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         req_token = self.headers.get("X-API-Token", "")
+        # iframe/直链无法带 Header，允许 ?token= 查询参数
+        if not req_token:
+            q = parse_qs(urlparse(self.path).query)
+            req_token = (q.get("token") or [""])[0]
         if req_token == token:
             return True
         self._json_response({"error": "unauthorized"}, code=401)
@@ -1526,11 +1530,20 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
-            # web.protect_read=true 时 GET API 也要求 Token（静态页面除外）
-            if (path.startswith("/api/") and path != "/healthz"
+            # web.protect_read=true 时 GET API 也要求 Token（静态页与连接入口除外）
+            if (path.startswith("/api/") and path not in {"/healthz", "/api/auth/token"}
                     and (self.ctx.config.get("web", {}) or {}).get("protect_read")):
                 if not self._require_token():
                     return
+
+            if path == "/api/auth/token":
+                # 公开：供新浏览器连接已有 Token（不校验 X-API-Token，只验证 body）
+                self._json_response({
+                    "ok": True,
+                    "required": bool(self.ctx.api_token),
+                    "protect_read": bool((self.ctx.config.get("web") or {}).get("protect_read")),
+                })
+                return
 
             if path == "/" or path == "/dashboard":
                 self._serve_static_file("index.html")
@@ -1561,10 +1574,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/paper-index":
+                if (self.ctx.config.get("web") or {}).get("protect_read") and not self._require_token():
+                    return
                 self._serve_file(self.ctx.output_dir / "paper_index.html", "text/html; charset=utf-8")
                 return
 
             if path.startswith("/reports/"):
+                if (self.ctx.config.get("web") or {}).get("protect_read") and not self._require_token():
+                    return
                 filename = path.removeprefix("/reports/")
                 safe_name = Path(filename).name
                 if safe_name != filename:
@@ -1698,6 +1715,20 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
+            # 公开：新浏览器连接已有 Token（校验 body 中的 token 是否匹配服务端）
+            if path == "/api/auth/token":
+                data = _read_json_body(self) or {}
+                candidate = str(data.get("token") or "").strip()
+                server_token = self.ctx.api_token
+                if not server_token:
+                    self._json_response({"ok": True, "required": False, "message": "服务端未启用 Token"})
+                    return
+                if candidate and candidate == server_token:
+                    self._json_response({"ok": True, "required": True, "matched": True})
+                    return
+                self._json_response({"ok": False, "required": True, "error": "Token 不匹配"}, code=401)
+                return
+
             if path == "/api/run":
                 if not self._require_token():
                     return

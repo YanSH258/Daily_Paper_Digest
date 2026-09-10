@@ -26,6 +26,7 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         return [], {}
 
     articles: list[dict] = []
+    # citing_seed: doi -> [seed_id, ...]  多对多：一篇引用可关联多个关注种子
     meta: dict[str, Any] = {"citing_seed": {}, "author": {}}
     seen_dois: set[str] = set()
 
@@ -39,22 +40,25 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         since = seed.get("last_checked_at") or _default_since(seed.get("created_at"), check_days)
         try:
             citing = openalex.get_citing_works(doi, from_date=since)
-        except Exception as e:  # noqa: BLE001 - 单篇失败不阻断
+        except Exception as e:  # noqa: BLE001 - 单篇失败不阻断，且不推进游标
             logger.warning("引文追踪失败 (%s): %s", doi, e)
             continue
-        finally:
-            db.mark_seed_checked(seed["id"])
+        # 仅采集成功后才推进游标，避免失败窗口被跳过
+        db.mark_seed_checked(seed["id"])
         for work in citing:
-            w_doi = (work.get("doi") or "").strip()
-            if w_doi and w_doi.lower() in seen_dois:
+            w_doi = (work.get("doi") or "").strip().lower()
+            if w_doi:
+                seeds_for_doi = meta["citing_seed"].setdefault(w_doi, [])
+                if seed["id"] not in seeds_for_doi:
+                    seeds_for_doi.append(seed["id"])
+            if w_doi and w_doi in seen_dois:
+                # 文章已收集，但仍记录与当前 seed 的边
                 continue
             if w_doi:
-                seen_dois.add(w_doi.lower())
+                seen_dois.add(w_doi)
             work["discovered_via"] = "citation_watch"
             work["publisher"] = "DEFAULT"
             articles.append(work)
-            if w_doi:
-                meta["citing_seed"][w_doi.lower()] = seed["id"]
         if citing:
             logger.info("引文追踪: %s 新增 %d 篇引用", seed["title"][:50], len(citing))
 
@@ -70,8 +74,7 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         except Exception as e:  # noqa: BLE001
             logger.warning("作者追踪失败 (%s): %s", author["name"], e)
             continue
-        finally:
-            db.mark_author_run(author["id"])
+        db.mark_author_run(author["id"])
         count = 0
         for work in works:
             w_doi = (work.get("doi") or "").strip()
@@ -95,6 +98,7 @@ def record_tracking_edges(db, inserted: list[tuple[Optional[int], dict]],
     """文章入库后补 citation_edges / discovered_via 元数据。
 
     inserted: [(article_id, article_dict), ...]
+    citing_seed 支持 doi -> seed_id 或 doi -> [seed_id, ...]
     """
     edges = 0
     citing_seed: dict = meta.get("citing_seed", {})
@@ -103,10 +107,15 @@ def record_tracking_edges(db, inserted: list[tuple[Optional[int], dict]],
         if aid is None:
             continue
         doi = (article.get("doi") or "").strip().lower()
-        seed_id = citing_seed.get(doi)
-        if seed_id:
-            db.add_citation_edge(seed_id, aid)
-            edges += 1
+        seed_ref = citing_seed.get(doi)
+        seed_ids: list = []
+        if isinstance(seed_ref, (list, tuple, set)):
+            seed_ids = list(seed_ref)
+        elif seed_ref is not None:
+            seed_ids = [seed_ref]
+        for seed_id in seed_ids:
+            if db.add_citation_edge(int(seed_id), aid):
+                edges += 1
         author_name = author_meta.get(doi)
         if author_name and not article.get("relevance_reason"):
             article["relevance_reason"] = f"来自关注作者 {author_name} 的新文章"

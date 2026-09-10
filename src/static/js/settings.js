@@ -67,12 +67,18 @@ const Settings = {
         ${this.fieldRow("引用检查间隔（天）", `<input id="s_track_cit" type="number" min="1" value="${API.esc(track.citation_check_days ?? 3)}" />`)}
         ${this.fieldRow("作者检查间隔（天）", `<input id="s_track_au" type="number" min="1" value="${API.esc(track.author_check_days ?? 3)}" />`)}
       </div>
+      <div class="card"><h3>连接（已有 Token）</h3>
+        ${this.fieldRow("输入服务端 Token", `<input id="s_connect_token" type="password" placeholder="服务端已配置 Token 时，在此连接本浏览器" />
+          <button type="button" class="secondary" onclick="Settings.connectToken()">连接</button>
+          <span id="connectTokenMsg" class="small"></span>`)}
+        <p class="small" style="margin:8px 0 0;">新浏览器 / 清空缓存后：粘贴服务端 Token 点「连接」即可继续操作，无需改服务端配置。</p>
+      </div>
       <div class="card"><h3>调度</h3>
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
-        ${this.fieldRow("网页 API Token", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "未配置，可选"}" />
+        ${this.fieldRow("启用 API Token（可选）", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "本机自用可留空；需要时填写并保存"}" />
           ${c.web.api_token_set ? '<button type="button" class="secondary small-btn" onclick="Settings.clearToken()">清除 Token</button>' : ""}`)}
-        ${this.fieldRow("保护读取", `<label class="small"><input id="s_protect" type="checkbox" ${c.web.protect_read ? "checked" : ""} /> 开启后 GET 数据接口也需 Token（公网访问建议开启）</label>`)}
-        <p class="small" style="margin:8px 0 0;">配置文件：<span class="mono">${API.esc(c.config_path)}</span>，保存即写回（保留注释）。</p>
+        ${this.fieldRow("保护读取", `<label class="small"><input id="s_protect" type="checkbox" ${c.web.protect_read ? "checked" : ""} /> 开启后 GET 接口也需 Token（默认关闭，仅本机使用无需打开）</label>`)}
+        <p class="small" style="margin:8px 0 0;">默认不启用 Token，写操作可直接用。若把服务暴露到局域网/公网，建议填写 Token 并保存，浏览器会自动记住。配置文件：<span class="mono">${API.esc(c.config_path)}</span></p>
       </div>
     `;
   },
@@ -164,12 +170,38 @@ const Settings = {
       const data = await API.post("/api/settings", { "web.api_token_clear": true });
       if (data.ok) {
         msgEl.innerHTML = '<span class="ok">已清除 API Token（立即生效）</span>';
+        API.setToken("");
         await this.load();
       } else {
         msgEl.innerHTML = `<span class="err">${API.esc(data.error || "清除失败")}</span>`;
       }
     } catch (e) {
       msgEl.innerHTML = `<span class="err">清除失败: ${API.esc(e.message)}</span>`;
+    }
+  },
+
+  /** 公开接口：把已有 Token 写入本浏览器（服务端已配 Token、本机无 Token 时用） */
+  async connectToken() {
+    const msgEl = document.getElementById("connectTokenMsg");
+    const token = (document.getElementById("s_connect_token")?.value || "").trim();
+    if (!token) {
+      msgEl.innerHTML = '<span class="err">请填写 Token</span>';
+      return;
+    }
+    msgEl.textContent = "验证中...";
+    try {
+      const res = await fetch("/api/auth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "验证失败");
+      API.setToken(token);
+      msgEl.innerHTML = '<span class="ok">✓ 已连接，本浏览器将自动携带该 Token</span>';
+      if (typeof this.load === "function") await this.load();
+    } catch (e) {
+      msgEl.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
     }
   },
 
@@ -206,7 +238,7 @@ const Settings = {
       "output.feishu_webhook": val("s_webhook").trim(),
       "scheduler.run_time": val("s_runtime").trim(),
     };
-    // Token 留空 = 不修改；只有用户输入了新值才提交，避免保存其他设置时误清 Token
+    // Token 留空 = 不修改；输入新值则提交，并同步写入浏览器，之后写操作自动带上
     const newToken = val("s_token").trim();
     if (newToken) payload["web.api_token"] = newToken;
     payload["web.protect_read"] = chk("s_protect");
@@ -225,6 +257,7 @@ const Settings = {
       if (data.ok) {
         let msg = `已保存：${(data.changed || []).join(", ")}`;
         if (data.warning) msg += `（注意：${data.warning}）`;
+        if (newToken) API.setToken(newToken);
         msgEl.innerHTML = `<span class="ok">${API.esc(msg)}</span>`;
         await this.load();
       } else {

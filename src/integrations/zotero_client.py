@@ -136,9 +136,9 @@ class ZoteroClient:
         for attempt in range(2):
             try:
                 items = self.zot.items(q=doi, qmode="everything", limit=10)
-            except Exception as e:  # noqa: BLE001 - 查重失败不阻断推送
-                logger.warning("Zotero DOI 查重失败（继续推送）: %s", e)
-                return None
+            except Exception as e:  # noqa: BLE001
+                # 查重失败时继续创建可能导致重复；上层应感知失败
+                raise ZoteroError(f"Zotero DOI 查重失败，已中止本次推送: {e}") from e
             for item in items:
                 data = item.get("data", {})
                 if str(data.get("doi", "")).strip().lower() == doi:
@@ -151,7 +151,7 @@ class ZoteroClient:
     # ── 推送 ────────────────────────────────────────────────────
     def push_article(self, article: dict, collection: Optional[str] = None) -> str:
         """推送单篇文章；已存在（按 DOI）则直接返回已有 key。"""
-        doi = (article.get("doi") or "").strip()
+        doi = (article.get("doi") or "").strip().lower()
         existing = self.find_item_by_doi(doi)
         if existing:
             return existing

@@ -11,8 +11,7 @@ llm:
   deepseek:
     api_key: "填入你的_DEEPSEEK_API_KEY"
     base_url: "https://api.deepseek.com"
-    # V4 模型名：deepseek-v4-flash（日常性价比）/ deepseek-v4-pro（更强）
-    model: "deepseek-v4-flash"
+    model: "deepseek-v4.1-flash"
   qwen:
     api_key: "填入你的_QWEN_API_KEY"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"

@@ -37,6 +37,7 @@ data/db/*
 # Build / dist
 *.egg-info/
 dist/
+build/
 config/config.yaml
 config/*.bak*
 

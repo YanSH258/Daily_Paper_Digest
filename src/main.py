@@ -21,7 +21,7 @@ import hashlib
 import logging
 import argparse
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -633,20 +633,43 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             stats["report_skipped_reason"] = reason
             logger.info(f"  {reason}")
         else:
+            # 同日多批运行：合并库中当日已评分相关文章，避免覆盖丢失上午批次
+            day_relevant: dict[Any, dict] = {}
+            try:
+                next_day = (datetime.strptime(date_str, "%Y-%m-%d").date()
+                            + timedelta(days=1)).isoformat()
+                for row in db.list_articles_created_between(date_str, next_day):
+                    if (row.get("relevance") or 0) >= threshold:
+                        day_relevant[row.get("id")] = row
+            except Exception as e:  # noqa: BLE001
+                logger.warning("合并当日报告文章失败（继续用本批）: %s", e)
+            for a in relevant_articles:
+                if a.get("id") is not None:
+                    day_relevant[a["id"]] = a
+            report_articles = sorted(
+                day_relevant.values(),
+                key=lambda x: -(x.get("relevance") or 0),
+            )
+            day_new_count = max(len(new_articles), len(day_relevant))
             md_path, push_results = notifier.notify(
-                relevant_articles,
+                report_articles,
                 all_articles=new_articles,
                 date_str=date_str,
             )
             db.save_report(
                 report_date=date_str,
                 file_path=md_path,
-                total_found=len(new_articles),
-                total_pushed=len(relevant_articles),
+                total_found=day_new_count,
+                total_pushed=len(report_articles),
                 push_results=push_results,
             )
             stats["report_path"] = md_path
             stats["push_results"] = push_results
+            if len(report_articles) > len(relevant_articles):
+                logger.info(
+                    "  日报已合并当日更早批次: 本批相关 %d → 当日合计 %d",
+                    len(relevant_articles), len(report_articles),
+                )
 
         logger.info(
             f"========== 完成！抓取: {stats['fetched']} → 新增: {stats['new_articles']} "
@@ -655,8 +678,12 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         stats["tokens"] = dict(analyzer.usage)
 
         if own_task:
-            has_failure = (stats["db_errors"] or stats["scored_failed"]
-                           or stats["analyzed_failed"])
+            push_ok = all(bool(v) for v in (stats.get("push_results") or {}).values()) \
+                if stats.get("push_results") else True
+            has_failure = bool(
+                stats["db_errors"] or stats["scored_failed"]
+                or stats["analyzed_failed"] or not push_ok
+            )
             db.task_finish(task_id, status="partial" if has_failure else "success", stats=stats)
         return stats
     except Exception as e:

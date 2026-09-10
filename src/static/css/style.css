@@ -50,11 +50,15 @@ body {
 .nav-item:hover { background: var(--surface-2); color: var(--text); }
 .nav-item.active { background: var(--ink); color: #fff; }
 .nav-item.active .idx { color: rgba(255,255,255,0.5); }
-.sidebar-foot { margin-top: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 6px; }
+.sidebar-foot { margin-top: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 8px; }
 .sidebar-foot a { font-size: 12.5px; color: var(--text-2); text-decoration: none; border: none; }
 .sidebar-foot a:hover { color: var(--text); }
-.token-box { display: flex; gap: 6px; }
-.token-box input { flex: 1; min-width: 0; font-size: 12px; padding: 6px 8px; }
+
+.foot-brand {
+  letter-spacing: 0.04em;
+  text-align: center;
+  opacity: 0.85;
+}
 .small-btn { padding: 6px 10px; font-size: 12px; }
 
 /* ── 主内容 ── */
