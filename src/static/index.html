@@ -110,12 +110,60 @@
             <option value="reading">在读</option>
             <option value="read">已读</option>
           </select>
-          <input id="minScore" type="number" min="0" max="10" step="0.1" value="0" style="width:88px;" title="最低评分" />
+          <select id="scorePreset" title="按相关性筛选" onchange="Library.onScorePreset(this.value)">
+            <option value="0">全部相关性</option>
+            <option value="3">≥ 3 可浏览</option>
+            <option value="5">≥ 5 值得关注</option>
+            <option value="7">≥ 7 优先阅读</option>
+            <option value="8">≥ 8 高度相关</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <input id="minScore" type="number" min="0" max="10" step="0.1" value="0" style="width:88px;" title="最低评分" hidden />
           <label class="small"><input id="analyzedOnly" type="checkbox" /> 仅看有解读</label>
           <button onclick="Library.search()">查询</button>
+          <button class="secondary" id="cleanupLowBtn" onclick="Library.cleanupLow()" title="删除低分且无收藏/笔记/标签/阅读状态的文献">清理低分</button>
+          <button class="secondary" id="manualAddToggle" onclick="Library.toggleManualAdd()" title="通过 DOI 或标题手动入库">＋ 手动添加</button>
           <div class="view-mode-toggle">
             <button type="button" class="view-mode-btn active" id="viewModeCard" onclick="Library.setViewMode('card')" title="卡片视图">📰 卡片</button>
             <button type="button" class="view-mode-btn" id="viewModeTable" onclick="Library.setViewMode('table')" title="表格视图">📋 表格</button>
+          </div>
+        </div>
+
+        <div id="manualAddPanel" class="card" style="margin-bottom:16px; display:none;">
+          <h3 style="margin-top:0;">手动添加文献</h3>
+          <p class="small muted" style="margin-top:0;">填 DOI 可自动从 OpenAlex 补全标题/摘要/期刊；也可全部手填。入库默认收藏、评分 8，避免被低分清理删掉。</p>
+          <div class="row" style="flex-wrap:wrap; gap:10px;">
+            <input id="maDoi" placeholder="DOI（推荐，如 10.1038/s41586-024-00000-0）" style="min-width:280px; flex:1;" />
+            <button class="secondary" onclick="Library.fetchByDoi()">从 DOI 补全</button>
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; margin-top:10px;">
+            <input id="maTitle" placeholder="标题 *" style="min-width:280px; flex:2;" />
+            <input id="maJournal" placeholder="期刊" style="min-width:160px; flex:1;" />
+            <input id="maDate" placeholder="发表日期 YYYY-MM-DD" style="width:150px;" />
+          </div>
+          <div class="row" style="flex-wrap:wrap; gap:10px; margin-top:10px;">
+            <input id="maAuthors" placeholder="作者（逗号分隔）" style="min-width:220px; flex:1;" />
+            <input id="maUrl" placeholder="原文链接" style="min-width:200px; flex:1;" />
+            <input id="maTags" placeholder="标签（逗号分隔）" style="width:160px;" />
+            <select id="maTopic" style="max-width:180px;">
+              <option value="">方向（可选）</option>
+              <option>机器学习势函数 / MLIP</option>
+              <option>分子动力学 / MD</option>
+              <option>金属有机框架 / MOF</option>
+              <option>DFT / 第一性原理</option>
+              <option>催化 / 反应机理</option>
+              <option>材料性质预测</option>
+              <option>大模型 / AI for Science</option>
+              <option>量子化学 / 电子结构</option>
+              <option>纳米材料 / 表面</option>
+              <option>其他</option>
+            </select>
+          </div>
+          <textarea id="maAbstract" rows="3" placeholder="摘要（可选，DOI 补全后自动填）" style="width:100%; margin-top:10px;"></textarea>
+          <div class="row" style="margin-top:12px; gap:10px; align-items:center;">
+            <button onclick="Library.submitManualAdd()">加入文献库</button>
+            <button class="secondary" onclick="Library.toggleManualAdd()">收起</button>
+            <span id="manualAddMsg" class="small"></span>
           </div>
         </div>
         <div id="summary" class="small" style="margin-bottom:12px;"></div>

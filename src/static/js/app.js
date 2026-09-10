@@ -73,7 +73,16 @@ function init() {
       document.getElementById("journal").value = params.get("journal") || "";
       document.getElementById("topic").value = params.get("topic") || "";
       document.getElementById("readStatusFilter").value = params.get("read_status") || "";
-      document.getElementById("minScore").value = params.get("min_score") || "0";
+      const score = params.get("min_score") || "0";
+      const preset = document.getElementById("scorePreset");
+      const custom = document.getElementById("minScore");
+      if (["0", "3", "5", "7", "8"].includes(score)) {
+        if (preset) preset.value = score;
+        if (custom) { custom.value = score; custom.hidden = true; }
+      } else {
+        if (preset) preset.value = "custom";
+        if (custom) { custom.value = score || "0"; custom.hidden = false; }
+      }
     }
   }
 

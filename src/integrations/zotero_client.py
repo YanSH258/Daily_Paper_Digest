@@ -85,6 +85,26 @@ class ZoteroClient:
             logger.info("Zotero user_id 自动解析: %s (%s)", uid, username)
         from pyzotero.zotero import Zotero
         self.zot = Zotero(self.user_id, "user", self.api_key)
+        self._collection_key = self._resolve_collection_key(self.collection)
+
+    def _resolve_collection_key(self, coll: str) -> str:
+        """collection 可填 key 或名称；名称自动解析为 key。"""
+        if not coll:
+            return ""
+        # Zotero collection key 形如 8 位大写字母数字
+        if re.fullmatch(r"[A-Z0-9]{8}", coll):
+            return coll
+        try:
+            for c in self.zot.collections():
+                data = c.get("data") or {}
+                if data.get("name") == coll:
+                    logger.info("Zotero collection 名称解析: %s -> %s", coll, data.get("key"))
+                    return str(data.get("key") or "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("解析 collection 名称失败 (%s): %s", coll, e)
+        raise ZoteroError(
+            f"Zotero collection 无效: {coll!r}（请填 8 位 collection key，或精确的 collection 名称）"
+        )
 
     # ── 连接测试 ────────────────────────────────────────────────
     def test_connection(self) -> dict[str, Any]:
@@ -152,7 +172,9 @@ class ZoteroClient:
             # Zotero 的 date 字段可含完整日期；年份单独解析
         template["creators"] = _parse_creators(article)
         template["tags"] = [{"tag": t} for t in self._article_tags(article)]
-        coll = collection or self.collection
+        coll = collection or self._collection_key
+        if coll and not re.fullmatch(r"[A-Z0-9]{8}", str(coll)):
+            coll = self._resolve_collection_key(str(coll))
         if coll:
             template["collections"] = [coll]
 

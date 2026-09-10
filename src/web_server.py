@@ -242,31 +242,31 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
     params: list[Any] = []
 
     if q:
-        where.append("(title LIKE ? OR abstract LIKE ? OR authors LIKE ? OR journal LIKE ?)")
+        where.append("(a.title LIKE ? OR a.abstract LIKE ? OR a.authors LIKE ? OR a.journal LIKE ?)")
         like = f"%{q}%"
         params.extend([like, like, like, like])
     if journal:
-        where.append("journal = ?")
+        where.append("a.journal = ?")
         params.append(journal)
     if starred_only:
-        where.append("COALESCE(starred, 0) = 1")
+        where.append("COALESCE(a.starred, 0) = 1")
     if tag:
         # tags 为逗号分隔存储，用首尾加逗号的方式做整词匹配
-        where.append("(',' || COALESCE(tags, '') || ',') LIKE ?")
+        where.append("(',' || COALESCE(a.tags, '') || ',') LIKE ?")
         params.append(f"%,{tag},%")
     if read_status == "none":
-        where.append("COALESCE(read_status, '') = ''")
+        where.append("COALESCE(a.read_status, '') = ''")
     elif read_status:
-        where.append("read_status = ?")
+        where.append("a.read_status = ?")
         params.append(read_status)
 
-    where.append("COALESCE(relevance, 0) >= ?")
+    where.append("COALESCE(a.relevance, 0) >= ?")
     params.append(min_score)
 
     if analyzed_only:
-        where.append("analysis IS NOT NULL AND analysis != ''")
+        where.append("a.analysis IS NOT NULL AND a.analysis != ''")
     if topic:
-        where.append("topic = ?")
+        where.append("a.topic = ?")
         params.append(topic)
 
     where_clause = " AND ".join(where)
@@ -274,7 +274,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
     conn = ctx.connect_db()
     try:
         # 1. 直接通过 SQL 获取总数
-        count_sql = f"SELECT COUNT(*) FROM articles WHERE {where_clause}"
+        count_sql = f"SELECT COUNT(*) FROM articles a WHERE {where_clause}"
         total = conn.execute(count_sql, params).fetchone()[0]
 
         # 2. 数据库层面物理分页，避免全量内存加载（不含 fulltext_text 大字段）
@@ -282,9 +282,12 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
             "starred, tags, created_at, topic, relevance_reason, score_status, "
             "evidence_level, analysis_status, read_status, relevance_feedback, "
-            "zotero_key, discovered_via, cited_count, sim_prior "
-            f"FROM articles WHERE {where_clause} "
-            "ORDER BY relevance DESC, created_at DESC "
+            "zotero_key, discovered_via, cited_count, sim_prior, "
+            "jm.if_value AS impact_factor, jm.cas_zone AS cas_zone "
+            "FROM articles a "
+            "LEFT JOIN journal_metrics jm ON a.journal = jm.name "
+            f"WHERE {where_clause} "
+            "ORDER BY a.relevance DESC, a.created_at DESC "
             "LIMIT ? OFFSET ?"
         )
         query_params = list(params) + [limit, offset]
@@ -380,6 +383,142 @@ def _set_feedback(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tup
     return _article_action_result(ctx, article_id)
 
 
+def _normalize_doi(raw: str) -> str:
+    s = (raw or "").strip()
+    s = re.sub(r"^https?://(dx\.)?doi\.org/", "", s, flags=re.I)
+    return s.lower()
+
+
+def _manual_add_article(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """手动添加文献：可只给 DOI 由 OpenAlex 补全，也可手工填字段。"""
+    doi = _normalize_doi(str(data.get("doi") or ""))
+    title = str(data.get("title") or "").strip()
+    url = str(data.get("url") or "").strip()
+    journal = str(data.get("journal") or "").strip()
+    abstract = str(data.get("abstract") or "").strip()
+    authors = str(data.get("authors") or "").strip()
+    pub_date = str(data.get("pub_date") or "").strip()
+    topic = str(data.get("topic") or "").strip() or None
+    tags = str(data.get("tags") or "").strip()
+    note = str(data.get("note") or "").strip()
+    try:
+        relevance = float(data.get("relevance")) if data.get("relevance") not in (None, "") else 8.0
+    except (TypeError, ValueError):
+        relevance = 8.0
+
+    fetched = False
+    if doi and (not title or not journal or not abstract):
+        from integrations import openalex
+        openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+        work = openalex.get_work_by_doi(doi)
+        if work:
+            fetched = True
+            title = title or work.get("title") or ""
+            journal = journal or work.get("journal") or ""
+            abstract = abstract or work.get("abstract") or ""
+            authors = authors or ", ".join(work.get("authors") or [])
+            pub_date = pub_date or work.get("pub_date") or ""
+            url = url or work.get("url") or ""
+
+    if not title and not doi:
+        return {"ok": False, "error": "至少需要 DOI 或标题"}, 400
+
+    if data.get("dry_run"):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "fetched_from_openalex": fetched,
+            "article": {
+                "doi": doi,
+                "title": title,
+                "journal": journal,
+                "authors": authors,
+                "pub_date": pub_date,
+                "url": url,
+                "abstract": abstract,
+            },
+        }, 200
+
+    article = {
+        "doi": doi,
+        "title": title,
+        "journal": journal,
+        "authors": authors,
+        "pub_date": pub_date,
+        "url": url or (f"https://doi.org/{doi}" if doi else ""),
+        "abstract": abstract,
+        "relevance": relevance,
+        "topic": topic,
+        "tags": tags,
+        "note": note,
+    }
+    try:
+        new_id = ctx.db.save_manual_article(article)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}, 500
+    if new_id is None:
+        # 重复：按 DOI/URL 回查已有条目
+        existing_id = None
+        conn = ctx.connect_db()
+        try:
+            if doi:
+                row = conn.execute(
+                    "SELECT id FROM articles WHERE lower(trim(doi)) = ?", (doi,)
+                ).fetchone()
+                if row:
+                    existing_id = row[0]
+            if existing_id is None and article["url"]:
+                row = conn.execute(
+                    "SELECT id FROM articles WHERE url = ?", (article["url"],)
+                ).fetchone()
+                if row:
+                    existing_id = row[0]
+        finally:
+            conn.close()
+        if existing_id:
+            return {"ok": True, "duplicate": True, "id": existing_id, "message": "库中已有该文献"}, 200
+        return {"ok": False, "error": "添加失败：可能缺标题或数据库错误"}, 400
+
+    metric = ctx.db.get_journal_metric(journal) if journal else None
+    return {
+        "ok": True,
+        "id": new_id,
+        "fetched_from_openalex": fetched,
+        "impact_factor": (metric or {}).get("if_value"),
+        "cas_zone": (metric or {}).get("cas_zone"),
+        "message": "已加入文献库（默认收藏，避免被低分清理）",
+    }, 200
+
+
+def _cleanup_low_relevance(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """清理相关性过低的文献。preview=true 只统计；否则执行删除。"""
+    try:
+        min_score = float(data.get("min_score", 5))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "min_score 无效"}, 400
+    if not (0 <= min_score <= 10):
+        return {"ok": False, "error": "min_score 需在 0–10"}, 400
+    preview = bool(data.get("preview", True))
+    count = ctx.db.count_low_relevance(min_score)
+    sample = ctx.db.sample_low_relevance(min_score, limit=8)
+    if preview:
+        return {
+            "ok": True,
+            "preview": True,
+            "min_score": min_score,
+            "would_delete": count,
+            "sample": sample,
+            "protected": "收藏 / 笔记 / 标签 / Zotero / 阅读状态 / 反馈 会被保留",
+        }, 200
+    if count == 0:
+        return {"ok": True, "deleted": 0, "min_score": min_score}, 200
+    try:
+        deleted = ctx.db.delete_low_relevance(min_score)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"删除失败: {e}"}, 500
+    return {"ok": True, "deleted": deleted, "min_score": min_score}, 200
+
+
 def _batch_update(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """批量操作：加入阅读清单 / 标记已读等。"""
     ids = data.get("ids") or []
@@ -429,6 +568,13 @@ def _get_article_detail(ctx: WebContext, article_id: int) -> Optional[dict[str, 
         item["has_analysis"] = bool(item.get("analysis"))
         item["chat_count"] = ctx.db.get_article_chat_count(article_id)
         item["watched"] = ctx.db.is_seed_watched(article_id)
+        metric = ctx.db.get_journal_metric(item.get("journal") or "")
+        if metric:
+            item["impact_factor"] = metric.get("if_value")
+            item["cas_zone"] = metric.get("cas_zone")
+        else:
+            item["impact_factor"] = None
+            item["cas_zone"] = None
         return item
     finally:
         conn.close()
@@ -1041,10 +1187,21 @@ def _zotero_batch(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any]
     return {"ok": True, "pushed": pushed, "skipped": skipped, "failed": failed}, 200
 
 
-def _zotero_test(ctx: WebContext) -> tuple[dict[str, Any], int]:
+def _zotero_test(ctx: WebContext, data: Optional[dict[str, Any]] = None) -> tuple[dict[str, Any], int]:
+    """测试 Zotero 连接。表单可传 api_key/user_id（未保存也可先测）；留空回退已保存配置。"""
     try:
         from integrations.zotero_client import ZoteroClient
-        client = ZoteroClient(ctx.config)
+        cfg = copy.deepcopy(ctx.config)
+        zot = dict(cfg.get("zotero") or {})
+        data = data or {}
+        form_key = str(data.get("api_key") or "").strip()
+        form_uid = str(data.get("user_id") or "").strip()
+        if form_key:
+            zot["api_key"] = form_key
+        if form_uid:
+            zot["user_id"] = form_uid
+        cfg["zotero"] = zot
+        client = ZoteroClient(cfg)
         return client.test_connection(), 200
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}, 200
@@ -1473,6 +1630,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response({"ok": True, "task_id": msg})
                 return
 
+            if path == "/api/articles/manual":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload, code = _manual_add_article(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
             if path == "/api/settings":
                 if not self._require_token():
                     return
@@ -1573,7 +1738,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/zotero/test":
                 if not self._require_token():
                     return
-                payload, code = _zotero_test(self.ctx)
+                data = _read_json_body(self) or {}
+                payload, code = _zotero_test(self.ctx, data)
                 self._json_response(payload, code=code)
                 return
 
@@ -1673,6 +1839,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"ok": True, **result})
                 except Exception as e:  # noqa: BLE001
                     self._json_response({"ok": False, "error": str(e)}, code=500)
+                return
+
+            if path == "/api/articles/cleanup":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload, code = _cleanup_low_relevance(self.ctx, data)
+                self._json_response(payload, code=code)
                 return
 
             if path == "/api/articles/batch":

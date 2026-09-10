@@ -212,6 +212,15 @@ class Database:
                 created_at  TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS journal_metrics (
+                name       TEXT PRIMARY KEY,
+                full_name  TEXT,
+                if_value   REAL,
+                cas_zone   INTEGER,
+                issn       TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS highlights (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 article_id  INTEGER NOT NULL,
@@ -289,6 +298,23 @@ class Database:
             ("consecutive_failures", "INTEGER DEFAULT 0"),
             ("last_error", "TEXT"),
         ], backup_before=False)
+
+        # 期刊指标种子数据（幂等 upsert）
+        try:
+            from utils.journal_metrics import SEED_METRICS
+            for m in SEED_METRICS:
+                conn.execute(
+                    "INSERT INTO journal_metrics (name, full_name, if_value, cas_zone, issn) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET "
+                    "full_name=excluded.full_name, if_value=excluded.if_value, "
+                    "cas_zone=excluded.cas_zone, issn=excluded.issn, "
+                    "updated_at=datetime('now')",
+                    (m["name"], m.get("full_name"), m.get("if_value"), m.get("cas_zone"), m.get("issn")),
+                )
+            conn.commit()
+        except Exception as e:  # noqa: BLE001 - 指标种子失败不阻断启动
+            logger.warning("初始化 journal_metrics 种子失败: %s", e)
 
         # 创建索引
         index_statements = [
@@ -570,6 +596,63 @@ class Database:
             logger.error("保存文章失败: %s", e)
             return False
 
+    def save_manual_article(self, article: dict[str, Any]) -> Optional[int]:
+        """手动添加单篇：默认高分+收藏，避免被低分清理误删；返回新 id。"""
+        title = (article.get("title") or "").strip()
+        if not title and not (article.get("doi") or "").strip():
+            return None
+        authors = article.get("authors")
+        if isinstance(authors, list):
+            authors_str = ", ".join(a for a in authors if a)
+        else:
+            authors_str = (authors or "").strip()
+        doi = (article.get("doi") or "").strip() or None
+        if doi:
+            doi = doi.lower().removeprefix("https://doi.org/").removeprefix("http://dx.doi.org/")
+        url = (article.get("url") or "").strip()
+        if not url and doi:
+            url = f"https://doi.org/{doi}"
+        params = {
+            "doi": doi,
+            "title": title,
+            "journal": (article.get("journal") or "").strip(),
+            "authors": authors_str,
+            "pub_date": (article.get("pub_date") or "").strip(),
+            "url": url,
+            "abstract": (article.get("abstract") or "").strip(),
+            "relevance": float(article.get("relevance") if article.get("relevance") is not None else 8.0),
+            "title_hash": _compute_title_hash(title) if title else None,
+            "topic": article.get("topic"),
+            "tags": (article.get("tags") or "").strip(),
+            "note": (article.get("note") or "").strip(),
+        }
+        sql = """
+            INSERT INTO articles
+                (doi, title, journal, authors, pub_date, url, abstract,
+                 relevance, processed, title_hash, topic, tags, note,
+                 starred, discovered_via, created_at, updated_at)
+            VALUES
+                (:doi, :title, :journal, :authors, :pub_date, :url, :abstract,
+                 :relevance, 1, :title_hash, :topic, :tags, :note,
+                 1, 'manual', datetime('now'), datetime('now'))
+        """
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+                    return cur.lastrowid
+            conn = self._conn()
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError as e:
+            logger.info("手动添加重复文章: %s", e)
+            return None
+        except sqlite3.Error as e:
+            logger.error("手动添加文章失败: %s", e)
+            raise
+
     def save_articles_batch(self, articles: list[dict[str, Any]]) -> list[Optional[int]]:
         """批量保存文章基础记录（单次事务，processed=0 表示尚未完成处理）。
 
@@ -661,6 +744,116 @@ class Database:
         except sqlite3.Error as e:
             logger.error("更新文章字段失败 (id=%s): %s", article_id, e)
             return False
+
+    def get_journal_metric(self, name: str) -> Optional[dict[str, Any]]:
+        if not name:
+            return None
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    row = self._memory_conn.execute(
+                        "SELECT name, full_name, if_value, cas_zone FROM journal_metrics WHERE name = ?",
+                        (name,),
+                    ).fetchone()
+            else:
+                conn = self._conn()
+                row = conn.execute(
+                    "SELECT name, full_name, if_value, cas_zone FROM journal_metrics WHERE name = ?",
+                    (name,),
+                ).fetchone()
+        except sqlite3.Error as e:
+            logger.warning("查询期刊指标失败 (%s): %s", name, e)
+            return None
+        if not row:
+            return None
+        keys = ("name", "full_name", "if_value", "cas_zone")
+        return dict(zip(keys, row))
+
+    def list_journal_metrics(self) -> list[dict[str, Any]]:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    rows = self._memory_conn.execute(
+                        "SELECT name, full_name, if_value, cas_zone FROM journal_metrics "
+                        "ORDER BY (if_value IS NULL), if_value DESC, name"
+                    ).fetchall()
+            else:
+                conn = self._conn()
+                rows = conn.execute(
+                    "SELECT name, full_name, if_value, cas_zone FROM journal_metrics "
+                    "ORDER BY (if_value IS NULL), if_value DESC, name"
+                ).fetchall()
+        except sqlite3.Error as e:
+            logger.warning("列出期刊指标失败: %s", e)
+            return []
+        keys = ("name", "full_name", "if_value", "cas_zone")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def _cleanup_where(self, min_score: float) -> tuple[str, list[Any]]:
+        """低分清理条件：默认保护收藏/笔记/标签/Zotero/阅读状态/反馈。"""
+        where = [
+            "COALESCE(relevance, 0) < ?",
+            "COALESCE(starred, 0) = 0",
+            "(note IS NULL OR trim(note) = '')",
+            "(tags IS NULL OR trim(tags) = '')",
+            "(zotero_key IS NULL OR trim(zotero_key) = '')",
+            "(read_status IS NULL OR trim(read_status) = '')",
+            "(relevance_feedback IS NULL OR trim(relevance_feedback) = '')",
+        ]
+        return " AND ".join(where), [float(min_score)]
+
+    def count_low_relevance(self, min_score: float) -> int:
+        clause, params = self._cleanup_where(min_score)
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return self._memory_conn.execute(
+                        f"SELECT COUNT(*) FROM articles WHERE {clause}", params
+                    ).fetchone()[0]
+            conn = self._conn()
+            return conn.execute(
+                f"SELECT COUNT(*) FROM articles WHERE {clause}", params
+            ).fetchone()[0]
+        except sqlite3.Error as e:
+            logger.error("统计低分文献失败: %s", e)
+            return 0
+
+    def sample_low_relevance(self, min_score: float, limit: int = 8) -> list[dict[str, Any]]:
+        clause, params = self._cleanup_where(min_score)
+        sql = (
+            f"SELECT id, title, journal, relevance FROM articles WHERE {clause} "
+            "ORDER BY COALESCE(relevance, 0) ASC, id ASC LIMIT ?"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    rows = self._memory_conn.execute(sql, params + [limit]).fetchall()
+            else:
+                conn = self._conn()
+                rows = conn.execute(sql, params + [limit]).fetchall()
+        except sqlite3.Error as e:
+            logger.error("抽样低分文献失败: %s", e)
+            return []
+        keys = ("id", "title", "journal", "relevance")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def delete_low_relevance(self, min_score: float) -> int:
+        """删除低分且无用户痕迹的文章；返回删除条数。"""
+        clause, params = self._cleanup_where(min_score)
+        sql = f"DELETE FROM articles WHERE {clause}"
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, params)
+                    self._memory_conn.commit()
+                    return cur.rowcount or 0
+            conn = self._conn()
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount or 0
+        except sqlite3.Error as e:
+            logger.error("删除低分文献失败: %s", e)
+            raise
 
     def get_retry_articles(self, threshold: float, days: int = 7) -> dict[str, list[dict[str, Any]]]:
         """查询需要重试失败阶段的历史文章（评分失败 / 相关但分析失败）。"""

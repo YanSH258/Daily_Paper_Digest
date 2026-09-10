@@ -30,6 +30,158 @@ const Library = {
     this.load();
   },
 
+  toggleManualAdd() {
+    const panel = document.getElementById("manualAddPanel");
+    if (!panel) return;
+    const show = panel.style.display === "none" || !panel.style.display;
+    panel.style.display = show ? "block" : "none";
+    if (show) document.getElementById("maDoi")?.focus();
+  },
+
+  async fetchByDoi() {
+    const msg = document.getElementById("manualAddMsg");
+    const doi = (document.getElementById("maDoi").value || "").trim();
+    if (!doi) {
+      msg.innerHTML = '<span class="err">请先填 DOI</span>';
+      return;
+    }
+    msg.textContent = "正在从 OpenAlex 补全…";
+    try {
+      const res = await API.post("/api/articles/manual", { doi, dry_run: true });
+      if (!res.ok) throw new Error(res.error || "补全失败");
+      const a = res.article || {};
+      const set = (id, v) => {
+        const el = document.getElementById(id);
+        if (el && v) el.value = v;
+      };
+      set("maTitle", a.title);
+      set("maJournal", a.journal);
+      set("maDate", a.pub_date);
+      set("maAuthors", a.authors);
+      set("maUrl", a.url);
+      const abs = document.getElementById("maAbstract");
+      if (abs && a.abstract) abs.value = a.abstract;
+      msg.innerHTML = res.fetched_from_openalex
+        ? '<span class="ok">已补全，请核对后点「加入文献库」</span>'
+        : '<span class="err">OpenAlex 未找到，请手动填写后加入</span>';
+    } catch (e) {
+      msg.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
+    }
+  },
+
+  async submitManualAdd() {
+    const msg = document.getElementById("manualAddMsg");
+    const val = (id) => (document.getElementById(id)?.value || "").trim();
+    const body = {
+      doi: val("maDoi"),
+      title: val("maTitle"),
+      journal: val("maJournal"),
+      pub_date: val("maDate"),
+      authors: val("maAuthors"),
+      url: val("maUrl"),
+      tags: val("maTags"),
+      topic: val("maTopic"),
+      abstract: document.getElementById("maAbstract")?.value || "",
+    };
+    if (!body.doi && !body.title) {
+      msg.innerHTML = '<span class="err">至少填 DOI 或标题</span>';
+      return;
+    }
+    msg.textContent = "添加中…";
+    try {
+      const res = await API.post("/api/articles/manual", body);
+      if (res.duplicate) {
+        msg.innerHTML = `<span class="err">库中已有该文献（id=${res.id}）</span>`;
+        return;
+      }
+      if (!res.ok) throw new Error(res.error || "添加失败");
+      msg.innerHTML = `<span class="ok">✓ 已添加 id=${res.id} · <a href="/article/${res.id}" target="_blank">打开</a></span>`;
+      this._clearManualForm();
+      this.page = 0;
+      this.load();
+    } catch (e) {
+      msg.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
+    }
+  },
+
+  _clearManualForm() {
+    ["maDoi", "maTitle", "maJournal", "maDate", "maAuthors", "maUrl", "maTags", "maAbstract"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+    const topic = document.getElementById("maTopic");
+    if (topic) topic.value = "";
+  },
+
+  onScorePreset(val) {
+    const input = document.getElementById("minScore");
+    if (val === "custom") {
+      input.hidden = false;
+      input.focus();
+    } else {
+      input.hidden = true;
+      input.value = val || "0";
+    }
+    this.page = 0;
+    this.load();
+  },
+
+  currentMinScore() {
+    return document.getElementById("minScore").value || "0";
+  },
+
+  async cleanupLow() {
+    const minScore = Number(this.currentMinScore() || 0);
+    if (!minScore || minScore <= 0) {
+      alert("请先在筛选里把相关性设为 ≥3 / ≥5 / ≥7 等，再点「清理低分」。");
+      return;
+    }
+    // Token 仅在服务端配置了 web.api_token 时才需要；未配置则直接调用
+    try {
+      const preview = await API.post("/api/articles/cleanup", {
+        min_score: minScore,
+        preview: true,
+      });
+      if (!preview.ok) throw new Error(preview.error || "预览失败");
+      const sample = (preview.sample || [])
+        .map((s) => `· [${Number(s.relevance || 0).toFixed(1)}] ${(s.title || "").slice(0, 60)}`)
+        .join("\n");
+      const ok = confirm(
+        `将删除相关性 < ${minScore} 且无收藏/笔记/标签/Zotero/阅读状态的文献\n` +
+          `共 ${preview.would_delete} 篇\n\n` +
+          `${preview.protected || ""}\n\n样例：\n${sample}\n\n确认删除？此操作不可恢复（本地已有备份）。`
+      );
+      if (!ok) return;
+      const res = await API.post("/api/articles/cleanup", {
+        min_score: minScore,
+        preview: false,
+      });
+      if (!res.ok) throw new Error(res.error || "删除失败");
+      alert(`已删除 ${res.deleted} 篇`);
+      this.page = 0;
+      this.load();
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/unauthorized|401/i.test(msg)) {
+        alert("服务端已开启 API Token 保护：请在左下角填入与设置里相同的 Token 后再清理。");
+      } else {
+        alert("清理失败: " + msg);
+      }
+    }
+  },
+
+  journalMeta(a) {
+    const parts = [];
+    parts.push(API.esc(a.journal || "未知期刊"));
+    if (a.impact_factor != null && a.impact_factor !== "") {
+      parts.push(`IF ${Number(a.impact_factor).toFixed(1)}`);
+    }
+    if (a.cas_zone) {
+      parts.push(`${a.cas_zone}区`);
+    }
+    return parts;
+  },
+
   refresh() {
     if (document.getElementById("view-database").hidden) return;
     this.load();
@@ -137,7 +289,9 @@ const Library = {
         <div class="feed-card-head">
           <div class="feed-card-score ${scoreClass}">★ ${score.toFixed(1)}</div>
           <div class="feed-card-meta">
-            <span class="journal-tag">${API.esc(a.journal || "未知期刊")}</span>
+            <span class="journal-tag">${this.journalMeta(a).map((p, i) =>
+              i === 0 ? p : `<span class="jmetric">${p}</span>`
+            ).join(" ")}</span>
             <span class="topic-tag">${API.esc(a.topic || "未分类")}</span>
             <span class="date-tag">${API.esc(a.pub_date || "")}</span>
             ${this.statusChip(a)}
@@ -191,7 +345,9 @@ const Library = {
           title="${a.starred ? "取消收藏" : "收藏"}">${a.starred ? "★" : "☆"}</button></td>
         <td>${Number(a.relevance || 0).toFixed(1)}</td>
         <td>${API.esc(a.topic || "")}</td>
-        <td>${API.esc(a.journal || "")}</td>
+        <td>${API.esc(a.journal || "")}${a.impact_factor != null && a.impact_factor !== ""
+          ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${a.cas_zone ? " · " + a.cas_zone + "区" : ""}</div>`
+          : ""}</td>
         <td><span class="title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</span></td>
         <td>${tagBadges}</td>
         <td>${statusMap[a.read_status] || "—"}</td>

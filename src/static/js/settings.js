@@ -125,9 +125,14 @@ const Settings = {
 
   async testZotero() {
     const msgEl = document.getElementById("zotTestMsg");
+    const val = (id) => (document.getElementById(id)?.value ?? "").trim();
     msgEl.textContent = "测试中...";
     try {
-      const data = await API.post("/api/zotero/test", {});
+      // 带上表单里未保存的 key/uid，与 LLM 测试一致（先测后存）
+      const data = await API.post("/api/zotero/test", {
+        api_key: val("s_zot_key"),
+        user_id: val("s_zot_uid"),
+      });
       if (data.ok) {
         const names = (data.collections || []).slice(0, 8).map((c) => `${c.name}(${c.key})`).join("，");
         msgEl.innerHTML = `<span class="ok">✓ ${API.esc(data.username)}（${API.esc(String(data.user_id))}）</span>` +
