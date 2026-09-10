@@ -774,20 +774,73 @@ class Database:
             if self._memory_conn is not None:
                 with self._memory_lock:
                     rows = self._memory_conn.execute(
-                        "SELECT name, full_name, if_value, cas_zone FROM journal_metrics "
+                        "SELECT name, full_name, if_value, cas_zone, issn FROM journal_metrics "
                         "ORDER BY (if_value IS NULL), if_value DESC, name"
                     ).fetchall()
             else:
                 conn = self._conn()
                 rows = conn.execute(
-                    "SELECT name, full_name, if_value, cas_zone FROM journal_metrics "
+                    "SELECT name, full_name, if_value, cas_zone, issn FROM journal_metrics "
                     "ORDER BY (if_value IS NULL), if_value DESC, name"
                 ).fetchall()
         except sqlite3.Error as e:
             logger.warning("列出期刊指标失败: %s", e)
             return []
-        keys = ("name", "full_name", "if_value", "cas_zone")
+        keys = ("name", "full_name", "if_value", "cas_zone", "issn")
         return [dict(zip(keys, r)) for r in rows]
+
+    def upsert_journal_metric(
+        self,
+        name: str,
+        full_name: str = "",
+        if_value: Optional[float] = None,
+        cas_zone: Optional[int] = None,
+        issn: str = "",
+    ) -> bool:
+        name = (name or "").strip()
+        if not name:
+            return False
+        sql = (
+            "INSERT INTO journal_metrics (name, full_name, if_value, cas_zone, issn, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "full_name=excluded.full_name, if_value=excluded.if_value, "
+            "cas_zone=excluded.cas_zone, issn=excluded.issn, updated_at=datetime('now')"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(
+                        sql, (name, full_name or None, if_value, cas_zone, issn or None)
+                    )
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, (name, full_name or None, if_value, cas_zone, issn or None))
+                conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error("写入期刊指标失败 (%s): %s", name, e)
+            return False
+
+    def reseed_journal_metrics(self) -> int:
+        """用内置种子表刷新期刊指标，返回写入条数。手工改过的同名刊会被覆盖。"""
+        try:
+            from utils.journal_metrics import SEED_METRICS
+        except Exception as e:  # noqa: BLE001
+            logger.error("加载期刊指标种子失败: %s", e)
+            return 0
+        n = 0
+        for m in SEED_METRICS:
+            if self.upsert_journal_metric(
+                m.get("name", ""),
+                m.get("full_name") or "",
+                m.get("if_value"),
+                m.get("cas_zone"),
+                m.get("issn") or "",
+            ):
+                n += 1
+        return n
 
     def _cleanup_where(self, min_score: float) -> tuple[str, list[Any]]:
         """低分清理条件：默认保护收藏/笔记/标签/Zotero/阅读状态/反馈。"""
@@ -854,6 +907,30 @@ class Database:
         except sqlite3.Error as e:
             logger.error("删除低分文献失败: %s", e)
             raise
+
+    def list_low_relevance_rows(self, min_score: float) -> list[dict[str, Any]]:
+        """导出用：返回将被清理的文章完整关键字段。"""
+        clause, params = self._cleanup_where(min_score)
+        sql = (
+            "SELECT id, doi, title, journal, authors, pub_date, url, abstract, "
+            "relevance, topic, tags, note, created_at "
+            f"FROM articles WHERE {clause} ORDER BY COALESCE(relevance, 0) ASC, id ASC"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    rows = self._memory_conn.execute(sql, params).fetchall()
+            else:
+                conn = self._conn()
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.Error as e:
+            logger.error("导出低分文献失败: %s", e)
+            return []
+        keys = (
+            "id", "doi", "title", "journal", "authors", "pub_date", "url",
+            "abstract", "relevance", "topic", "tags", "note", "created_at",
+        )
+        return [dict(zip(keys, r)) for r in rows]
 
     def get_retry_articles(self, threshold: float, days: int = 7) -> dict[str, list[dict[str, Any]]]:
         """查询需要重试失败阶段的历史文章（评分失败 / 相关但分析失败）。"""

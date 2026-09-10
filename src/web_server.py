@@ -519,6 +519,83 @@ def _cleanup_low_relevance(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[
     return {"ok": True, "deleted": deleted, "min_score": min_score}, 200
 
 
+def _cleanup_export_csv(ctx: WebContext, data: dict[str, Any]) -> tuple[str, int, str]:
+    """导出将被清理的文章 CSV（UTF-8 BOM，Excel 可直接打开）。"""
+    import csv
+    import io
+
+    try:
+        min_score = float(data.get("min_score", 5))
+    except (TypeError, ValueError):
+        return json.dumps({"ok": False, "error": "min_score 无效"}, ensure_ascii=False), 400, "application/json; charset=utf-8"
+    if not (0 <= min_score <= 10):
+        return json.dumps({"ok": False, "error": "min_score 需在 0–10"}, ensure_ascii=False), 400, "application/json; charset=utf-8"
+
+    rows = ctx.db.list_low_relevance_rows(min_score)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "id", "doi", "title", "journal", "authors", "pub_date", "url",
+        "abstract", "relevance", "topic", "tags", "note", "created_at",
+    ])
+    for r in rows:
+        writer.writerow([
+            r.get("id"), r.get("doi") or "", r.get("title") or "",
+            r.get("journal") or "", r.get("authors") or "", r.get("pub_date") or "",
+            r.get("url") or "", (r.get("abstract") or "").replace("\n", " ").replace("\r", " "),
+            r.get("relevance"), r.get("topic") or "", r.get("tags") or "",
+            (r.get("note") or "").replace("\n", " ").replace("\r", " "),
+            r.get("created_at") or "",
+        ])
+
+    # 服务端同时落一份备份
+    fname = f"cleanup-backup-lt{min_score:g}-{datetime.now():%Y%m%d-%H%M%S}.csv"
+    try:
+        out_cfg = ctx.config.get("output") or {}
+        out_dir = Path(str(out_cfg.get("dir") or "data/output"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = out_dir / fname
+        backup_path.write_text("﻿" + buf.getvalue(), encoding="utf-8")
+        logger.info("清理备份已保存: %s (%d 行)", backup_path, len(rows))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理备份写盘失败（仍返回下载内容）: %s", e)
+
+    body = "﻿" + buf.getvalue()
+    ctx._export_filename = fname  # type: ignore[attr-defined]
+    return body, 200, "text/csv; charset=utf-8"
+
+
+def _journal_metrics_list(ctx: WebContext) -> dict[str, Any]:
+    return {"ok": True, "items": ctx.db.list_journal_metrics()}
+
+
+def _journal_metrics_upsert(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "name 不能为空"}, 400
+    full_name = str(data.get("full_name") or "").strip()
+    issn = str(data.get("issn") or "").strip()
+    try:
+        if_value = float(data["if_value"]) if data.get("if_value") not in (None, "") else None
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "if_value 无效"}, 400
+    try:
+        cas_zone = int(data["cas_zone"]) if data.get("cas_zone") not in (None, "") else None
+        if cas_zone is not None and cas_zone not in (1, 2, 3, 4):
+            return {"ok": False, "error": "cas_zone 需为 1–4"}, 400
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "cas_zone 无效"}, 400
+    ok = ctx.db.upsert_journal_metric(name, full_name, if_value, cas_zone, issn)
+    if not ok:
+        return {"ok": False, "error": "写入失败"}, 500
+    return {"ok": True, "item": ctx.db.get_journal_metric(name)}, 200
+
+
+def _journal_metrics_reseed(ctx: WebContext) -> tuple[dict[str, Any], int]:
+    n = ctx.db.reseed_journal_metrics()
+    return {"ok": True, "updated": n, "items": ctx.db.list_journal_metrics()}, 200
+
+
 def _batch_update(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """批量操作：加入阅读清单 / 标记已读等。"""
     ids = data.get("ids") or []
@@ -1305,11 +1382,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _text_response(self, text: str, code: int = 200, content_type: str = "text/plain; charset=utf-8") -> None:
+    def _text_response(self, text: str, code: int = 200, content_type: str = "text/plain; charset=utf-8",
+                       filename: Optional[str] = None) -> None:
         body = text.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if filename:
+            from urllib.parse import quote
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1473,6 +1554,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/healthz":
                 self._json_response({"ok": True, "time": datetime.now().isoformat(timespec="seconds")})
+                return
+
+            if path == "/api/journal-metrics":
+                self._json_response(_journal_metrics_list(self.ctx))
                 return
 
             if path == "/paper-index":
@@ -1846,6 +1931,33 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 data = _read_json_body(self) or {}
                 payload, code = _cleanup_low_relevance(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/articles/cleanup/export":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                body, code, ctype = _cleanup_export_csv(self.ctx, data)
+                if code == 200:
+                    fname = getattr(self.ctx, "_export_filename", None)
+                    self._text_response(body, code=code, content_type=ctype, filename=fname)
+                else:
+                    self._json_response(json.loads(body), code=code)
+                return
+
+            if path == "/api/journal-metrics":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload, code = _journal_metrics_upsert(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/journal-metrics/reseed":
+                if not self._require_token():
+                    return
+                payload, code = _journal_metrics_reseed(self.ctx)
                 self._json_response(payload, code=code)
                 return
 

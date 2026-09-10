@@ -390,6 +390,16 @@
       </div>
       <div class="settings-grid" id="settingsContent"></div>
       <div class="card">
+        <h3>期刊影响因子</h3>
+        <p class="small muted" style="margin-top:0;">
+          指标保存在本地 journal_metrics 表。可用内置种子重置（会覆盖手工修改）。
+        </p>
+        <div class="row">
+          <button class="secondary" onclick="Settings.reseedMetrics()" title="用代码内置种子覆盖">重置内置种子</button>
+          <span id="jcrMsg" class="small"></span>
+        </div>
+      </div>
+      <div class="card">
         <h3>保存</h3>
         <div class="row">
           <button onclick="Settings.save()">保存设置</button>

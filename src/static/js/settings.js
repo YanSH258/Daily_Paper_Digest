@@ -145,6 +145,18 @@ const Settings = {
     }
   },
 
+  async reseedMetrics() {
+    if (!confirm("用内置种子覆盖期刊指标？会丢失手工修改的 IF。")) return;
+    const msgEl = document.getElementById("jcrMsg");
+    try {
+      const data = await API.post("/api/journal-metrics/reseed", {});
+      if (!data.ok) throw new Error(data.error || "失败");
+      msgEl.innerHTML = `<span class="ok">已重置 ${data.updated} 条内置指标</span>`;
+    } catch (e) {
+      msgEl.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
+    }
+  },
+
   async clearToken() {
     if (!confirm("确定清除网页 API Token 吗？清除后所有写操作将不再需要 Token（直到重新设置）。")) return;
     const msgEl = document.getElementById("settingsMsg");

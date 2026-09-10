@@ -152,12 +152,30 @@ const Library = {
           `${preview.protected || ""}\n\n样例：\n${sample}\n\n确认删除？此操作不可恢复（本地已有备份）。`
       );
       if (!ok) return;
+      // 先导出 CSV 备份（浏览器下载 + 服务端落盘），再删除
+      try {
+        const csvRes = await fetch("/api/articles/cleanup/export", {
+          method: "POST",
+          headers: API.headers(),
+          body: JSON.stringify({ min_score: minScore }),
+        });
+        if (csvRes.ok) {
+          const blob = await csvRes.blob();
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          const cd = csvRes.headers.get("Content-Disposition") || "";
+          const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+          a.download = m ? decodeURIComponent(m[1]) : `cleanup-backup-lt${minScore}.csv`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        }
+      } catch (e) { /* 备份失败仍继续删除，服务端可能已落盘 */ }
       const res = await API.post("/api/articles/cleanup", {
         min_score: minScore,
         preview: false,
       });
       if (!res.ok) throw new Error(res.error || "删除失败");
-      alert(`已删除 ${res.deleted} 篇`);
+      alert(`已备份并删除 ${res.deleted} 篇（备份见浏览器下载与 data/output/）`);
       this.page = 0;
       this.load();
     } catch (e) {
@@ -176,8 +194,9 @@ const Library = {
     if (a.impact_factor != null && a.impact_factor !== "") {
       parts.push(`IF ${Number(a.impact_factor).toFixed(1)}`);
     }
+    // cas_zone 存 JCR 四分位 1-4，显示为 Q1…；无则退回「N区」
     if (a.cas_zone) {
-      parts.push(`${a.cas_zone}区`);
+      parts.push(`Q${a.cas_zone}`);
     }
     return parts;
   },
@@ -346,7 +365,7 @@ const Library = {
         <td>${Number(a.relevance || 0).toFixed(1)}</td>
         <td>${API.esc(a.topic || "")}</td>
         <td>${API.esc(a.journal || "")}${a.impact_factor != null && a.impact_factor !== ""
-          ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${a.cas_zone ? " · " + a.cas_zone + "区" : ""}</div>`
+          ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${a.cas_zone ? " · Q" + a.cas_zone : ""}</div>`
           : ""}</td>
         <td><span class="title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</span></td>
         <td>${tagBadges}</td>
