@@ -25,14 +25,19 @@ setup(
     packages=sorted(set(find_packages(where="src")) | {"webassets"}),
     package_dir={"": "src", "webassets": "src/static"},
     package_data={"webassets": ["*.html", "*.ico", "css/*", "js/*"]},
-    py_modules=["main", "web_server"],
+    py_modules=["main", "web_server", "mcp_server"],
     python_requires=">=3.9",
     install_requires=requirements,
+    extras_require={
+        # MCP 服务器（供 AI agent 调用文献工作台）；SDK 2.x 改了 API，锁定 1.x
+        "mcp": ["mcp>=1.2,<2"],
+    },
     entry_points={
         "console_scripts": [
             "daily-paper-digest=main:main",
             "stat-db=utils.stat_db:main",
             "daily-paper-web=web_server:main",
+            "daily-paper-mcp=mcp_server:main",
         ],
     },
 )

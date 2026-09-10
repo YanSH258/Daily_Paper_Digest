@@ -280,7 +280,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         # 2. 数据库层面物理分页，避免全量内存加载（不含 fulltext_text 大字段）
         sql = (
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
-            "starred, tags, created_at, topic, relevance_reason, score_status, "
+            "abstract, starred, tags, created_at, topic, relevance_reason, score_status, "
             "evidence_level, analysis_status, read_status, relevance_feedback, "
             "zotero_key, discovered_via, cited_count, sim_prior, title_zh, "
             "jm.if_value AS impact_factor, jm.cas_zone AS cas_zone "
@@ -1437,6 +1437,41 @@ def _trends_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]
 
 
 
+def _digest_view(ctx: WebContext, date_str: str = "", dry_run: bool = True) -> dict[str, Any]:
+    """每日 Top-N 选文（digest 模块的 HTTP 入口）。
+
+    GET  = dry-run 只读；POST = 正式落盘 digest_entries。
+    """
+    from digest.builder import build_daily_digest
+    result = build_daily_digest(ctx.db, ctx.config, date_str=date_str or None, dry_run=dry_run)
+    sel = result["selection"]
+    selected = []
+    for i, row in enumerate(sel.selected, 1):
+        scores = row.get("scores") or {}
+        selected.append({
+            "rank": i,
+            "id": row.get("id"),
+            "title": row.get("title"),
+            "journal": row.get("journal"),
+            "pub_date": row.get("pub_date"),
+            "url": row.get("url"),
+            "topic": row.get("topic"),
+            "relevance_reason": (row.get("relevance_reason") or "")[:300],
+            "title_zh": row.get("title_zh") or "",
+            "scores": scores,
+        })
+    from digest.builder import format_dry_run_report
+    return {
+        "date": result["date"],
+        "dry_run": result["dry_run"],
+        "articles_above_threshold": result["articles_above_threshold"],
+        "excluded_repeat": sel.stats.get("excluded_repeat", 0),
+        "stats": sel.stats,
+        "selected": selected,
+        "report_text": format_dry_run_report(result),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "DailyPaperWeb/0.1"
 
@@ -1694,6 +1729,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/stats/trends":
                 self._json_response(_trends_view(self.ctx, query))
+                return
+
+            if path == "/api/digest":
+                self._json_response(_digest_view(
+                    self.ctx, (query.get("date", [""])[0] or "").strip(), dry_run=True))
                 return
 
             if path == "/api/results":
@@ -2003,6 +2043,14 @@ class Handler(BaseHTTPRequestHandler):
                                               str(data.get("research_question") or ""),
                                               str(data.get("notes") or ""))
                 self._json_response({"ok": ok}, code=200)
+                return
+
+            if path == "/api/digest":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload = _digest_view(self.ctx, str(data.get("date") or ""), dry_run=False)
+                self._json_response(payload, code=200)
                 return
 
             if path == "/api/compare" or path == "/api/related-work":

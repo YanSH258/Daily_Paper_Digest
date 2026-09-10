@@ -1,0 +1,15 @@
+{
+  "name": "daily-papers",
+  "title": "Daily Paper Digest 文献工作台",
+  "description": "把个人文献工作台接入 AI agent：检索/阅读管理/研究专题/引文追踪/Zotero 推送/AI 对比，共 21 个语义化工具。",
+  "mcpServers": {
+    "daily-papers": {
+      "command": "daily-paper-mcp",
+      "args": [],
+      "env": {
+        "DPD_API": "http://127.0.0.1:8080"
+      }
+    }
+  },
+  "skills": ["skills"]
+}

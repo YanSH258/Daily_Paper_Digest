@@ -16,6 +16,7 @@
 - `src/core/tracking.py`、`src/integrations/`：作者/引文发现、OpenAlex、Zotero、WoS。
 - `src/core/notifier.py`、`src/utils/`：报告、推送、引用导出、周报、相似度和期刊指标。
 - `src/web_server.py`：标准库 ThreadingHTTPServer、API、TaskRunner、设置热更新和静态资源。
+- `src/mcp_server.py`：MCP 服务器（`daily-paper-mcp`），把 HTTP API 包装为 21 个语义化工具供 AI agent 调用；薄层转换，业务逻辑不得下沉到此处。
 - `src/static/`：原生 HTML/CSS/JavaScript，无前端构建步骤；页面使用共享 API 封装。
 - `tests/`：unittest 测试；`setup.py` 负责 CLI 和 webassets 打包。
 - `build/` 是生成副本，不在其中修复业务逻辑，也不通过手动同步它来替代构建验证。
