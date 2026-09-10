@@ -1,0 +1,61 @@
+{
+  "comment": "Phase 0.1 digest category regression fixtures. Do not let these fall back to other.",
+  "cases": [
+    {
+      "name": "hea_mlip_review",
+      "title": "Machine learning interatomic potentials for high-entropy alloys: from methodology to application",
+      "abstract": "We review machine learning interatomic potentials (MLIPs) for high-entropy alloys including MACE and DeePMD.",
+      "journal": "Comput. Mater. Sci.",
+      "expect": "mlip"
+    },
+    {
+      "name": "uo2_xe_mlip",
+      "title": "Machine-learned potential for fission gas diffusion in uranium oxide",
+      "abstract": "An equivariant message-passing potential is trained with active learning on DFT+U data to study Xe diffusion.",
+      "journal": "Phys. Rev. B",
+      "expect": "mlip"
+    },
+    {
+      "name": "pbzro3_mlip_md",
+      "title": "Polarization switching and microscopic domain evolution of ferroelectric PbZrO3",
+      "abstract": "Large-scale molecular dynamics simulations driven by a machine learning interatomic potential reveal domain switching.",
+      "journal": "Phys. Rev. B",
+      "expect": "mlip"
+    },
+    {
+      "name": "metagga_pseudopotential",
+      "title": "Pseudopotentials for meta-GGA calculations",
+      "abstract": "We construct optimized pseudopotentials for meta-GGA density functional theory calculations.",
+      "journal": "Phys. Rev. B",
+      "expect": "dft"
+    },
+    {
+      "name": "li_blg_ga_mlip_surrogate",
+      "title": "Accelerated stable structure prediction of Li-intercalated bilayer graphene",
+      "abstract": "A genetic algorithm with universal machine learning interatomic potential as DFT surrogate and selective DFT labeling enables structure search.",
+      "journal": "npj Comput. Materials",
+      "expect": "ai_materials"
+    },
+    {
+      "name": "pinn_ferroelectric",
+      "title": "Multiscale modelling of ferroelectrics using a physics-informed neural network",
+      "abstract": "A physics-informed neural network couples molecular dynamics data with phase-field modelling.",
+      "journal": "npj Comput. Materials",
+      "expect": "ai_materials"
+    },
+    {
+      "name": "ehrenfest_pseudopotential",
+      "title": "Nonadiabatic Ehrenfest dynamics with norm-conserving and ultrasoft pseudopotentials",
+      "abstract": "Real-time electronic dynamics from Ehrenfest mean-field with plane-wave pseudopotentials.",
+      "journal": "Phys. Rev. B",
+      "expect": "dft"
+    },
+    {
+      "name": "sei_surface_chem",
+      "title": "Surface chemistry and electrolyte concentration govern early-stage SEI formation",
+      "abstract": "Reactive molecular dynamics of solid electrolyte interphase formation on graphite anodes.",
+      "journal": "Comput. Mater. Sci.",
+      "expect": "other"
+    }
+  ]
+}

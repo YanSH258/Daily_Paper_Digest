@@ -478,7 +478,13 @@ class JournalFetcher:
     def _apply_date_filter(self, articles: list[dict]) -> list[dict]:
         if self.date_filter_days > 0:
             cutoff = (datetime.now() - timedelta(days=self.date_filter_days)).strftime("%Y-%m-%d")
-            return [a for a in articles if a.get("pub_date", "9999") >= cutoff]
+            # pub_date 可能为空（RSS 无 published）；用 created 兜底，避免误杀
+            out = []
+            for a in articles:
+                d = a.get("pub_date") or ""
+                if not d or d >= cutoff:
+                    out.append(a)
+            return out
         return articles
 
     def test_feed(self, rss_url: str, publisher: str = "DEFAULT") -> dict:
@@ -813,13 +819,13 @@ class JournalFetcher:
             url = entry.get("link", "")
             doi = self._extract_doi(entry, url)
             detected_publisher = _get_publisher_from_doi(doi) or publisher
-            # 优先使用 RSS 条目的真实发布日期，缺省时回退为运行当天
-            pub_date = datetime.now().strftime("%Y-%m-%d")
-            for date_field in ("published_parsed", "updated_parsed"):
-                parsed = entry.get(date_field)
-                if parsed:
-                    pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
-                    break
+            # 日期语义：published 优先；updated 不是发表日，不用；缺省留空由入库用 created_at
+            pub_date = ""
+            pub_date_source = "missing"
+            parsed = entry.get("published_parsed")
+            if parsed:
+                pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
+                pub_date_source = "rss_published"
             return {
                 "title":        title,
                 "journal":      journal_name,
@@ -829,6 +835,7 @@ class JournalFetcher:
                 "abstract":     self._extract_rss_abstract(entry),
                 "authors":      self._extract_authors(entry),
                 "pub_date":     pub_date,
+                "pub_date_source": pub_date_source,
                 "has_fulltext": False,
             }
         except Exception as e:

@@ -781,6 +781,10 @@ def main():
                         help="只补发指定日期的日报推送（不重新抓取/评分/分析）")
     parser.add_argument("--weekly", action="store_true", help="生成本周文献周报")
     parser.add_argument("--backup", action="store_true", help="备份数据库（滚动保留最近 N 份）")
+    parser.add_argument("--digest-dry-run", action="store_true",
+                        help="从现有库生成每日 Top-N 并打印选中/落选原因（不写库）")
+    parser.add_argument("--digest", action="store_true",
+                        help="生成每日 Top-N 并写入 digest_entries（不抓取）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -808,6 +812,31 @@ def main():
     if args.backup:
         keep = int(config.get("backup", {}).get("keep", 7))
         backup_database(config, keep=keep)
+        return
+
+    if args.digest_dry_run or args.digest:
+        from digest.builder import build_daily_digest, format_dry_run_report
+        db = Database(config["database"]["path"])
+        try:
+            result = build_daily_digest(
+                db, config, date_str=args.date, dry_run=not args.digest,
+            )
+            report = format_dry_run_report(result)
+            print(report)
+            logger.info("Digest %s 完成: selected=%s dry_run=%s",
+                        args.date or "today",
+                        result["selection"].stats.get("selected"),
+                        result["dry_run"])
+            if not args.digest:
+                # dry-run 时把报告也落到 data/output，方便复查
+                try:
+                    out = Path(config.get("output", {}).get("output_dir") or "data/output")
+                    out.mkdir(parents=True, exist_ok=True)
+                    (out / f"digest-dry-run-{result['date']}.txt").write_text(report, encoding="utf-8")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("写入 dry-run 报告失败: %s", e)
+        finally:
+            db.close()
         return
 
     if args.schedule:

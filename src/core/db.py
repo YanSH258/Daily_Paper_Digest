@@ -122,7 +122,8 @@ class Database:
                 zotero_key    TEXT,
                 discovered_via TEXT DEFAULT 'rss',
                 sim_prior     REAL,
-                cited_count   INTEGER
+                cited_count   INTEGER,
+                title_zh      TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daily_reports (
@@ -221,6 +222,20 @@ class Database:
                 updated_at TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS digest_entries (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                digest_date     TEXT NOT NULL,
+                digest_type     TEXT NOT NULL DEFAULT 'daily',
+                article_id      INTEGER NOT NULL,
+                rank            INTEGER,
+                category        TEXT,
+                relevance_score REAL,
+                final_score     REAL,
+                selected_reason TEXT,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(digest_date, digest_type, article_id)
+            );
+
             CREATE TABLE IF NOT EXISTS highlights (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 article_id  INTEGER NOT NULL,
@@ -285,6 +300,7 @@ class Database:
             ("discovered_via", "TEXT DEFAULT 'rss'"),
             ("sim_prior", "REAL"),
             ("cited_count", "INTEGER"),
+            ("title_zh", "TEXT"),
         ]
         self._migrate_columns(conn, "articles", legacy_columns + stage_columns, backup_before=True)
         self._migrate_columns(conn, "daily_reports", [
@@ -351,6 +367,11 @@ class Database:
             (
                 "CREATE INDEX IF NOT EXISTS idx_articles_read_status ON articles(read_status)",
                 "read_status 索引（阅读队列）",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_digest_entries_date "
+                "ON digest_entries(digest_type, digest_date)",
+                "digest_entries 日期索引（防重查询）",
             ),
             (
                 "CREATE INDEX IF NOT EXISTS idx_chat_messages_article "
@@ -719,7 +740,7 @@ class Database:
         "abstract", "analysis", "analysis_status", "analysis_error", "analysis_model",
         "analysis_prompt_version", "analysis_input_hash", "analyzed_at",
         "read_status", "relevance_feedback", "processed", "topic",
-        "zotero_key", "discovered_via", "sim_prior", "cited_count",
+        "zotero_key", "discovered_via", "sim_prior", "cited_count", "title_zh",
     }
 
     def update_article_fields(self, article_id: int, **fields: Any) -> bool:
@@ -2034,6 +2055,90 @@ class Database:
                 conn.commit()
         except sqlite3.Error as e:
             logger.error("update_journal_health 失败: %s", e)
+
+    def list_untranslated_titles(self, limit: int = 100) -> list[dict[str, Any]]:
+        """返回尚未有中文标题的文章（优先高相关/收藏）。"""
+        sql = (
+            "SELECT id, title FROM articles "
+            "WHERE title IS NOT NULL AND trim(title) != '' "
+            "AND (title_zh IS NULL OR trim(title_zh) = '') "
+            "ORDER BY COALESCE(relevance, 0) DESC, COALESCE(starred, 0) DESC, id DESC "
+            "LIMIT ?"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (limit,))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (limit,))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_untranslated_titles 失败: %s", e)
+            return []
+
+    def save_digest_entries(self, digest_date: str, digest_type: str,
+                            items: list[dict[str, Any]]) -> int:
+        """写入当日 digest 条目（幂等：同 date+type+article 覆盖分数）。"""
+        if not items:
+            return 0
+        sql = (
+            "INSERT INTO digest_entries "
+            "(digest_date, digest_type, article_id, rank, category, "
+            " relevance_score, final_score, selected_reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(digest_date, digest_type, article_id) DO UPDATE SET "
+            "rank=excluded.rank, category=excluded.category, "
+            "relevance_score=excluded.relevance_score, "
+            "final_score=excluded.final_score, "
+            "selected_reason=excluded.selected_reason"
+        )
+        n = 0
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    for it in items:
+                        self._memory_conn.execute(sql, (
+                            digest_date, digest_type, it.get("article_id"),
+                            it.get("rank"), it.get("category"),
+                            it.get("relevance_score"), it.get("final_score"),
+                            it.get("selected_reason"),
+                        ))
+                        n += 1
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                for it in items:
+                    conn.execute(sql, (
+                        digest_date, digest_type, it.get("article_id"),
+                        it.get("rank"), it.get("category"),
+                        it.get("relevance_score"), it.get("final_score"),
+                        it.get("selected_reason"),
+                    ))
+                    n += 1
+                conn.commit()
+            return n
+        except sqlite3.Error as e:
+            logger.error("save_digest_entries 失败: %s", e)
+            return 0
+
+    def list_digest_article_ids_since(self, digest_type: str, since_date: str,
+                                      before_date: str = "9999-12-31") -> list[int]:
+        try:
+            sql = (
+                "SELECT DISTINCT article_id FROM digest_entries "
+                "WHERE digest_type = ? AND digest_date >= ? AND digest_date < ?"
+            )
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (digest_type, since_date, before_date))
+                    return [r[0] for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (digest_type, since_date, before_date))
+            return [r[0] for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_digest_article_ids_since 失败: %s", e)
+            return []
 
     def list_articles_created_between(self, start: str, end: str) -> list[dict[str, Any]]:
         """按入库日期区间（本地时区，含头不含尾）列出文章。"""

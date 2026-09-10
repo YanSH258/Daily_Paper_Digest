@@ -188,6 +188,40 @@ const Library = {
     }
   },
 
+  async translateTitles() {
+    const btn = document.getElementById("translateBtn");
+    const items = this.lastItems || [];
+    if (!items.length) {
+      alert("当前页没有文献，请先加载文献库");
+      return;
+    }
+    if (!confirm(`用免费 MyMemory 接口翻译当前页 ${items.length} 条标题？（有日配额，失败会自动重试一次）`)) return;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "翻译中…";
+    }
+    try {
+      const res = await API.post("/api/articles/translate", {
+        ids: items.map((a) => a.id),
+        limit: items.length,
+        provider: "mymemory",
+      });
+      if (!res.ok) throw new Error(res.error || "翻译失败");
+      alert(`当前页：新译 ${res.translated} · 已有/跳过 ${res.skipped} · 失败 ${res.failed}`);
+      if (res.failed > 0) {
+        alert("仍有失败条目，可再点一次「译标题」补译。");
+      }
+      this.load();
+    } catch (e) {
+      alert("翻译失败: " + e.message);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "译标题";
+      }
+    }
+  },
+
   journalMeta(a) {
     const parts = [];
     parts.push(API.esc(a.journal || "未知期刊"));
@@ -262,6 +296,7 @@ const Library = {
       try { history.replaceState(null, "", "#" + params.toString()); } catch (e) {}
     const data = await API.get("/api/articles?" + params.toString());
       this.total = data.total ?? data.items.length;
+      this.lastItems = data.items || [];
       this.renderCards(data.items);
       this.renderRows(data.items);
       this.renderJournals(data.journals);
@@ -318,7 +353,9 @@ const Library = {
           <button class="star-btn ${a.starred ? "on" : ""}" data-star="${a.id}" data-val="${a.starred ? 1 : 0}"
             title="${a.starred ? "取消收藏" : "收藏"}">${a.starred ? "★" : "☆"}</button>
         </div>
-        <div class="feed-card-title title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</div>
+        <div class="feed-card-title title-link" data-id="${a.id}">${
+          a.title_zh ? `<div class="title-zh">${API.esc(a.title_zh)}</div>` : ""
+        }${API.esc(API.cleanTitle(a.title || ""))}</div>
         ${a.relevance_reason ? `<div class="today-reason"><b>推荐理由：</b>${API.esc(a.relevance_reason)}</div>` : ""}
         <div class="feed-card-authors">${API.esc(a.authors || "-")}</div>
         <div class="feed-card-foot">
@@ -367,7 +404,9 @@ const Library = {
         <td>${API.esc(a.journal || "")}${a.impact_factor != null && a.impact_factor !== ""
           ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${a.cas_zone ? " · Q" + a.cas_zone : ""}</div>`
           : ""}</td>
-        <td><span class="title-link" data-id="${a.id}">${API.esc(API.cleanTitle(a.title || ""))}</span></td>
+        <td><span class="title-link" data-id="${a.id}">${
+          a.title_zh ? `<div class="title-zh">${API.esc(a.title_zh)}</div>` : ""
+        }${API.esc(API.cleanTitle(a.title || ""))}</span></td>
         <td>${tagBadges}</td>
         <td>${statusMap[a.read_status] || "—"}</td>
         <td>${API.esc(a.pub_date || "")}</td>

@@ -8,8 +8,9 @@
 
 ## 源码地图
 
-- `src/main.py`：配置加载、环境变量、RunLock、分阶段流水线、调度、周报及备份入口。
-- `src/core/db.py`：SQLite、迁移、文章处理状态、阅读数据、专题和任务记录。
+- `src/main.py`：配置加载、环境变量、RunLock、分阶段流水线、调度、周报及备份入口；`--digest-dry-run` / `--digest` 为 Phase0 Top-N 选择。
+- `src/digest/`：Phase0 每日 Top-N（规则分类、freshness、软配额选择器、dry-run 解释）。
+- `src/core/db.py`：SQLite、迁移、文章处理状态、阅读数据、专题、digest_entries 和任务记录。
 - `src/core/analyzer.py`：评分、分析、证据上下文、流式问答和模型用量。
 - `src/core/fetcher.py`、`src/fetchers/`：RSS、HTML/PDF/OA/浏览器回退；共享契约以 `fetchers/models.py` 为准。
 - `src/core/tracking.py`、`src/integrations/`：作者/引文发现、OpenAlex、Zotero、WoS。

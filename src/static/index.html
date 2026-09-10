@@ -114,6 +114,7 @@
           <button onclick="Library.search()">查询</button>
           <button class="secondary" id="cleanupLowBtn" onclick="Library.cleanupLow()" title="删除低分且无收藏/笔记/标签/阅读状态的文献">清理低分</button>
           <button class="secondary" id="manualAddToggle" onclick="Library.toggleManualAdd()" title="通过 DOI 或标题手动入库">＋ 手动添加</button>
+          <button class="secondary" id="translateBtn" onclick="Library.translateTitles()" title="用免费接口翻译标题为中文">译标题</button>
           <div class="view-mode-toggle">
             <button type="button" class="view-mode-btn active" id="viewModeCard" onclick="Library.setViewMode('card')" title="卡片视图">📰 卡片</button>
             <button type="button" class="view-mode-btn" id="viewModeTable" onclick="Library.setViewMode('table')" title="表格视图">📋 表格</button>

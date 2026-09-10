@@ -282,7 +282,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
             "starred, tags, created_at, topic, relevance_reason, score_status, "
             "evidence_level, analysis_status, read_status, relevance_feedback, "
-            "zotero_key, discovered_via, cited_count, sim_prior, "
+            "zotero_key, discovered_via, cited_count, sim_prior, title_zh, "
             "jm.if_value AS impact_factor, jm.cas_zone AS cas_zone "
             "FROM articles a "
             "LEFT JOIN journal_metrics jm ON a.journal = jm.name "
@@ -594,6 +594,76 @@ def _journal_metrics_upsert(ctx: WebContext, data: dict[str, Any]) -> tuple[dict
 def _journal_metrics_reseed(ctx: WebContext) -> tuple[dict[str, Any], int]:
     n = ctx.db.reseed_journal_metrics()
     return {"ok": True, "updated": n, "items": ctx.db.list_journal_metrics()}, 200
+
+
+def _batch_translate_titles(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """批量用免费接口翻译标题（默认 MyMemory）。
+
+    传 ids：只翻译这些文章（适合「当前页」）；
+    不传 ids：按全局高相关未译条目取 limit 条。
+    """
+    from utils.translate import looks_chinese, translate_title
+
+    try:
+        limit = int(data.get("limit") or 30)
+    except (TypeError, ValueError):
+        limit = 30
+    limit = max(1, min(limit, 100))
+    provider = str(data.get("provider") or "mymemory").strip().lower()
+    email = str(ctx.config.get("unpaywall_email") or "")
+    libre_url = str(data.get("libre_url") or "")
+    libre_key = str(data.get("libre_key") or "")
+
+    ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()][:limit]
+    if ids:
+        rows = [
+            {"id": a["id"], "title": a.get("title"), "title_zh": a.get("title_zh")}
+            for a in ctx.db.get_articles_by_ids(ids)
+        ]
+    else:
+        rows = ctx.db.list_untranslated_titles(limit=limit)
+
+    translated = 0
+    skipped = 0
+    failed = 0
+    for row in rows:
+        aid = row.get("id")
+        title = (row.get("title") or "").strip()
+        if aid is None or not title:
+            skipped += 1
+            continue
+        # 已有译文则跳过（按 ids 重跑时不会重复请求）
+        if (row.get("title_zh") or "").strip() and not data.get("force"):
+            skipped += 1
+            continue
+        if looks_chinese(title):
+            ctx.db.update_article_fields(aid, title_zh=title)
+            skipped += 1
+            continue
+        zh = translate_title(
+            title, provider=provider,
+            libre_url=libre_url, libre_key=libre_key, email=email, pause=0.4,
+        )
+        if not zh:
+            # 一次重试，缓解免费接口偶发失败
+            time.sleep(1.2)
+            zh = translate_title(
+                title, provider=provider,
+                libre_url=libre_url, libre_key=libre_key, email=email, pause=0.2,
+            )
+        if zh:
+            if ctx.db.update_article_fields(aid, title_zh=zh):
+                translated += 1
+        else:
+            failed += 1
+    return {
+        "ok": True,
+        "candidates": len(rows),
+        "translated": translated,
+        "skipped": skipped,
+        "failed": failed,
+        "provider": provider,
+    }, 200
 
 
 def _batch_update(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -1955,6 +2025,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"ok": True, **result})
                 except Exception as e:  # noqa: BLE001
                     self._json_response({"ok": False, "error": str(e)}, code=500)
+                return
+
+            if path == "/api/articles/translate":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload, code = _batch_translate_titles(self.ctx, data)
+                self._json_response(payload, code=code)
                 return
 
             if path == "/api/articles/cleanup":
