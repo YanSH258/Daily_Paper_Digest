@@ -410,6 +410,19 @@ details[open] summary::before { content: "− "; }
 }
 body.dark .jmetric { background: #1d3a55; color: #8ec5ff; }
 
+.danger-btn {
+  border-color: #d4a5a5 !important;
+  color: var(--red-fg, #9f2f2d) !important;
+}
+.danger-btn:hover {
+  background: var(--red-bg, #fdebec) !important;
+  border-color: var(--red-fg, #9f2f2d) !important;
+}
+body.dark .danger-btn {
+  border-color: #6b3a3a !important;
+  color: #f0a0a0 !important;
+}
+
 /* ══════ 键盘焦点 / 轻提示 ══════ */
 .kb-focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .toast-bar { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);

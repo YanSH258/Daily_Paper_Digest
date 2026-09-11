@@ -461,6 +461,28 @@ const Library = {
     } catch (e) { alert("批量更新失败: " + e.message); }
   },
 
+  async batchDelete() {
+    if (!this.selection.size) return;
+    const n = this.selection.size;
+    if (!confirm(`确定从文献库删除选中的 ${n} 篇吗？\n\n会一并删除聊天记录、划线、专题关联等。\n此操作不可恢复。`)) {
+      return;
+    }
+    if (!confirm(`再次确认：永久删除 ${n} 篇？`)) return;
+    try {
+      const resp = await API.post("/api/articles/batch-delete", {
+        ids: [...this.selection],
+        confirm: true,
+      });
+      if (!resp.ok) throw new Error(resp.error || "删除失败");
+      alert(`已删除 ${resp.deleted} 篇`);
+      this.selection.clear();
+      this.page = 0;
+      this.load();
+    } catch (e) {
+      alert("删除失败: " + e.message);
+    }
+  },
+
   async batchPushZotero() {
     if (!this.selection.size) return;
     if (!confirm(`确定把选中的 ${this.selection.size} 篇推送到 Zotero 吗？`)) return;

@@ -929,6 +929,47 @@ class Database:
             logger.error("删除低分文献失败: %s", e)
             raise
 
+    def delete_articles_by_ids(self, ids: list[int]) -> int:
+        """按 id 手动删除文章，并清理关联表。返回实际删除条数。"""
+        ids = [int(i) for i in ids or [] if str(i).isdigit()]
+        if not ids:
+            return 0
+        ph = ",".join("?" for _ in ids)
+        related = (
+            "chat_messages", "highlights", "topic_papers", "digest_entries",
+            "watched_seeds", "citation_edges",
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    conn = self._memory_conn
+                    for table in related:
+                        if table == "citation_edges":
+                            conn.execute(
+                                f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
+                                ids + ids,
+                            )
+                        else:
+                            conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
+                    cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
+                    conn.commit()
+                    return cur.rowcount or 0
+            conn = self._conn()
+            for table in related:
+                if table == "citation_edges":
+                    conn.execute(
+                        f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
+                        ids + ids,
+                    )
+                else:
+                    conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
+            cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
+            conn.commit()
+            return cur.rowcount or 0
+        except sqlite3.Error as e:
+            logger.error("按 id 删除文章失败: %s", e)
+            raise
+
     def list_low_relevance_rows(self, min_score: float) -> list[dict[str, Any]]:
         """导出用：返回将被清理的文章完整关键字段。"""
         clause, params = self._cleanup_where(min_score)

@@ -680,6 +680,25 @@ def _batch_update(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any]
     return {"ok": True, "updated": updated, "requested": len(ids)}, 200
 
 
+def _batch_delete_articles(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """手动删除选中文献（连带聊天/划线/专题/追踪/digest 关联）。"""
+    ids = data.get("ids") or []
+    ids = [int(i) for i in ids if str(i).isdigit()][:500]
+    if not ids:
+        return {"ok": False, "error": "ids 不能为空"}, 400
+    if not data.get("confirm"):
+        return {
+            "ok": False,
+            "error": "需要 confirm=true 才能删除",
+            "requested": len(ids),
+        }, 400
+    try:
+        deleted = ctx.db.delete_articles_by_ids(ids)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"删除失败: {e}"}, 500
+    return {"ok": True, "deleted": deleted, "requested": len(ids)}, 200
+
+
 def _citation(ctx: WebContext, article_id: int, fmt: str) -> tuple[str, int, str]:
     from utils.citation import format_article_citation
     item = _get_article_detail(ctx, article_id)
@@ -2115,6 +2134,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_token():
                     return
                 payload, code = _journal_metrics_reseed(self.ctx)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/articles/batch-delete":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                payload, code = _batch_delete_articles(self.ctx, data)
                 self._json_response(payload, code=code)
                 return
 
