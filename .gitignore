@@ -47,3 +47,7 @@ config/*.bak*
 data/logs/
 *.log
 .zcode/
+
+# Local docs / plans / reviews (not for public repo)
+docs/
+
