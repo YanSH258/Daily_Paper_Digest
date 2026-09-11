@@ -1,8 +1,39 @@
 import unittest
 import sqlite3
+import tempfile
+import unittest.mock
+from pathlib import Path
+from types import SimpleNamespace
+
 from core.db import Database, _compute_title_hash
 from core.notifier import classify_article
-from core.analyzer import LLMAnalyzer, LLMResponseParseError
+from core.analyzer import LLMAnalyzer, LLMError, LLMResponseParseError
+from utils.paths import PROJECT_ROOT, resolve_against_root
+
+
+class TestResolveAgainstRoot(unittest.TestCase):
+    """相对输出路径统一锚定项目根。
+
+    回归背景：notifier/reanalyze 用 parent.parent 把相对路径锚到了 src/
+    （少锚一级），日报被写到 src/data/output，而网页预览读 data/output，
+    导致日报预览 404。
+    """
+
+    def test_relative_path_anchored_to_project_root(self):
+        resolved = resolve_against_root("data/output")
+        self.assertEqual(resolved, PROJECT_ROOT / "data/output")
+        # 关键回归断言：解析结果不得落在 src/ 下
+        self.assertNotIn("src", resolved.parts)
+
+    def test_absolute_path_unchanged(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.assertEqual(resolve_against_root(tmp / "out"), tmp / "out")
+
+    def test_notifier_uses_shared_resolver(self):
+        # Notifier 对相对 output_dir 的解析与共享锚定一致
+        from core.notifier import Notifier
+        n = Notifier({"output": {"output_dir": "data/output"}})
+        self.assertEqual(n.output_dir, PROJECT_ROOT / "data/output")
 
 
 class TestDailyPaperDigestCore(unittest.TestCase):
@@ -106,6 +137,81 @@ class TestDailyPaperDigestCore(unittest.TestCase):
         # 4. 异常解析抛出 LLMResponseParseError
         with self.assertRaises(LLMResponseParseError):
             analyzer._parse_json("Not a valid json at all")
+
+
+class TestCallLLMErrorHandling(unittest.TestCase):
+    """_call_llm 对确定性 4xx 错误（如模型名写错）不重试、立即失败。
+
+    回归背景：2026-09-11 模型名写错导致 59 篇评分对 HTTP 400 反复重试
+    3 次，空耗约 5.5 分钟。
+    """
+
+    def _make_analyzer_with_status_error(self, status_code):
+        dummy_config = {
+            "llm": {
+                "provider": "deepseek",
+                "deepseek": {"api_key": "fake", "base_url": "https://fake.api.com", "model": "bad-model"},
+            }
+        }
+        analyzer = LLMAnalyzer(dummy_config)
+
+        import httpx2
+        import openai
+
+        def raise_status_error(*args, **kwargs):
+            req = httpx2.Request("POST", "https://fake.api.com/chat/completions")
+            resp = httpx2.Response(
+                status_code, request=req,
+                json={"error": {"message": f"The supported API model names are deepseek-flash, "
+                                           f"but you passed bad-model.", "type": "invalid_request_error"}},
+            )
+            raise openai.APIStatusError(f"Error code: {status_code}", response=resp, body=None)
+
+        analyzer.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=raise_status_error))
+        )
+        return analyzer
+
+    def test_400_no_retry(self):
+        # 400（无效模型名）：立即失败，不 sleep、不重复请求
+        analyzer = self._make_analyzer_with_status_error(400)
+        with unittest.mock.patch("core.analyzer.time.sleep") as mock_sleep:
+            with self.assertRaises(LLMError) as cm:
+                analyzer._call_llm("hello")
+            mock_sleep.assert_not_called()
+        self.assertIn("客户端错误", str(cm.exception))
+        self.assertIn("HTTP 400", str(cm.exception))
+
+    def test_500_still_retries(self):
+        # 5xx（服务端错误）：保留重试
+        analyzer = self._make_analyzer_with_status_error(500)
+        with unittest.mock.patch("core.analyzer.time.sleep") as mock_sleep:
+            with self.assertRaises(LLMError):
+                analyzer._call_llm("hello")
+            self.assertTrue(mock_sleep.called)
+
+    def test_unicode_encode_error_no_retry(self):
+        # 占位符 API Key（中文）导致请求头编码失败：确定性错误，立即失败不重试
+        dummy_config = {
+            "llm": {
+                "provider": "deepseek",
+                "deepseek": {"api_key": "fake", "base_url": "https://fake.api.com", "model": "m1"},
+            }
+        }
+        analyzer = LLMAnalyzer(dummy_config)
+
+        def raise_unicode(*args, **kwargs):
+            raise UnicodeEncodeError("ascii", "Bearer 填入你的_QWEN_API_KEY", 7, 11,
+                                     "ordinal not in range(128)")
+
+        analyzer.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=raise_unicode))
+        )
+        with unittest.mock.patch("core.analyzer.time.sleep") as mock_sleep:
+            with self.assertRaises(LLMError) as cm:
+                analyzer._call_llm("hello")
+            mock_sleep.assert_not_called()
+        self.assertIn("占位符", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from core.db import Database
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import classify_article
 from main import load_config, load_config_from_obj, run_once, setup_logging, validate_config
+from utils.paths import resolve_against_root
 
 logger = logging.getLogger("web")
 
@@ -194,7 +195,7 @@ class WebContext:
         self.fetcher = JournalFetcher(self.config)
 
         output_cfg = self.config.get("output", {})
-        self.output_dir = Path(output_cfg.get("output_dir", "data/output")).resolve()
+        self.output_dir = resolve_against_root(output_cfg.get("output_dir", "data/output"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         db_path = self.config.get("database", {}).get("path", "data/db/chem_daily.db")
@@ -552,7 +553,7 @@ def _cleanup_export_csv(ctx: WebContext, data: dict[str, Any]) -> tuple[str, int
     fname = f"cleanup-backup-lt{min_score:g}-{datetime.now():%Y%m%d-%H%M%S}.csv"
     try:
         out_cfg = ctx.config.get("output") or {}
-        out_dir = Path(str(out_cfg.get("dir") or "data/output"))
+        out_dir = resolve_against_root(out_cfg.get("output_dir") or "data/output")
         out_dir.mkdir(parents=True, exist_ok=True)
         backup_path = out_dir / fname
         backup_path.write_text("﻿" + buf.getvalue(), encoding="utf-8")
@@ -1244,6 +1245,20 @@ def _set_article_tags(ctx: WebContext, article_id: int, data: dict[str, Any]) ->
     return _article_action_result(ctx, article_id)
 
 
+def _llm_credential_check(provider: str, base_url: str, api_key: str) -> Optional[str]:
+    """构造请求前的健全性检查：请求头/URL 含非 ASCII 字符时必然编码失败。
+
+    典型场景：provider 里保存的还是模板占位符（如「填入你的_QWEN_API_KEY」），
+    发请求时报 UnicodeEncodeError，用户看到的却是无意义的编码错误。
+    """
+    if not base_url.isascii():
+        return f"Base URL 含非 ASCII 字符，请检查提供方「{provider}」的地址是否误填了中文占位符"
+    if not api_key.isascii():
+        return (f"API Key 含非 ASCII 字符，疑似提供方「{provider}」保存的还是未替换的占位符。"
+                "请在表单 API Key 框填入真实 Key 后重试")
+    return None
+
+
 def _test_llm(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """测试 LLM API 可用性。
 
@@ -1269,6 +1284,9 @@ def _test_llm(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], in
         return {"ok": False, "error": f"缺少 {'、'.join(missing)}（表单和已保存配置中都没有）"}, 400
     if not base_url.lower().startswith(("http://", "https://")):
         return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
+    cred_err = _llm_credential_check(provider, base_url, api_key)
+    if cred_err:
+        return {"ok": False, "error": cred_err}, 400
 
     import openai as _openai
     client = _openai.OpenAI(api_key=api_key, base_url=base_url, timeout=25, max_retries=0)
@@ -1304,6 +1322,65 @@ def _test_llm(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], in
         "base_url": base_url,
         "provider": provider,
         "reply": reply,
+    }, 200
+
+
+def _llm_models(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """列出该 Base URL 端点上可用的模型（OpenAI 兼容 GET /models，不产生 token 消耗）。
+
+    表单值可选传入（provider/base_url/api_key）；api_key 留空时回退到该
+    provider 已保存的 key。不需要 model——这一接口的目的就是帮用户发现
+    正确的模型名（config 里模型名写错时评分会整体失败）。
+    """
+    llm_cfg = ctx.config.get("llm", {}) or {}
+    provider = str(data.get("provider") or "").strip() or str(llm_cfg.get("provider") or "deepseek")
+    provider_cfg = llm_cfg.get(provider, {}) or {}
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {}
+
+    base_url = str(data.get("base_url") or "").strip() or str(provider_cfg.get("base_url") or "").strip()
+    api_key = str(data.get("api_key") or "").strip() or str(provider_cfg.get("api_key") or "").strip()
+
+    missing = [
+        label for label, val in
+        [("Base URL", base_url), ("API Key", api_key)]
+        if not val
+    ]
+    if missing:
+        return {"ok": False, "error": f"缺少 {'、'.join(missing)}（表单和已保存配置中都没有）"}, 400
+    if not base_url.lower().startswith(("http://", "https://")):
+        return {"ok": False, "error": "Base URL 必须以 http:// 或 https:// 开头"}, 400
+    cred_err = _llm_credential_check(provider, base_url, api_key)
+    if cred_err:
+        return {"ok": False, "error": cred_err}, 400
+
+    import openai as _openai
+    client = _openai.OpenAI(api_key=api_key, base_url=base_url, timeout=25, max_retries=0)
+    try:
+        resp = client.models.list()
+    except _openai.AuthenticationError as e:
+        return {"ok": False, "error": f"认证失败：API key 无效或账户余额不足（{e}）"}, 200
+    except _openai.RateLimitError as e:
+        return {"ok": False, "error": f"速率限制/配额不足（{e}）"}, 200
+    except _openai.APITimeoutError as e:
+        return {"ok": False, "error": f"请求超时（25s）：{e}"}, 200
+    except _openai.APIStatusError as e:
+        status_code = getattr(e, "status_code", "?")
+        hint = "该端点不支持模型列表接口" if status_code in (404, 405) else ""
+        return {"ok": False, "error": f"API 返回错误 HTTP {status_code}：{e}{'；' + hint if hint else ''}"}, 200
+    except Exception as e:  # noqa: BLE001 - 列表探测需要把任何失败反馈给前端
+        return {"ok": False, "error": f"获取失败：{type(e).__name__}: {e}"}, 200
+
+    models = sorted({
+        str(m.id) for m in (getattr(resp, "data", None) or [])
+        if getattr(m, "id", None)
+    })
+    return {
+        "ok": True,
+        "models": models,
+        "count": len(models),
+        "base_url": base_url,
+        "provider": provider,
     }, 200
 
 
@@ -2201,6 +2278,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 data = _read_json_body(self)
                 payload, code = _test_llm(self.ctx, data)
+                self._json_response(payload, code=code)
+                return
+
+            if path == "/api/llm/models":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self)
+                payload, code = _llm_models(self.ctx, data)
                 self._json_response(payload, code=code)
                 return
 

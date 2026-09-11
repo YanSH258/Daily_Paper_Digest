@@ -111,7 +111,7 @@ class LLMAnalyzer:
             api_key=provider_cfg["api_key"],
             base_url=provider_cfg["base_url"],
         )
-        self.model: str = provider_cfg.get("model", "deepseek-v4-flash")
+        self.model: str = provider_cfg.get("model", "deepseek-flash")
         # 反馈注入（推荐质量闭环）：liked/disliked 样例由流水线设置
         self.feedback_examples: dict[str, list[dict[str, str]]] = {"liked": [], "disliked": []}
         # Token 用量统计（成本观测）
@@ -762,6 +762,18 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
 
             except openai.APIStatusError as e:
                 status_code = getattr(e, "status_code", "N/A")
+                # 4xx 客户端错误（无效模型名、非法请求等）是确定性的，重试必然同样失败
+                if isinstance(status_code, int) and 400 <= status_code < 500:
+                    logger.error(
+                        "[LLM_API_ERROR] 客户端错误（HTTP %s），不重试 | provider=%s | model=%s: %s",
+                        status_code,
+                        self.provider,
+                        self.model,
+                        e,
+                    )
+                    raise LLMError(
+                        f"API 客户端错误（HTTP {status_code}），不重试（请检查模型名/请求参数）: {e}"
+                    ) from e
                 delay = LLM_RETRY_BASE_DELAY * (attempt + 1)
                 if attempt < retry - 1:
                     logger.warning(
@@ -787,6 +799,18 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
                     raise LLMError(
                         f"API 错误（HTTP {status_code}），重试 {retry} 次后仍失败: {e}"
                     ) from e
+
+            except UnicodeEncodeError as e:
+                # 请求头/URL 含非 ASCII 字符（如占位符 API Key）在构造请求时必然失败，重试无意义
+                logger.error(
+                    "[LLM_INPUT_ERROR] 请求参数含非 ASCII 字符，不重试 | provider=%s | model=%s: %s",
+                    self.provider,
+                    self.model,
+                    e,
+                )
+                raise LLMError(
+                    "请求参数含非 ASCII 字符（请检查 API Key / Base URL 是否为未替换的中文占位符）"
+                ) from e
 
             except Exception as e:
                 delay = LLM_RETRY_BASE_DELAY * (attempt + 1)

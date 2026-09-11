@@ -16,23 +16,32 @@ const Settings = {
     const known = llm.providers || {};
     const knownNames = Object.keys(known);
 
-    let providerOptions = "";
-    for (const name of ["deepseek", "qwen", ...knownNames.filter((n) => n !== "deepseek" && n !== "qwen")]) {
-      providerOptions += `<option value="${API.esc(name)}" />`;
-    }
+    // 提供方下拉：当前值 + 常见默认项 + 已保存的提供方；"✏️ 新建"入口保留自定义命名
+    const providerNames = [...new Set([llm.provider, "deepseek", "qwen", ...knownNames].filter(Boolean))];
+    const providerOptions = providerNames.map((name) =>
+      `<option value="${API.esc(name)}"${name === llm.provider ? " selected" : ""}>${API.esc(name)}${known[name] ? "" : "（未配置）"}</option>`
+    ).join("");
+    const currentModel = llm.model || "";
 
     return `
       <div class="card"><h3>模型</h3>
-        ${this.fieldRow("提供方", `<input id="s_provider" list="providerList" value="${API.esc(llm.provider || "")}" placeholder="deepseek / qwen / 自定义名" onchange="Settings.onProviderChange()" oninput="Settings.onProviderChange()" />
-          <datalist id="providerList">${providerOptions}</datalist>`)}
-        ${this.fieldRow("Base URL", `<input id="s_baseurl" value="${API.esc(llm.base_url || "")}" placeholder="https://api.deepseek.com 等任意 OpenAI 兼容地址" />`)}
-        ${this.fieldRow("模型名", `<input id="s_model" value="${API.esc(llm.model || "")}" placeholder="deepseek-v4-flash / deepseek-v4-pro / 任意模型名" />`)}
-        ${this.fieldRow("API Key", `<input id="s_apikey" type="password" placeholder="${llm.api_key_set ? "已配置（" + API.esc(llm.api_key_masked) + "），留空保持不变" : "未配置，请输入"}" />`)}
+        ${this.fieldRow("提供方", `<select id="s_provider" onchange="Settings.onProviderChange()">${providerOptions}
+            <option value="__custom__">✏️ 新建提供方…</option></select>
+          <input id="s_provider_custom" style="display:none;" placeholder="输入新提供方名，如 siliconflow" />`)}
+        ${this.fieldRow("Base URL", `<input id="s_baseurl" value="${API.esc(llm.base_url || "")}" placeholder="https://api.deepseek.com 等任意 OpenAI 兼容地址" oninput="Settings.onBaseUrlInput()" onblur="Settings.maybeAutoFetchModels()" />`)}
+        ${this.fieldRow("模型名", `<select id="s_model" onchange="Settings.onModelSelectChange()">
+            ${currentModel
+              ? `<option value="${API.esc(currentModel)}" selected>${API.esc(currentModel)}</option>`
+              : `<option value="" selected>—— 填好 Base URL 后自动加载 ———</option>`}
+            <option value="__custom__">✏️ 手动输入模型名…</option></select>
+          <input id="s_model_custom" style="display:none;" placeholder="输入模型名" />
+          <button type="button" class="secondary small-btn" onclick="Settings.fetchModels()">刷新模型</button>`)}
+        ${this.fieldRow("API Key", `<input id="s_apikey" type="password" placeholder="${llm.api_key_set ? "已配置（" + API.esc(llm.api_key_masked) + "），留空保持不变" : "未配置，请输入"}" oninput="Settings.onApiKeyInput()" onblur="Settings.maybeAutoFetchModels()" />`)}
         <div class="row" style="margin-top:12px;">
           <button class="secondary" onclick="Settings.testLLM()">测试连接</button>
           <span id="llmTestMsg" class="small"></span>
         </div>
-        <p class="small" style="margin:10px 0 0;">提供方可任意命名（如 zhipu、siliconflow、自定义）；Base URL 填 OpenAI 兼容接口地址，四项会一起保存在该提供方下。测试连接会按当前表单值实测一次对话接口（Key 留空时用已保存的 Key）。</p>
+        <p class="small" style="margin:10px 0 0;">提供方下拉选择，✏️ 可新建任意名称；Base URL 填 OpenAI 兼容接口地址，填好后自动探测该端点的可用模型（也可点「刷新模型」），模型直接在下拉框里选（✏️ 仍可手动输入）。测试连接按当前表单值实测一次对话接口（Key 留空时用已保存的 Key）。</p>
       </div>
       <div class="card"><h3>相关性过滤</h3>
         ${this.fieldRow("阈值（0-10）", `<input id="s_threshold" type="number" min="0" max="10" step="0.5" value="${API.esc(c.relevance_threshold ?? 4)}" />`)}
@@ -83,26 +92,107 @@ const Settings = {
     `;
   },
 
+  /** 读取当前表单里的提供方名（下拉或"新建"输入框） */
+  getProvider() {
+    const sel = document.getElementById("s_provider");
+    if (!sel) return "";
+    if (sel.value === "__custom__") {
+      return (document.getElementById("s_provider_custom")?.value ?? "").trim();
+    }
+    return (sel.value || "").trim();
+  },
+
+  /** 读取当前表单里的模型名（下拉或"手动输入"框） */
+  getModelValue() {
+    const sel = document.getElementById("s_model");
+    if (!sel) return "";
+    if (sel.value === "__custom__") {
+      return (document.getElementById("s_model_custom")?.value ?? "").trim();
+    }
+    return (sel.value || "").trim();
+  },
+
   onProviderChange() {
-    // 切换提供方时，回填该提供方已知的 base_url / model；API Key 出于安全只在已配置时提示占位
-    // 仅在提供方名字与上次不同时回填，避免在输入框里逐字编辑时误清空其他字段
-    const name = document.getElementById("s_provider").value.trim();
-    if (name === this._lastProviderName) return;
-    this._lastProviderName = name;
+    // 切换提供方（下拉）：回填该提供方已保存的 base_url / model；选"新建"时显示名称输入框
+    const sel = document.getElementById("s_provider");
+    if (!sel) return;
+    const customEl = document.getElementById("s_provider_custom");
+    if (sel.value === "__custom__") {
+      if (customEl) { customEl.style.display = ""; customEl.focus(); }
+      this._fillProviderFields("");  // 新提供方：清空待填
+    } else {
+      if (customEl) customEl.style.display = "none";
+      this._fillProviderFields(sel.value);
+    }
+    this.maybeAutoFetchModels();  // 切换提供方后自动探测该端点的模型
+  },
+
+  /** Base URL 输入：停顿 ~0.8s 后自动探测（避免每敲一个字符发一次请求） */
+  onBaseUrlInput() {
+    clearTimeout(this._urlDebounce);
+    this._urlDebounce = setTimeout(() => this.maybeAutoFetchModels(), 800);
+  },
+
+  /** Key 变化后允许对同一 URL 重新探测 */
+  onApiKeyInput() {
+    this._autoFetchSig = null;
+  },
+
+  /** 满足条件时自动探测可用模型：URL 合法且有可用 Key（表单或已保存），同址同 Key 不重复探测 */
+  async maybeAutoFetchModels() {
+    clearTimeout(this._urlDebounce);
+    const url = (document.getElementById("s_baseurl")?.value ?? "").trim();
+    if (!url || !/^https?:\/\/[^\s/]+\.[^\s/]+/i.test(url)) return;
+    const formKey = (document.getElementById("s_apikey")?.value ?? "").trim();
+    const provider = this.getProvider();
+    const saved = this.cached && this.cached.llm && this.cached.llm.providers
+      ? this.cached.llm.providers[provider] : null;
+    if (!formKey && !(saved && saved.api_key_set)) return;  // 无 Key 可用，探测必然失败，保持安静
+    const sig = `${url}|${formKey ? "form-key" : `saved:${provider}`}`;
+    if (sig === this._autoFetchSig || this._fetchInFlight) return;
+    this._autoFetchSig = sig;
+    await this.fetchModels(true);
+  },
+
+  onModelSelectChange() {
+    const sel = document.getElementById("s_model");
+    const customEl = document.getElementById("s_model_custom");
+    if (!sel || !customEl) return;
+    if (sel.value === "__custom__") { customEl.style.display = ""; customEl.focus(); }
+    else customEl.style.display = "none";
+  },
+
+  /** 重建模型下拉：current 作为当前选项（不在列表时带"不在列表中"标记便于发现） */
+  _setModelOptions(current, models = []) {
+    const sel = document.getElementById("s_model");
+    if (!sel) return;
+    current = (current || "").trim();
+    let opts = models.map((m) =>
+      `<option value="${API.esc(m)}"${m === current ? " selected" : ""}>${API.esc(m)}</option>`).join("");
+    if (current && !models.includes(current)) {
+      opts = `<option value="${API.esc(current)}" selected>${API.esc(current)}（不在列表中）</option>` + opts;
+    }
+    if (!opts) {
+      opts = `<option value="" selected>—— 点击「获取可用模型」加载 ———</option>`;
+    }
+    sel.innerHTML = opts + `<option value="__custom__">✏️ 手动输入模型名…</option>`;
+    this.onModelSelectChange();
+  },
+
+  _fillProviderFields(name) {
     const known = this.cached && this.cached.llm && this.cached.llm.providers
       ? this.cached.llm.providers[name] : null;
     const baseUrlEl = document.getElementById("s_baseurl");
-    const modelEl = document.getElementById("s_model");
     const keyEl = document.getElementById("s_apikey");
-    if (!baseUrlEl || !modelEl || !keyEl) return;
+    if (!baseUrlEl || !keyEl) return;
     if (known) {
       baseUrlEl.value = known.base_url || "";
-      modelEl.value = known.model || "";
+      this._setModelOptions(known.model || "");
       keyEl.value = "";
       keyEl.placeholder = known.api_key_set ? "该提供方已配置 key，留空保持不变" : "未配置，请输入";
     } else {
       baseUrlEl.value = "";
-      modelEl.value = "";
+      this._setModelOptions("");
       keyEl.value = "";
       keyEl.placeholder = "未配置，请输入";
     }
@@ -110,14 +200,13 @@ const Settings = {
 
   async testLLM() {
     const msgEl = document.getElementById("llmTestMsg");
-    const val = (id) => (document.getElementById(id)?.value ?? "").trim();
     msgEl.textContent = "测试中（最长 25 秒）...";
     try {
       const data = await API.post("/api/llm/test", {
-        provider: val("s_provider"),
-        base_url: val("s_baseurl"),
-        model: val("s_model"),
-        api_key: val("s_apikey"),
+        provider: this.getProvider(),
+        base_url: (document.getElementById("s_baseurl")?.value ?? "").trim(),
+        model: this.getModelValue(),
+        api_key: (document.getElementById("s_apikey")?.value ?? "").trim(),
       });
       if (data.ok) {
         msgEl.innerHTML = `<span class="ok">✓ 连接正常 · ${data.latency_ms}ms · 模型回复「${API.esc(data.reply || "(空)")}」</span>`;
@@ -126,6 +215,39 @@ const Settings = {
       }
     } catch (e) {
       msgEl.innerHTML = `<span class="err">✗ 测试失败: ${API.esc(e.message)}</span>`;
+    }
+  },
+
+  /** 按 Base URL 拉取端点上可用的模型列表，填入模型下拉框（auto=自动探测时的提示措辞） */
+  async fetchModels(auto = false) {
+    const msgEl = document.getElementById("llmTestMsg");
+    if (this._fetchInFlight) return;
+    this._fetchInFlight = true;
+    try {
+      msgEl.textContent = auto ? "正在自动探测可用模型..." : "获取模型列表中（最长 25 秒）...";
+      const data = await API.post("/api/llm/models", {
+        provider: this.getProvider(),
+        base_url: (document.getElementById("s_baseurl")?.value ?? "").trim(),
+        api_key: (document.getElementById("s_apikey")?.value ?? "").trim(),
+      });
+      if (!data.ok) {
+        msgEl.innerHTML = `<span class="err">✗ ${API.esc(data.error || "获取失败")}</span>`;
+        return;
+      }
+      const models = data.models || [];
+      const current = this.getModelValue();
+      this._setModelOptions(current, models);
+      let msg = `✓ 获取到 ${data.count} 个可用模型，已在下拉框中可选`;
+      if (current && !models.includes(current)) {
+        msg += `；当前填写的「${current}」不在列表中，请重新选择`;
+        msgEl.innerHTML = `<span class="err">${API.esc(msg)}</span>`;
+      } else {
+        msgEl.innerHTML = `<span class="ok">${API.esc(msg)}</span>`;
+      }
+    } catch (e) {
+      msgEl.innerHTML = `<span class="err">✗ 获取失败: ${API.esc(e.message)}</span>`;
+    } finally {
+      this._fetchInFlight = false;
     }
   },
 
@@ -222,9 +344,9 @@ const Settings = {
     const val = (id) => document.getElementById(id)?.value ?? "";
     const chk = (id) => document.getElementById(id)?.checked ?? false;
     const payload = {
-      "llm.provider": val("s_provider").trim(),
+      "llm.provider": this.getProvider(),
       "llm.base_url": val("s_baseurl").trim(),
-      "llm.model": val("s_model").trim(),
+      "llm.model": this.getModelValue(),
       "llm.api_key": val("s_apikey").trim(),
       "relevance_threshold": parseFloat(val("s_threshold")) || 0,
       "research_topics": val("s_topics").split("\n").map((s) => s.trim()).filter(Boolean),

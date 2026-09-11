@@ -8,7 +8,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -255,6 +257,115 @@ class TestWebServerAuth(unittest.TestCase):
     def test_chat_validation(self):
         code, _ = self._req("/api/articles/1/chat", method="POST", body={"question": ""}, token="test-token")
         self.assertEqual(code, 400)
+
+
+class TestLLMModelsEndpoint(unittest.TestCase):
+    """模型列表端点：按 Base URL 列出可用模型（不依赖 model 字段）。"""
+
+    def setUp(self):
+        import shutil
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        cfg = os.path.join(self.tmp, "config.yaml")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write(f"""
+database:
+  path: {os.path.join(self.tmp, 't.db')}
+llm:
+  provider: deepseek
+  deepseek:
+    api_key: sk-saved
+    base_url: https://saved.example.com
+""")
+        self.ctx = web_server.WebContext(config_path=cfg)
+
+    def test_missing_base_url_and_key(self):
+        # provider 无已存配置时，缺 base_url/api_key 返回 400
+        payload, code = web_server._llm_models(self.ctx, {"provider": "nobody"})
+        self.assertEqual(code, 400)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Base URL", payload["error"])
+
+    def test_bad_url_scheme(self):
+        payload, code = web_server._llm_models(
+            self.ctx, {"provider": "deepseek", "base_url": "ftp://x", "api_key": "sk-x"})
+        self.assertEqual(code, 400)
+        self.assertIn("http", payload["error"])
+
+    def test_form_values_take_priority_and_fallback(self):
+        # 表单值优先；api_key 留空回退已保存 key；不需要 model 字段
+        captured = {}
+
+        class FakeModels:
+            def list(self):
+                captured["auth"] = None
+                return SimpleNamespace(data=[
+                    SimpleNamespace(id="deepseek-v4-pro"),
+                    SimpleNamespace(id="deepseek-flash"),
+                    SimpleNamespace(id="deepseek-flash"),  # 去重
+                    SimpleNamespace(id=None),  # 脏数据跳过
+                ])
+
+        class FakeClient:
+            def __init__(self, api_key, base_url, **kwargs):
+                captured["api_key"] = api_key
+                captured["base_url"] = base_url
+                captured["timeout"] = kwargs.get("timeout")
+                self.models = FakeModels()
+
+        import openai as _openai
+        with unittest.mock.patch.object(_openai, "OpenAI", FakeClient):
+            payload, code = web_server._llm_models(
+                self.ctx, {"provider": "deepseek", "base_url": "https://form.example.com/v1"})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["models"], ["deepseek-flash", "deepseek-v4-pro"])  # 排序 + 去重
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(captured["api_key"], "sk-saved")  # 表单无 key → 回退已保存
+        self.assertEqual(captured["base_url"], "https://form.example.com/v1")
+        self.assertEqual(captured["timeout"], 25)  # 与 /api/llm/test 一致的短超时
+        self.assertNotIn("model", payload)  # 本端点与 model 无关
+
+    def test_auth_error_returns_ok_false(self):
+        import httpx2
+        import openai as _openai
+
+        class FakeModels:
+            def list(self):
+                req = httpx2.Request("GET", "https://x.example.com/models")
+                resp = httpx2.Response(401, request=req, json={"error": {"message": "bad key"}})
+                raise _openai.AuthenticationError("Auth failed", response=resp, body=None)
+
+        class FakeClient:
+            def __init__(self, api_key, base_url, **kwargs):
+                self.models = FakeModels()
+
+        with unittest.mock.patch.object(_openai, "OpenAI", FakeClient):
+            payload, code = web_server._llm_models(
+                self.ctx, {"provider": "deepseek", "base_url": "https://x.example.com", "api_key": "bad"})
+        self.assertEqual(code, 200)  # 探测失败是业务结果，不是服务器错误
+        self.assertFalse(payload["ok"])
+        self.assertIn("认证失败", payload["error"])
+
+    def test_non_ascii_api_key_rejected_before_request(self):
+        # 占位符 Key（中文）在构造请求头时必然编码失败，应在发请求前给出人话提示
+        for endpoint, payload_body in [
+            (web_server._llm_models, {"provider": "deepseek", "base_url": "https://x.example.com",
+                                      "api_key": "填入你的_QWEN_API_KEY"}),
+            (web_server._test_llm, {"provider": "deepseek", "base_url": "https://x.example.com",
+                                    "model": "m", "api_key": "填入你的_QWEN_API_KEY"}),
+        ]:
+            payload, code = endpoint(self.ctx, payload_body)
+            self.assertEqual(code, 400, payload)
+            self.assertFalse(payload["ok"])
+            self.assertIn("占位符", payload["error"])
+            self.assertIn("deepseek", payload["error"])  # 提示是哪个提供方的 Key 有问题
+
+    def test_non_ascii_base_url_rejected(self):
+        payload, code = web_server._llm_models(
+            self.ctx, {"provider": "deepseek", "base_url": "https://api.中文.com", "api_key": "sk-x"})
+        self.assertEqual(code, 400)
+        self.assertIn("Base URL 含非 ASCII", payload["error"])
 
 
 if __name__ == "__main__":

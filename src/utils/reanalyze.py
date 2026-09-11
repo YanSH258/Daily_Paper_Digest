@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.analyzer import LLMAnalyzer, PROMPT_VERSION
 from core.db import Database
 from fetchers.models import MAX_FULLTEXT_CHARS
+from utils.paths import resolve_against_root
 from utils.stat_db import build_html_index
 
 logging.basicConfig(level=logging.INFO,
@@ -271,9 +272,7 @@ def main() -> None:
         scan_uploads(conn, analyzer, upload_dir)
 
     print("刷新 HTML 索引页...")
-    out_dir = Path(config.get("output", {}).get("output_dir", "data/output"))
-    if not out_dir.is_absolute():
-        out_dir = Path(__file__).resolve().parent.parent / out_dir
+    out_dir = resolve_against_root(config.get("output", {}).get("output_dir", "data/output"))
     out_dir.mkdir(parents=True, exist_ok=True)
     build_html_index(conn, threshold, str(out_dir / "paper_index.html"))
     print("全部完成！")
