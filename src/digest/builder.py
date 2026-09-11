@@ -4,8 +4,24 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from .config import collect_daily_config
 from .scorer import score_article
-from .selector import DEFAULT_CATEGORY_LIMITS, SelectionResult, normalize_limits, select_daily_top
+from .selector import SelectionResult, select_daily_top
+
+
+# 候选池保护上限：防止极端大库拖慢评分；窗口内按 (pool_date desc, relevance desc,
+# id asc) 截取——id 唯一，保证截断结果确定（docs/DIGEST_RELEASE_SPEC.md §3.6）
+POOL_HARD_LIMIT = 2000
+
+
+def _pool_date_expr() -> str:
+    """文章的候选池日期：ISO 格式的 pub_date 优先，否则回退 created_at（入库日）。"""
+    return (
+        "COALESCE("
+        "CASE WHEN pub_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9]*' "
+        "THEN substr(pub_date, 1, 10) END, "
+        "substr(COALESCE(created_at, ''), 1, 10), '')"
+    )
 
 
 def _load_metrics(db) -> dict[str, dict]:
@@ -30,29 +46,38 @@ def build_daily_digest(
     dry_run=True 时只读库，不写 digest_entries。
     """
     date_str = date_str or datetime.now().strftime("%Y-%m-%d")
-    digest_cfg = (config.get("digest") or {}).get("daily") or {}
-    limit = int(digest_cfg.get("limit") or 10)
-    window_days = int(digest_cfg.get("repeat_window_days") or 30)
-    category_limits = normalize_limits(
-        digest_cfg.get("category_limits") or digest_cfg.get("quotas")
-    )
-    min_score = float(config.get("relevance_threshold") or 5)
+    # 配置归一化与校验唯一出口（digest.config）：非法配置直接抛错，不静默改默认
+    values, config_errors = collect_daily_config(config)
+    if config_errors:
+        raise ValueError("digest 配置无效: " + "; ".join(config_errors))
+    limit = values["limit"]
+    window_days = values["repeat_window_days"]
+    pool_window_days = values["pool_window_days"]
+    min_score = values["min_score"]
+    category_limits = values["category_limits"]
     top_journals = ((config.get("digest") or {}).get("tracks") or {}).get("top_chemistry", {}).get("journals")
 
     metrics = _load_metrics(db)
     now = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(hours=12)
 
-    # 候选池：已评分且达到阈值（不限今日，Phase 0 从全库选）
+    # 候选池：已评分达阈值 + 候选日期在 [报告日期−pool_window, 报告日期] 内。
+    # 上限即报告日期：未来发表的论文与历史重放日期之后才入库的文章不进池；
+    # created_at 独立限制（不经 COALESCE 回退）——发表日期早于报告日、
+    # 但入库日期晚于报告日的文章，在历史重放中同样排除（规范 §3.6/§5）
+    since_date = (
+        datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=pool_window_days)
+    ).strftime("%Y-%m-%d")
     conn = db._conn() if db._memory_conn is None else db._memory_conn
     rows = conn.execute(
-        "SELECT id, doi, title, journal, authors, pub_date, url, abstract, "
-        "relevance, relevance_reason, topic, analysis, evidence_level, created_at, title_zh "
-        "FROM articles "
-        "WHERE COALESCE(relevance, 0) >= ? "
-        "AND title IS NOT NULL AND trim(title) != '' "
-        "ORDER BY relevance DESC, created_at DESC "
-        "LIMIT 2000",
-        (min_score,),
+        f"SELECT id, doi, title, journal, authors, pub_date, url, abstract, "
+        f"relevance, relevance_reason, topic, analysis, evidence_level, created_at, title_zh "
+        f"FROM (SELECT *, {_pool_date_expr()} AS _pool_date FROM articles "
+        f"WHERE COALESCE(relevance, 0) >= ? AND title IS NOT NULL AND trim(title) != '') "
+        f"WHERE _pool_date >= ? AND _pool_date <= ? AND _pool_date != '' "
+        f"AND substr(COALESCE(created_at, ''), 1, 10) <= ? "
+        f"ORDER BY _pool_date DESC, relevance DESC, id ASC "
+        f"LIMIT {POOL_HARD_LIMIT}",
+        (min_score, since_date, date_str, date_str),
     ).fetchall()
     cols = [
         "id", "doi", "title", "journal", "authors", "pub_date", "url", "abstract",
@@ -113,6 +138,7 @@ def build_daily_digest(
         "min_score": min_score,
         "limit": limit,
         "repeat_window_days": window_days,
+        "pool_window_days": pool_window_days,
         "category_limits": category_limits,
         "articles_above_threshold": len(articles),
         "excluded_ids": excluded,
@@ -134,6 +160,7 @@ def format_dry_run_report(result: dict[str, Any], max_reject_notes: int = 12) ->
         f"Daily Digest Dry Run — {result['date']}",
         "=" * 48,
         f"Articles above threshold (≥{result['min_score']}):  {result['articles_above_threshold']}",
+        f"Candidate pool window:             {result.get('pool_window_days', '?')} days",
         f"Excluded by {result['repeat_window_days']}-day repeat: {sel.stats.get('excluded_repeat', 0)}",
         f"Eligible pool:                     {sel.stats.get('pool', 0)}",
         f"Selected:                          {sel.stats.get('selected', 0)}",

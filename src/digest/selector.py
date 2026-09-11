@@ -54,6 +54,21 @@ class SelectionResult:
     stats: dict = field(default_factory=dict)
 
 
+def _rank_key(x: dict) -> tuple:
+    """完全确定的排序键：final desc → relevance desc → pub_date desc → id asc。
+
+    平分时结果与输入顺序无关，保证任意入口可复现（docs/DIGEST_RELEASE_SPEC.md §3.5）。
+    """
+    s = x.get("scores") or {}
+    digits = "".join(ch for ch in str(x.get("pub_date") or "") if ch.isdigit())[:8]
+    return (
+        -float(s.get("final") or 0),
+        -float(s.get("relevance") or 0),
+        -(int(digits) if digits else 0),  # 无日期视为最旧
+        int(x.get("id") or 0),
+    )
+
+
 def select_daily_top(
     scored: list[dict[str, Any]],
     *,
@@ -82,7 +97,7 @@ def select_daily_top(
             continue
         pool.append(row)
 
-    pool.sort(key=lambda x: -float((x.get("scores") or {}).get("final") or 0))
+    pool.sort(key=_rank_key)
 
     selected_ids: set = set()
     selected: list[dict] = []
@@ -125,8 +140,8 @@ def select_daily_top(
         if not _try_add(row, phase="fill"):
             continue
 
-    # 按 final_score 降序展示/入库
-    selected.sort(key=lambda x: -float((x.get("scores") or {}).get("final") or 0))
+    # 按 final 降序展示/入库（平分时按决胜键，保证可复现）
+    selected.sort(key=_rank_key)
 
     # 落选说明
     for row in pool:

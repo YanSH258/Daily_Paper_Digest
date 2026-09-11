@@ -34,7 +34,9 @@ from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from core.analyzer import LLMAnalyzer, PROMPT_VERSION
 from core.notifier import Notifier, classify_article
 from core.tracking import collect_tracking_articles, record_tracking_edges
+from digest.config import validate_digest_config
 from fetchers.models import FetchResult
+from utils.paths   import resolve_against_root
 
 # ── 日志配置 ──────────────────────────────────────────────────
 LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
@@ -137,6 +139,29 @@ def validate_config(config: dict) -> None:
             f"LLM provider '{provider}' 缺少 api_key，"
             f"请在 config.yaml 或环境变量 {provider.upper()}_API_KEY 中配置"
         )
+
+    # digest 配置校验（0 是合法值，如关闭防重；不合法在启动/保存时即拒绝）
+    digest_errors = validate_digest_config(config)
+    if digest_errors:
+        raise ValueError("digest 配置无效: " + "; ".join(digest_errors))
+
+
+def _write_dry_run_report(config: dict, date_str: str, report: str) -> Optional[str]:
+    """落盘 dry-run 审阅文件，返回路径；失败返回 None（不影响预览本身）。
+
+    语义（docs/DIGEST_RELEASE_SPEC.md §5）：这是 dry-run 的**唯一**落盘产物，
+    属审阅快照而非正式报告——同日重跑直接覆盖；不写 digest 版本/条目、
+    不计入 30 日防重、不触发任何推送。正式报告仅由发布动作产生。
+    """
+    try:
+        out = resolve_against_root(config.get("output", {}).get("output_dir") or "data/output")
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"digest-dry-run-{date_str}.txt"
+        path.write_text(report, encoding="utf-8")
+        return str(path)
+    except Exception as e:  # noqa: BLE001 - 审阅文件写失败不应中断预览
+        logger.warning("写入 dry-run 报告失败: %s", e)
+        return None
 
 
 def load_journals_config(config: dict, db: Database) -> list[dict[str, Any]]:
@@ -828,13 +853,9 @@ def main():
                         result["selection"].stats.get("selected"),
                         result["dry_run"])
             if not args.digest:
-                # dry-run 时把报告也落到 data/output，方便复查
-                try:
-                    out = Path(config.get("output", {}).get("output_dir") or "data/output")
-                    out.mkdir(parents=True, exist_ok=True)
-                    (out / f"digest-dry-run-{result['date']}.txt").write_text(report, encoding="utf-8")
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("写入 dry-run 报告失败: %s", e)
+                path = _write_dry_run_report(config, result["date"], report)
+                if path:
+                    logger.info(f"  dry-run 审阅文件: {path}")
         finally:
             db.close()
         return
