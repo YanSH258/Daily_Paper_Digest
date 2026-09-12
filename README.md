@@ -14,7 +14,8 @@
 ## 快速开始
 
 ```bash
-pip install -r requirement.txt
+pip install -r requirement.txt            # 工作台主体依赖
+pip install -e ".[mcp]"                   # 如需 MCP/AI 客户端接入，安装 MCP SDK
 cp config/config_template.yaml config/config.yaml
 # 编辑 config.yaml：填入 API Key、research_topics 等
 
@@ -22,6 +23,9 @@ python src/main.py                 # 立即跑一次
 python src/main.py --schedule      # 每日定时（阻塞）
 python src/main.py --weekly        # 生成周报
 ```
+
+从零开始（含 MCP 插件接入、初始化、认证与常见故障）的完整步骤见
+`plugin/README.md`（受版本控制，克隆后即可阅读）。
 
 ### wheel 安装与数据目录
 

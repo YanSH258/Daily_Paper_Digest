@@ -1,7 +1,8 @@
 {
   "name": "daily-papers",
+  "version": "0.1.0",
   "title": "Daily Paper Digest 文献工作台",
-  "description": "把个人文献工作台接入 AI agent：检索/阅读管理/研究专题/引文追踪/Zotero 推送/AI 对比，共 21 个语义化工具。",
+  "description": "把个人文献工作台（化学/材料方向）接入 AI agent：检索/阅读管理/研究专题/版本化日报/引文追踪/Zotero 推送/AI 对比，共 25 个语义化工具。需要本地先运行 daily-paper-web 工作台服务。",
   "mcpServers": {
     "daily-papers": {
       "command": "daily-paper-mcp",

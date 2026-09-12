@@ -1363,16 +1363,24 @@ class Database:
         max_articles: int = 100,
         enabled: bool = True,
         source: str = "web",
+        source_type: str = "rss",
+        query: str = "",
     ) -> Optional[int]:
-        """新增订阅源，返回新记录 id；若 RSS 已存在或出错返回 None。"""
+        """新增订阅源，返回新记录 id；若 RSS 已存在或出错返回 None。
+
+        source_type: rss / arxiv / openalex。rss 列统一存规范化的真实
+        抓取 URL 作为去重键；arxiv/openalex 的检索式存 query。
+        """
         try:
             if self._memory_conn is not None:
                 with self._memory_lock:
                     return self._add_journal_impl(
-                        self._memory_conn, name, rss, publisher, max_articles, enabled, source
+                        self._memory_conn, name, rss, publisher, max_articles, enabled, source,
+                        source_type=source_type, query=query,
                     )
             return self._add_journal_impl(
-                self._conn(), name, rss, publisher, max_articles, enabled, source
+                self._conn(), name, rss, publisher, max_articles, enabled, source,
+                source_type=source_type, query=query,
             )
         except sqlite3.Error as e:
             logger.error("add_journal 失败: %s", e)
@@ -1387,11 +1395,15 @@ class Database:
         max_articles: int,
         enabled: bool,
         source: str,
+        source_type: str = "rss",
+        query: str = "",
     ) -> Optional[int]:
         conn.execute(
             "INSERT OR IGNORE INTO journals "
-            "(name, rss, publisher, max_articles, enabled, source) VALUES (?,?,?,?,?,?)",
-            (name, rss, publisher, int(max_articles or 100), 1 if enabled else 0, source),
+            "(name, rss, publisher, max_articles, enabled, source, source_type, query) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (name, rss, publisher, int(max_articles or 100), 1 if enabled else 0, source,
+             (source_type or "rss").strip() or "rss", (query or "").strip()),
         )
         conn.commit()
         row = conn.execute("SELECT id FROM journals WHERE rss = ?", (rss,)).fetchone()

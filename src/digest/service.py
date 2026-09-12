@@ -138,6 +138,9 @@ class DigestService:
                     "title": row.get("title") or "",
                     "category": (row.get("scores") or {}).get("category"),
                     "final": (row.get("scores") or {}).get("final"),
+                    # 只读补充：方向与已有推荐依据（来自文章库评分，不现场生成）
+                    "topic": row.get("topic") or "",
+                    "reason": (row.get("relevance_reason") or "").strip()[:300],
                 }
                 for i, row in enumerate(sel.selected, start=1)
             ],

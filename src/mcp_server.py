@@ -46,19 +46,44 @@ class ApiError(RuntimeError):
     """工作台 API 调用失败（含状态码与消息）。"""
 
 
+# 单请求超时上限（秒）：下限防止 0/负值造成无限等待，上限防止
+# 客户端把超时配置得过大导致会话看起来"卡死"。
+MIN_TIMEOUT, MAX_TIMEOUT = 5, 600
+
+
+def _timeout() -> int:
+    try:
+        value = int(os.environ.get("DPD_TIMEOUT") or TIMEOUT)
+    except ValueError:
+        return TIMEOUT
+    return max(MIN_TIMEOUT, min(value, MAX_TIMEOUT))
+
+
 def _call(method: str, path: str, body: Optional[dict] = None,
           params: Optional[dict] = None, timeout: Optional[int] = None) -> Any:
     url = _api() + path
     try:
         resp = requests.request(method, url, json=body, params=params,
-                                headers=_headers(), timeout=timeout or int(os.environ.get("DPD_TIMEOUT") or TIMEOUT))
+                                headers=_headers(), timeout=timeout or _timeout())
     except requests.exceptions.ConnectionError as e:
         raise ApiError(
             f"无法连接文献工作台 {_api()}（{e.__class__.__name__}）。"
-            f"请先启动服务：daily-paper-web --config config/config.yaml"
+            "请先启动服务：daily-paper-web --config <你的配置文件> --port <端口>；"
+            f"可用 curl {_api()}/healthz 检查。若地址或端口与实际不符，"
+            "请修正 MCP 配置中的 DPD_API"
         ) from e
     except requests.exceptions.Timeout as e:
-        raise ApiError(f"工作台请求超时: {path}") from e
+        raise ApiError(
+            f"工作台请求超时: {path}（上限 {_timeout()} 秒）。"
+            "若为 AI 生成类工具可适当调大 DPD_TIMEOUT 后重试一次；"
+            "其他请求请检查工作台是否卡死。"
+        ) from e
+    if resp.status_code in (401, 403):
+        raise ApiError(
+            f"HTTP {resp.status_code} {path}: 认证失败。请检查工作台配置的 "
+            f"web.api_token 与 MCP 端 DPD_TOKEN 是否一致"
+            f"（服务端开启 protect_read 后只读请求也需要 Token）。"
+        ) from None
     if resp.status_code >= 400:
         detail = ""
         try:
@@ -68,7 +93,14 @@ def _call(method: str, path: str, body: Optional[dict] = None,
         raise ApiError(f"HTTP {resp.status_code} {path}: {detail}")
     if not resp.content:
         return {}
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise ApiError(
+            f"工作台返回了非 JSON 内容（{path}，HTTP {resp.status_code}），"
+            "可能连接的不是 daily-paper-web 服务或返回被代理改写，"
+            "请核对 DPD_API 指向的地址。"
+        ) from e
 
 
 def _trim_analysis(item: dict, keep: int = 400) -> dict:
@@ -178,7 +210,8 @@ def _build_server():
             date: 报告日期（YYYY-MM-DD，默认今天）
         Returns:
             {date, articles_above_threshold, excluded_repeat, selected_count,
-             by_category, items: [{rank, article_id, title, category, final}]}
+             by_category, items: [{rank, article_id, title, category, final,
+             topic, reason}]}，reason 为文章库已有的推荐依据（非现场生成）
         """
         params = {"date": date} if date else None
         return _call("GET", "/api/digests/preview", params=params)
@@ -387,9 +420,19 @@ def _call_chat(path: str, body: dict) -> str:
     url = _api() + path
     try:
         resp = requests.post(url, json=body, headers=_headers(),
-                             timeout=int(os.environ.get("DPD_TIMEOUT") or TIMEOUT), stream=True)
+                             timeout=_timeout(), stream=True)
     except requests.exceptions.ConnectionError as e:
-        raise ApiError(f"无法连接文献工作台 {_api()}") from e
+        raise ApiError(
+            f"无法连接文献工作台 {_api()}。"
+            "请先启动服务：daily-paper-web --config <你的配置文件> --port <端口>"
+        ) from e
+    except requests.exceptions.Timeout as e:
+        raise ApiError(f"工作台请求超时: {path}（上限 {_timeout()} 秒）") from e
+    if resp.status_code in (401, 403):
+        raise ApiError(
+            f"HTTP {resp.status_code} {path}: 认证失败。请检查工作台配置的 "
+            f"web.api_token 与 MCP 端 DPD_TOKEN 是否一致。"
+        ) from None
     if resp.status_code >= 400:
         try:
             detail = resp.json().get("error") or ""

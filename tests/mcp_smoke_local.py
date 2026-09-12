@@ -63,8 +63,10 @@ relevance_threshold: 5
         ])
         conn = ctx.db._conn()
         for i, aid in enumerate(ids):
-            conn.execute("UPDATE articles SET relevance=?, created_at=?, analysis=? WHERE id=?",
-                         (9 - i / 10, DATE + " 08:00:00", "Analysis " * 200, aid))
+            conn.execute("UPDATE articles SET relevance=?, created_at=?, analysis=?, "
+                         "relevance_reason=?, topic=? WHERE id=?",
+                         (9 - i / 10, DATE + " 08:00:00", "Analysis " * 200,
+                          "与机器学习势函数方向高度相关 " + str(i), "机器学习势函数 / MLIP", aid))
         conn.commit()
         server = web_server.ThreadingHTTPServer(("127.0.0.1", 0), web_server.Handler)
         server.context = ctx
@@ -105,6 +107,7 @@ async def run_checks(ctx, address):
             before = ctx.db._conn().total_changes
             preview = await call("preview_daily_digest", {"date": DATE})
             assert preview["selected_count"] == 5
+            assert all(it.get("reason") for it in preview["items"]), preview["items"][:2]
             assert ctx.db._conn().total_changes == before
             assert not ctx.db.list_digest_versions()
             published = await call("publish_daily_digest", {"date": DATE, "channels": []})
@@ -125,6 +128,32 @@ async def run_checks(ctx, address):
             legacy = await call("today_top_n", {"date": DATE, "commit": True})
             assert "deprecated" in legacy
             assert len(ctx.db.list_digest_versions()) == 1
+
+            # 写路径与覆盖语义：写入后读回核验
+            target = ctx.db._conn().execute(
+                "SELECT id FROM articles ORDER BY id LIMIT 1").fetchone()[0]
+            await call("set_reading_status", {"paper_id": target, "status": "queued"})
+            await call("star_paper", {"paper_id": target, "starred": True})
+            await call("add_note", {"paper_id": target, "note": "第一版笔记"})
+            await call("add_tags", {"paper_id": target, "tags": ["mlip", "待精读"]})
+            detail = await call("get_paper", {"paper_id": target})
+            assert detail["read_status"] == "queued" and detail["starred"], detail
+            assert detail["note"] == "第一版笔记", detail.get("note")
+
+            # 覆盖而非追加：旧内容不保留
+            await call("add_note", {"paper_id": target, "note": "第二版笔记"})
+            await call("add_tags", {"paper_id": target, "tags": ["DFT"]})
+            detail = await call("get_paper", {"paper_id": target})
+            assert detail["note"] == "第二版笔记", detail.get("note")
+            assert detail["tags"] == "DFT", detail.get("tags")
+
+            # 覆盖语义的边界：空标签列表=清空；状态移出清单
+            await call("add_tags", {"paper_id": target, "tags": []})
+            await call("set_reading_status", {"paper_id": target, "status": ""})
+            detail = await call("get_paper", {"paper_id": target})
+            assert detail["tags"] == "" and detail["read_status"] == "", detail
+            print("MCP write path: status/star/note/tags 覆盖语义读回核验 OK")
+
             print(f"MCP protocol: {len(names)} tools; preview/publish/history/detail/idempotency/errors OK")
 
 

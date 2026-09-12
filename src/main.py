@@ -875,6 +875,11 @@ def main():
                              help="预览 Top-N；只写审阅文本，不记录选择历史或发送")
     digest_mode.add_argument("--digest", action="store_true",
                              help="固定并渲染当日正式日报版本；同日复用，不抓取、不发送")
+    parser.add_argument("--import-sources", metavar="PRESET_JSON",
+                        help="导入来源预设到数据库（如 config/source_presets.json）；"
+                             "与 --dry-run 同用只预览不导入。不触发采集/评分/推送")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="与 --import-sources 同用：只显示将导入的清单")
     args = parser.parse_args()
 
     if args.init_config:
@@ -883,6 +888,38 @@ def main():
         except FileExistsError:
             parser.error(f"配置已存在，不覆盖: {resolve_against_root(args.config)}")
         print(f"配置已创建: {path}；请编辑后再运行。")
+        return
+
+    if args.import_sources:
+        from utils import presets
+        if args.dry_run:
+            items = presets.preview_preset(args.import_sources)
+            bad = sum(1 for it in items if not it["ok"])
+            summary = f"预设共 {len(items)} 个来源（预览，未导入任何内容）"
+            if bad:
+                summary += f"，其中 {bad} 条无效（导入时将跳过并逐条报告）"
+            print(summary + "：")
+            for it in items:
+                if not it["ok"]:
+                    print(f"- {it['name']} [无效] {it['reason']}")
+                    continue
+                print(f"- {it['name']} [可导入] [{it['source_type']}] {it['canonical_url']}")
+                if it.get("limitations"):
+                    print(f"  已知限制: {it['limitations']}")
+                print(f"  核验: {it['verified'] or '未核验'}")
+            return
+        config = load_config(args.config)
+        db = Database(config["database"]["path"])
+        try:
+            result = presets.import_preset(args.import_sources, db)
+        finally:
+            db.close()
+        print(f"预设 {result['preset']}: 新增 {len(result['added'])} 条，"
+              f"跳过 {len(result['skipped'])} 条")
+        for it in result["added"]:
+            print(f"  + [{it['source_type']}] {it['name']} → {it['url']}")
+        for it in result["skipped"]:
+            print(f"  - {it['name']}: {it['reason']}")
         return
 
     config = load_config(args.config)

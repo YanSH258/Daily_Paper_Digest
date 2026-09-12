@@ -1,0 +1,57 @@
+{
+  "name": "computational_materials",
+  "title": "计算材料方向来源预设（可选导入）",
+  "description": "面向机器学习原子间势（MLIP）、DFT/第一性原理、分子动力学与相关计算材料研究的订阅来源。导入前请逐条审阅；导入后不会自动运行采集（需在网页端或由流水线触发）。订阅源唯一存于工作台数据库；研究关键词（research_topics）只影响相关性打分，不会自动生成采集来源。",
+  "version": "1.0",
+  "verified_date": "2026-09-12",
+  "sources": [
+    {
+      "name": "arXiv cond-mat.mtrl-sci（计算材料综合）",
+      "source_type": "arxiv",
+      "query": "cat:cond-mat.mtrl-sci",
+      "canonical_url": "https://export.arxiv.org/api/query?search_query=cat:cond-mat.mtrl-sci",
+      "coverage": "arXiv 凝聚态-材料科学分类下的全部新预印本：MLIP、DFT、MD、高通量筛选、相变模拟等",
+      "limitations": "预印本未经同行评审；分类宽，与计算无关的实验论文也会进入，依赖相关性打分过滤；只覆盖 arXiv 提交者",
+      "verified": "2026-09-12 HTTP 200（arXiv API 官方公开接口）"
+    },
+    {
+      "name": "arXiv 机器学习势函数检索式",
+      "source_type": "arxiv",
+      "query": "cat:cond-mat.mtrl-sci AND (all:\"machine learning potential\" OR all:\"interatomic potential\")",
+      "canonical_url": "https://export.arxiv.org/api/query?search_query=cat:cond-mat.mtrl-sci+AND+(all:%22machine+learning+potential%22+OR+all:%22interatomic+potential%22)",
+      "coverage": "标题/摘要含机器学习势或原子间势的 cond-mat.mtrl-sci 预印本（MLIP 主方向）",
+      "limitations": "依赖作者用词：MLIP、neural network potential、universal potential 等表述可能漏检；与第 1 条来源有重叠，去重由工作台按 DOI/标题处理",
+      "verified": "2026-09-12 HTTP 200，返回真实条目"
+    },
+    {
+      "name": "OpenAlex 检索：machine learning interatomic potential",
+      "source_type": "openalex",
+      "query": "machine learning interatomic potential",
+      "canonical_url": "https://api.openalex.org/works?search=machine%20learning%20interatomic%20potential",
+      "coverage": "OpenAlex 收录的正式发表文献（含期刊版本），按检索词全文匹配，按 last_run 水位线增量拉取",
+      "limitations": "检索噪声较大（近似表述都会命中）；免费接口有速率/额度限制——本轮核验时返回 HTTP 429（额度用尽），说明接口可达但当天配额已耗尽，正式使用请配 Unpaywall 邮箱并降低频率",
+      "verified": "2026-09-12 接口可达（HTTP 429 = OpenAlex 官方限流响应，非网络不可达）"
+    },
+    {
+      "name": "npj Computational Materials（Nature Portfolio）",
+      "source_type": "rss",
+      "url": "https://www.nature.com/npjcompumats.rss",
+      "coverage": "开放获取期刊，计算材料学方法与应用（ML 势、DFT 工作流、材料数据与模拟）",
+      "limitations": "仅覆盖该期刊自身文章，范围窄但噪声低",
+      "verified": "2026-09-12 HTTP 200，Content-Type application/rss+xml（Nature 官方提供的订阅地址）"
+    },
+    {
+      "name": "Nature Machine Intelligence（Nature Portfolio）",
+      "source_type": "rss",
+      "url": "https://www.nature.com/natmachintell.rss",
+      "coverage": "AI 方法与跨领域应用，其中包含材料/化学方向的机器学习研究",
+      "limitations": "范围远超计算材料，噪声较高，主要靠相关性打分过滤",
+      "verified": "2026-09-12 HTTP 200，Content-Type application/rss+xml（Nature 官方提供的订阅地址）"
+    }
+  ],
+  "notes": [
+    "ACS/RSC 期刊 RSS（如 J. Chem. Theory Comput.）在本轮核验环境被站点反爬拦截（HTTP 403），无法确认从用户环境可稳定抓取，故未收录；如需可自行在网页端「订阅」页添加。",
+    "本清单只包含来源方公开提供的订阅/检索接口，不承诺检索覆盖完整。",
+    "导入命令：daily-paper-digest --import-sources <数据根>/config/source_presets.json（加 --dry-run 只预览不导入）；重复导入不产生重复订阅。"
+  ]
+}

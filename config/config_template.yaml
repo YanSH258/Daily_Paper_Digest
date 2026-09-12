@@ -35,6 +35,23 @@ research_topics:
 # 相关性分数阈值（0-10），低于此分数的文章不推送
 relevance_threshold: 4
 
+# ---------- 日报选择规则（Phase0 Top-N）----------
+# 不配置时使用与下方相同的默认值；显式非法值会在启动时被拒绝
+digest:
+  daily:
+    limit: 10                  # 每日入选数量
+    repeat_window_days: 30     # 防重窗口：30 天内已入选过的文章不再重复入选（0=关闭防重）
+    pool_window_days: 60       # 候选池时间窗口：只从报告日期前 60 天内的入库文章中选取
+    min_score: 5               # 候选池的相关性分数下限
+    category_limits:           # 类别配额（min/max），类别由评分规则自动归类
+      mlip:         {min: 2, max: 4}   # 机器学习势函数
+      ai_materials: {min: 1, max: 3}   # AI for materials
+      dft:          {min: 1, max: 3}   # DFT/第一性原理
+      llm_science:  {min: 0, max: 2}   # LLM for science
+      top_chemistry:{min: 0, max: 3}   # 顶刊化学
+      other:        {min: 0, max: 2}
+
+
 # ---------- 抓取设置 ----------
 fetcher:
   use_fulltext: false  # 不抓全文，直接用摘要分析
