@@ -106,6 +106,7 @@ const Today = {
             <button class="star-btn ${a.starred ? "on" : ""}" onclick="Detail.open(${a.id})" title="打开详情">→</button>
           </div>
           <div class="today-card-title"><a href="/article/${a.id}" target="_blank">${API.esc(API.cleanTitle(a.title || ""))}</a></div>
+          ${a.title_zh ? `<div class="title-zh">${API.esc(a.title_zh)}</div>` : ""}
           ${a.relevance_reason ? `<div class="today-reason"><b>推荐理由：</b>${API.esc(a.relevance_reason)}</div>` : ""}
           <div class="today-card-foot">
             ${this.evidenceBadge(a)}
