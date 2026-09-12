@@ -18,10 +18,10 @@
              border-radius: 6px; padding: 6px 12px; }
     button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     button.secondary { background: #f2f4f8; }
-    .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
+    .wrap { max-width: 1480px; margin: 0 auto; padding: 20px 24px 60px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
     .topbar a.back { color: var(--muted); }
-    .layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 20px; align-items: start; }
+    .layout { display: grid; grid-template-columns: 440px minmax(0, 1fr); gap: 20px; align-items: start; }
     @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; margin-bottom: 16px; }
     h1.title { font-size: 1.35em; line-height: 1.45; margin-bottom: 10px; }
@@ -126,6 +126,11 @@
         <div class="row" id="aPills"></div>
 
         <div class="row" id="aActions"></div>
+        <div class="ops-row" id="reanalyzeRow">
+          <button class="primary" id="refetchBtn" onclick="Article.reanalyze(true)">📥 取全文并解读</button>
+          <button class="secondary" id="reanalyzeBtn" onclick="Article.reanalyze()">🔄 AI 解读（仅摘要）</button>
+          <span class="small muted" id="reanalyzeMsg"></span>
+        </div>
       </div>
 
       <section class="card">
@@ -170,17 +175,12 @@
           <button class="primary" id="zoteroBtn" onclick="Article.pushZotero()">推送 Zotero</button>
           <label class="small"><input type="checkbox" id="watchCitations" onchange="Article.toggleWatch(this.checked)" /> 关注新引用</label>
         </div>
-        <div class="ops-row">
-          <button class="secondary" id="reanalyzeBtn" onclick="Article.reanalyze()">🔄 AI 解读</button>
-          <button class="secondary" id="refetchBtn" onclick="Article.reanalyze(true)">📥 取全文并解读</button>
-          <span class="small muted" id="reanalyzeMsg"></span>
-        </div>
         <div class="small muted" id="zoteroNote"></div></details>
         <div class="small muted" id="feedbackNote" style="margin-top:6px;"></div>
       </div>
 
       <section class="card"><h2>相关文献</h2><div id="relatedArticles" aria-live="polite">加载中…</div></section>
-      <details class="card"><summary>笔记、标签与问答</summary>
+      <details class="card" open><summary>笔记、标签与问答</summary>
       <div>
         <h4>我的标签</h4>
         <div id="tagBadges"></div>
