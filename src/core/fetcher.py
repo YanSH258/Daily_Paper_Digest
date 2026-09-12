@@ -192,6 +192,19 @@ def _make_lenient_ssl_context() -> ssl.SSLContext:  # R3
     return ctx
 
 
+def _extract_arxiv_id(text: str) -> str:
+    """从 URL 或 DOI 中提取 arXiv 编号（如 2609.00580v1）；非 arXiv 返回空。"""
+    if not text:
+        return ""
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/(\S+?)(?:[?#]|$)", text)
+    if m:
+        return m.group(1).rstrip(".")
+    m = re.search(r"10\.48550/arXiv\.(\S+?)(?:[?\s]|$)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).rstrip(".")
+    return ""
+
+
 def _get_publisher_from_doi(doi: str) -> str:
     """通过 DOI 前缀识别出版商，比 RSS 里的 publisher 字段更可靠"""
     if not doi:
@@ -525,6 +538,7 @@ class JournalFetcher:
         """
         分层全文获取，回退顺序：
           0. Unpaywall OA 链接
+          0.5 预印本（arXiv：PDF 直取文本，保证全文质量）
           1. HTML 轻量请求（DOI 规范 URL）
           2. 浏览器渲染（出版商特定交互）
           3. OpenAlex 摘要补全
@@ -536,7 +550,24 @@ class JournalFetcher:
         publisher = _get_publisher_from_doi(doi) or article.get("publisher", "DEFAULT")
 
         if not url or publisher in RSS_ONLY_PUBLISHERS:
-            return FetchResult(fetch_status=FetchStatus.NO_HTML_URL, error_code="NO_HTML_URL")
+            # arXiv 文章即使无 URL 也可由 DOI 构造 PDF 链接，交给预印本层处理
+            if not (_extract_arxiv_id(url) or _extract_arxiv_id(doi)):
+                return FetchResult(fetch_status=FetchStatus.NO_HTML_URL, error_code="NO_HTML_URL")
+
+        # ── 0.5 预印本全文（arXiv 专用层）────────────────────────
+        # arXiv 的 abs 页面只有摘要，会被误标为全文；HTML 版（/html/）
+        # 与 ar5iv 覆盖不全。PDF 恒可用，直接 PyMuPDF 提取文本。
+        arxiv_id = _extract_arxiv_id(url) or _extract_arxiv_id(doi)
+        if arxiv_id:
+            from fetchers.pdf_fetcher import fetch_pdf_text
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+            logger.info(f"  arXiv 预印本，直接提取 PDF 文本: {pdf_url}")
+            pdf_result = fetch_pdf_text(pdf_url, timeout=max(self.timeout, 40))
+            if pdf_result.has_fulltext and pdf_result.text:
+                pdf_result.source_url = pdf_url
+                logger.info(f"    ✓ arXiv 全文 {len(pdf_result.text)} 字（PDF）")
+                return pdf_result
+            logger.warning(f"    ⚠ arXiv PDF 提取失败 [{pdf_result.fetch_status.value}]，转常规回退链")
 
         # DOI 规范 URL，让出版商服务器自动重定向
         canonical_url = f"https://doi.org/{doi}" if doi else url
