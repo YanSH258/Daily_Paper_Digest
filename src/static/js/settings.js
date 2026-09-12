@@ -82,6 +82,10 @@ const Settings = {
           <span id="connectTokenMsg" class="small"></span>`)}
         <p class="small" style="margin:8px 0 0;">新浏览器 / 清空缓存后：粘贴服务端 Token 点「连接」即可继续操作，无需改服务端配置。</p>
       </div>
+      <div class="card"><h3>屏蔽名单 <span class="small muted" id="blCount"></span></h3>
+        <p class="small muted" style="margin:0 0 8px;">清理低分删除的文章会记录在此，抓取时不再回流入库。误删的可在下方解除屏蔽。</p>
+        <div id="blockListBox" class="small"></div>
+      </div>
       <div class="card"><h3>调度</h3>
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
         ${this.fieldRow("启用 API Token（可选）", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "本机自用可留空；需要时填写并保存"}" />
@@ -285,6 +289,35 @@ const Settings = {
     }
   },
 
+  async loadBlocklist() {
+    const box = document.getElementById("blockListBox");
+    if (!box) return;
+    try {
+      const data = await API.get("/api/blocklist");
+      const items = data.items || [];
+      document.getElementById("blCount").textContent = items.length ? `(${items.length})` : "";
+      if (!items.length) {
+        box.innerHTML = '<span class="muted">暂无屏蔽记录。</span>';
+        return;
+      }
+      box.innerHTML = items.slice(0, 50).map((b) => `
+        <div class="row" style="justify-content:space-between; margin:2px 0;">
+          <span class="mono small">${API.esc((b.title || b.doi || b.url || "?").slice(0, 60))}</span>
+          <button class="secondary small-btn" onclick="Settings.unblock(${b.id})">解除</button>
+        </div>`).join("") +
+        (items.length > 50 ? `<div class="small muted">…其余 ${items.length - 50} 条略</div>` : "");
+    } catch (e) {
+      box.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
+    }
+  },
+
+  async unblock(id) {
+    try {
+      await API.del("/api/blocklist/" + id);
+      this.loadBlocklist();
+    } catch (e) { alert("解除失败: " + e.message); }
+  },
+
   async clearToken() {
     if (!confirm("确定清除网页 API Token 吗？清除后所有写操作将不再需要 Token（直到重新设置）。")) return;
     const msgEl = document.getElementById("settingsMsg");
@@ -332,6 +365,7 @@ const Settings = {
       const c = await API.get("/api/settings");
       this.cached = c;
       document.getElementById("settingsContent").innerHTML = this.render(c);
+      this.loadBlocklist();
     } catch (e) {
       document.getElementById("settingsContent").innerHTML =
         `<span class="err">设置读取失败: ${API.esc(e.message)}</span>`;

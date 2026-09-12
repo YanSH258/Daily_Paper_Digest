@@ -301,6 +301,16 @@ class Database:
                 created_at  TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS blocked_articles (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                doi         TEXT,
+                url         TEXT,
+                title_hash  TEXT,
+                title       TEXT,
+                reason      TEXT DEFAULT 'manual',
+                blocked_at  TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS compare_results (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind        TEXT NOT NULL DEFAULT 'compare',
@@ -587,6 +597,28 @@ class Database:
     def _check_duplicate_impl(
         self, conn: sqlite3.Connection, doi: str, url: str, title: str
     ) -> tuple[bool, str]:
+        # 屏蔽名单优先：被用户清理过的文章不再回流（也不重复消耗 LLM 评分）
+        try:
+            if doi:
+                row = conn.execute(
+                    "SELECT 1 FROM blocked_articles WHERE doi IS NOT NULL AND lower(trim(doi)) = ?",
+                    (doi.lower(),)).fetchone()
+                if row:
+                    return True, "屏蔽名单命中 (DOI)"
+            if url:
+                row = conn.execute(
+                    "SELECT 1 FROM blocked_articles WHERE url IS NOT NULL AND url = ?",
+                    (url,)).fetchone()
+                if row:
+                    return True, "屏蔽名单命中 (URL)"
+            if title:
+                h = _compute_title_hash(title)
+                if h and conn.execute(
+                    "SELECT 1 FROM blocked_articles WHERE title_hash IS NOT NULL AND title_hash = ?",
+                    (h,)).fetchone():
+                    return True, "屏蔽名单命中 (标题)"
+        except sqlite3.Error as e:
+            logger.warning("屏蔽名单查询失败（忽略屏蔽继续）: %s", e)
         if doi:
             if conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone():
                 return True, "DOI重复: %s" % doi
@@ -1016,8 +1048,12 @@ class Database:
         return [dict(zip(keys, r)) for r in rows]
 
     def delete_low_relevance(self, min_score: float) -> int:
-        """删除低分且无用户痕迹的文章；返回删除条数。"""
+        """删除低分且无用户痕迹的文章；删除前把标识写入屏蔽名单，防止每日抓取回流。"""
         clause, params = self._cleanup_where(min_score)
+        try:
+            self.block_articles_by_clause(clause, params, reason="low_score_cleanup")
+        except sqlite3.Error as e:
+            logger.warning("清理前记录屏蔽名单失败（继续删除）: %s", e)
         sql = f"DELETE FROM articles WHERE {clause}"
         try:
             if self._memory_conn is not None:
@@ -2736,3 +2772,73 @@ class Database:
         except sqlite3.Error as e:
             logger.error("get_positive_profile_texts 失败: %s", e)
             return []
+
+    def block_articles_by_clause(self, clause: str, params: list[Any], reason: str) -> int:
+        """把符合条件（同一清理 WHERE）的文章标识写入屏蔽名单。"""
+        sql_select = ("SELECT id, doi, url, title_hash, title FROM articles "
+                      f"WHERE {clause}")
+        sql_insert = ("INSERT OR IGNORE INTO blocked_articles (doi, url, title_hash, title, reason) "
+                      "VALUES (?,?,?,?,?)")
+        n = 0
+        if self._memory_conn is not None:
+            with self._memory_lock:
+                rows = self._memory_conn.execute(sql_select, params).fetchall()
+                for r in rows:
+                    # 列序: id, doi, url, title_hash, title
+                    self._memory_conn.execute(sql_insert, (
+                        (r[1] or None), (r[2] or None), (r[3] or None), (r[4] or None)[:200], reason))
+                    n += 1
+                self._memory_conn.commit()
+            return n
+        conn = self._conn()
+        rows = conn.execute(sql_select, params).fetchall()
+        for r in rows:
+            conn.execute(sql_insert, (
+                (r[1] or None), (r[2] or None), (r[3] or None), (r[4] or None)[:200], reason))
+            n += 1
+        conn.commit()
+        return n
+
+    def list_blocked_articles(self, limit: int = 500) -> list[dict[str, Any]]:
+        try:
+            sql = ("SELECT id, doi, url, title_hash, title, reason, blocked_at "
+                   "FROM blocked_articles ORDER BY id DESC LIMIT ?")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (limit,))
+                    cols = [d[0] for d in cur.description]
+                    return [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (limit,))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_blocked_articles 失败: %s", e)
+            return []
+
+    def unblock_article(self, block_id: int) -> bool:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        "DELETE FROM blocked_articles WHERE id = ?", (block_id,))
+                    self._memory_conn.commit()
+                    return cur.rowcount > 0
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM blocked_articles WHERE id = ?", (block_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error("unblock_article 失败: %s", e)
+            return False
+
+    def count_blocked_articles(self) -> int:
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return self._memory_conn.execute(
+                        "SELECT COUNT(*) FROM blocked_articles").fetchone()[0]
+            return self._conn().execute(
+                "SELECT COUNT(*) FROM blocked_articles").fetchone()[0]
+        except sqlite3.Error as e:
+            logger.error("count_blocked_articles 失败: %s", e)
+            return 0

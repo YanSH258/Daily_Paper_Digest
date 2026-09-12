@@ -2049,6 +2049,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response({"ok": True, **payload})
                 return
 
+            if path == "/api/blocklist":
+                self._json_response({"items": self.ctx.db.list_blocked_articles()})
+                return
+
             if path == "/api/results":
                 self._json_response({"items": self.ctx.db.list_results()})
                 return
@@ -2678,6 +2682,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"error": "invalid author id"}, code=400)
                     return
                 self._json_response({"ok": self.ctx.db.delete_watch_author(int(aid))}, code=200)
+                return
+
+            if path.startswith("/api/blocklist/"):
+                if not self._require_token():
+                    return
+                bid = path.removeprefix("/api/blocklist/")
+                if not bid.isdigit():
+                    self._json_response({"error": "invalid blocklist id"}, code=400)
+                    return
+                self._json_response({"ok": self.ctx.db.unblock_article(int(bid))}, code=200)
                 return
 
             if path.startswith("/api/highlights/"):
