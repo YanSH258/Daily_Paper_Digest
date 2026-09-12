@@ -22,9 +22,14 @@ setup(
     name="daily-paper-digest",
     version="0.1.0",
     description="AI 驱动的化学/材料文献日报工具",
-    packages=sorted(set(find_packages(where="src")) | {"webassets"}),
-    package_dir={"": "src", "webassets": "src/static"},
-    package_data={"webassets": ["*.html", "*.ico", "css/*", "js/*"]},
+    packages=sorted(set(find_packages(where="src")) | {"webassets", "dpd_resources"}),
+    package_dir={"": "src", "webassets": "src/static", "dpd_resources": "config"},
+    # 只打包公开模板，不能将本地 config.yaml 或凭据收入 wheel。
+    include_package_data=False,
+    package_data={
+        "webassets": ["*.html", "*.ico", "css/*", "js/*"],
+        "dpd_resources": ["config_template.yaml"],
+    },
     py_modules=["main", "web_server", "mcp_server"],
     python_requires=">=3.9",
     install_requires=requirements,

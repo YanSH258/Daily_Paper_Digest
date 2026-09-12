@@ -98,18 +98,14 @@ def build_daily_digest(
         item["scores"] = s
         scored.append(item)
 
-    excluded = set()
+    excluded: set = set()
     if window_days > 0:
-        try:
-            since = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=window_days)).strftime("%Y-%m-%d")
-            for r in conn.execute(
-                "SELECT article_id FROM digest_entries "
-                "WHERE digest_type = 'daily' AND digest_date >= ? AND digest_date < ?",
-                (since, date_str),
-            ):
-                excluded.add(r[0])
-        except Exception:  # noqa: BLE001 - 表不存在时视为无历史
-            pass
+        since = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=window_days)).strftime("%Y-%m-%d")
+        # 防重集合 = 旧 digest_entries ∪ 新已发布版本条目（去重）；
+        # 读取失败向上抛出——历史读取失败不得默认当成空历史（规范 §4.2）
+        excluded.update(
+            db.list_published_digest_article_ids_since("daily", since, date_str)
+        )
 
     selection = select_daily_top(
         scored, limit=limit, category_limits=category_limits, excluded_ids=excluded

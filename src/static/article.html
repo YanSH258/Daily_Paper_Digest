@@ -21,7 +21,7 @@
     .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
     .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
     .topbar a.back { color: var(--muted); }
-    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+    .layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 20px; align-items: start; }
     @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; margin-bottom: 16px; }
     h1.title { font-size: 1.35em; line-height: 1.45; margin-bottom: 10px; }
@@ -85,6 +85,26 @@
              background: var(--ink); color: #fff; padding: 8px 18px; border-radius: 20px;
              font-size: 0.85em; opacity: 0; transition: opacity .3s; pointer-events: none; }
     .toast.show { opacity: 0.95; }
+    [hidden] { display: none !important; }
+    .reading-main { grid-column: 2; grid-row: 1; min-width: 0; }
+    .sidebar { grid-column: 1; grid-row: 1; min-width: 0; }
+    h1.title { font-family: Georgia, "Times New Roman", serif; font-size: 1.8rem; line-height: 1.35; }
+    h2 { font-size: 1rem; margin-bottom: 14px; }
+    .card { overflow-wrap: anywhere; }
+    .section-body { line-height: 1.9; }
+    summary { cursor: pointer; font-weight: 600; }
+    details[open] > summary { margin-bottom: 16px; }
+    .related-item { display: block; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .related-item:last-child { border-bottom: 0; }
+    .related-item small { display: block; color: var(--muted); margin-top: 6px; }
+    .md { overflow-x: auto; }
+    button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    @media (max-width: 980px) {
+      .reading-main, .sidebar { grid-column: 1; grid-row: auto; }
+      .wrap { padding: 16px 12px 40px; }
+      .card { padding: 18px; }
+      h1.title { font-size: 1.45rem; }
+    }
   </style>
 </head>
 <body>
@@ -98,30 +118,27 @@
 
   <div class="layout" id="layout" hidden>
     <!-- 主阅读区 -->
-    <div>
+    <main class="reading-main">
       <div class="card">
         <h1 class="title" id="aTitle"></h1>
+        <p class="meta" id="aTitleZh" hidden></p>
         <div class="meta" id="aMeta"></div>
         <div class="row" id="aPills"></div>
-        <div class="reason" id="aReason" hidden></div>
+
         <div class="row" id="aActions"></div>
       </div>
 
-      <div class="card" id="conclusionCard" hidden>
-        <div class="section-h" onclick="Article.toggleBody('conclusionBody', this)">⚡ 一句话总结 <span class="muted small">▾</span></div>
-        <div class="section-body md" id="conclusionBody"></div>
-      </div>
-
-      <div class="card" id="analysisCard" hidden>
-        <div class="section-h" onclick="Article.toggleBody('analysisBody', this)">🤖 AI 结构化解读 <span class="muted small">▾</span></div>
+      <section class="card">
+        <h2>摘要</h2>
+        <div class="section-body" id="abstractBody"></div>
+      </section>
+      <section class="card" id="analysisCard">
+        <h2>这篇论文与你的研究有什么关系</h2>
+        <p class="small muted" id="analysisEvidence"></p>
+        <div class="reason" id="aReason"></div>
         <div class="section-body md" id="analysisBody"></div>
-      </div>
-
-      <div class="card">
-        <div class="section-h" onclick="Article.toggleBody('abstractBody', this)">📄 原文摘要 <span class="muted small">▾</span></div>
-        <div class="section-body" id="abstractBody" hidden></div>
-      </div>
-
+      </section>
+      <div id="conclusionCard" hidden><div id="conclusionBody"></div></div>
       <div class="card" id="fulltextCard" hidden>
         <div class="section-h" onclick="Article.toggleBody('fulltextBody', this)">📚 原文节选（全文依据）<span class="muted small">▸</span></div>
         <div class="section-body" id="fulltextBody" hidden>
@@ -130,10 +147,11 @@
           <div id="hlList" style="margin-top:10px;"></div>
         </div>
       </div>
-    </div>
+    </main>
 
     <!-- 侧边辅助区 -->
-    <div class="sidebar">
+    <aside class="sidebar">
+      <section class="card"><h2>来自期刊</h2><div id="journalInfo"></div></section>
       <div class="card">
         <h4>阅读管理</h4>
         <select id="readStatus" onchange="Article.saveReadStatus()"></select>
@@ -142,6 +160,7 @@
           <button class="secondary" onclick="Article.feedback('relevant')">👍 有用</button>
           <button class="secondary" onclick="Article.feedback('irrelevant')">👎 不相关</button>
         </div>
+        <details><summary>引用与同步</summary>
         <div class="ops-row">
           <button class="secondary" onclick="Article.downloadCitation('bibtex')">BibTeX</button>
           <button class="secondary" onclick="Article.downloadCitation('ris')">RIS</button>
@@ -151,11 +170,13 @@
           <button class="primary" id="zoteroBtn" onclick="Article.pushZotero()">推送 Zotero</button>
           <label class="small"><input type="checkbox" id="watchCitations" onchange="Article.toggleWatch(this.checked)" /> 关注新引用</label>
         </div>
-        <div class="small muted" id="zoteroNote"></div>
+        <div class="small muted" id="zoteroNote"></div></details>
         <div class="small muted" id="feedbackNote" style="margin-top:6px;"></div>
       </div>
 
-      <div class="card">
+      <section class="card"><h2>相关文献</h2><div id="relatedArticles" aria-live="polite">加载中…</div></section>
+      <details class="card"><summary>笔记、标签与问答</summary>
+      <div>
         <h4>我的标签</h4>
         <div id="tagBadges"></div>
         <input type="text" id="tagsInput" placeholder="逗号分隔，如：精读, 待复现" style="margin-top:6px;" />
@@ -194,7 +215,8 @@
           </div>
         </div>
       </div>
-    </div>
+      </details>
+    </aside>
   </div>
 </div>
 <div class="toast" id="toast"></div>

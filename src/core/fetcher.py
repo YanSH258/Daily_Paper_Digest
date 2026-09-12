@@ -26,7 +26,8 @@ from typing import Any, Optional
 from bs4 import BeautifulSoup, Tag
 
 from fetchers import fetch_html, FetchResult, FetchStatus, BestFormat
-from fetchers.models import MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS  # 统一使用 fetchers.models 中的常量
+from fetchers.models import (MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS,
+                             MIN_FULLTEXT_LEN)  # 统一使用 fetchers.models 中的常量
 from fetchers.network import get_proxies
 from fetchers.oa_fetcher import get_oa_url, get_openalex_abstract
 from core.request_manager import RequestManager
@@ -453,7 +454,7 @@ class JournalFetcher:
     def _fetch_openalex_source(self, journal: dict) -> list[dict]:
         """OpenAlex 检索式订阅，按 last_run 水位线增量拉取。"""
         from integrations import openalex as oa
-        openalex.set_polite_email(self.unpaywall_email)
+        oa.set_polite_email(self.unpaywall_email)
         query = journal.get("query") or journal.get("rss") or ""
         from_date = journal.get("last_run") or ""
         works = oa.search_works(query, from_date=from_date,
@@ -574,7 +575,8 @@ class JournalFetcher:
             logger.info("  浏览器渲染已禁用（use_browser=false），跳过")
         else:
             browser_text = self._fetch_page_content(canonical_url, publisher)
-            if browser_text:
+            # 浏览器渲染也需达到全文长度下限，否则视为摘要级
+            if browser_text and len(browser_text) >= MIN_FULLTEXT_LEN:
                 return FetchResult(
                     text=browser_text,
                     best_available_format=BestFormat.HTML_FULLTEXT,
@@ -583,6 +585,8 @@ class JournalFetcher:
                     access_path=html_result.access_path,
                     source_url=canonical_url,
                 )
+            if browser_text:
+                logger.info(f"    浏览器渲染仅得 {len(browser_text)} 字（<全文下限），按摘要处理")
 
         # ── 3. OpenAlex 摘要补全 ────────────────────────────────
         if doi and len(article.get("abstract", "")) < 200:

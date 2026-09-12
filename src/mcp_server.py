@@ -91,8 +91,10 @@ def _build_server():
         "daily-papers",
         instructions=(
             "个人文献工作台（化学/材料方向）：RSS/引文/作者追踪 → LLM 评分 → 全文 → "
-            "AI 解读 → 日报/周报。阅读工作流：today_top_n 看今日精选 → get_paper 深入 → "
-            "set_reading_status 入清单 → push_to_zotero 归档。"
+            "AI 解读 → 版本化日报。阅读工作流：preview_daily_digest 看某日 Top-N → "
+            "get_paper 深入 → set_reading_status 入清单 → push_to_zotero 归档。"
+            "正式日报：get_digest_history 选版本 → get_digest 看快照；"
+            "发布用 publish_daily_digest（写操作，当日已有版本会幂等复用）。"
         ),
     )
 
@@ -156,14 +158,74 @@ def _build_server():
 
         Args:
             date: 日期（YYYY-MM-DD，默认今天）
-            commit: False=只预览不落盘（推荐）；True=正式记录今日选择
+            commit: False=只预览不落盘（推荐）；True=仅落盘旧版选择历史
+                （legacy，不创建版本、不发送；正式发布请用 publish_daily_digest）
         Returns:
             {date, articles_above_threshold, selected: [{rank, id, title,
-             scores, relevance_reason, title_zh}], report_text}
+             scores, relevance_reason, title_zh}], report_text, deprecated?}
         """
         if commit:
             return _call("POST", "/api/digest", body={"date": date} if date else {})
         return _call("GET", "/api/digest", params={"date": date} if date else None)
+
+    # ── 版本化日报（只读）──────────────────────────────────────
+
+    @mcp.tool()
+    def preview_daily_digest(date: str = "") -> dict:
+        """按版本化规则只读预览某日 Top-N（不写库、不发布、不发送）。
+
+        Args:
+            date: 报告日期（YYYY-MM-DD，默认今天）
+        Returns:
+            {date, articles_above_threshold, excluded_repeat, selected_count,
+             by_category, items: [{rank, article_id, title, category, final}]}
+        """
+        params = {"date": date} if date else None
+        return _call("GET", "/api/digests/preview", params=params)
+
+    @mcp.tool()
+    def get_digest(version_id: int) -> dict:
+        """读取已发布日报版本的固定快照（含产物与渠道状态；条目文本已截断）。"""
+        result = _call("GET", f"/api/digests/{int(version_id)}")
+        for it in result.get("items") or []:
+            snap = it.get("snapshot") or {}
+            if isinstance(snap, dict):
+                if snap.get("abstract"):
+                    snap["abstract"] = str(snap["abstract"])[:300]
+                if snap.get("analysis"):
+                    snap["analysis"] = str(snap["analysis"])[:800]
+        return result
+
+    @mcp.tool()
+    def get_digest_history(date_from: str = "", date_to: str = "",
+                           limit: int = 20) -> dict:
+        """列出已发布日报版本（不含条目，用于选择要读取的版本）。"""
+        params: dict[str, Any] = {"limit": max(1, min(int(limit), 50))}
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        return _call("GET", "/api/digests", params=params)
+
+    # ── 版本化日报（写操作）────────────────────────────────────
+
+    @mcp.tool()
+    def publish_daily_digest(date: str, request_key: str = "",
+                             channels: Optional[list[str]] = None) -> dict:
+        """【写操作】发布当日正式日报：固定快照 → 渲染文件 → 投递指定渠道。
+
+        当日已有版本时直接复用（不重算、不重发）。
+        Args:
+            date: 报告日期（YYYY-MM-DD）
+            request_key: 可选幂等键；regenerate 必须换新键
+            channels: 要投递的渠道，仅允许 "email" / "feishu"；省略 = 只发布不发送
+        """
+        body: dict[str, Any] = {"date": date}
+        if request_key:
+            body["request_key"] = request_key
+        if channels is not None:
+            body["channels"] = channels
+        return _call("POST", "/api/digests/publish", body=body)
 
     @mcp.tool()
     def trends(months: int = 6) -> dict:

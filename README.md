@@ -23,6 +23,37 @@ python src/main.py --schedule      # 每日定时（阻塞）
 python src/main.py --weekly        # 生成周报
 ```
 
+### wheel 安装与数据目录
+
+```bash
+python -m pip install .             # 或 pip install /path/to/daily_paper_digest-*.whl
+# 可选；必须在启动进程前设置，CLI 与 Web 使用相同值
+export DPD_DATA_ROOT="$HOME/.local/share/daily-paper-digest"
+daily-paper-digest --init-config    # 从内置模板创建配置，已有文件不会覆盖
+# 编辑 $DPD_DATA_ROOT/config/config.yaml，填入自己的配置后再运行
+daily-paper-digest
+# Web 的设置保存使用传入路径，请使用绝对 --config 路径
+daily-paper-web --config "$DPD_DATA_ROOT/config/config.yaml" --host 127.0.0.1 --port 8080
+```
+
+数据根目录按以下优先级选择（启动进程时确定）：
+
+1. 环境变量 `DPD_DATA_ROOT`，支持 `~`；相对值在启动时转为绝对路径，建议始终使用绝对值。
+2. 源码或 editable 安装：仓库根目录，兼容现有 `config/`、`data/` 布局。
+3. wheel 安装：Linux 使用 `${XDG_DATA_HOME:-$HOME/.local/share}/daily-paper-digest`（相对 `XDG_DATA_HOME` 无效）；macOS 使用 `~/Library/Application Support/daily-paper-digest`；Windows 使用 `%LOCALAPPDATA%/daily-paper-digest`。
+
+| 内容 | 相对于数据根的默认位置 |
+|------|------------------------|
+| 配置 | `config/config.yaml` |
+| SQLite 数据库及流水线锁 | `data/db/chem_daily.db`、`data/db/.pipeline.lock` |
+| 日志 | `data/logs/YYYY-MM-DD.log` |
+| 日报 / 周报 | `data/output/` |
+| 数据库备份 | `data/backups/`（可用 `backup.directory` 覆盖） |
+
+CLI/Web 共用的配置加载器将 `database.path`、`output.output_dir`、`fetcher.upload_dir` 和 `backup.directory` 中的相对路径锚定到数据根，绝对路径保留。`--config` 的相对路径也基于数据根，不基于当前工作目录或配置所在目录。wheel 内只包含只读配置模板，不包含个人配置或数据库；`--init-config` 不执行抓取、模型调用或推送。
+
+安装不会自动迁移已有数据。已有部署可将 `DPD_DATA_ROOT` 指向原仓库根目录继续使用；切换到其他目录前应自行备份并迁移 `config/` 和 `data/`。旧版备份可能位于 `data/db/backups/`，新的默认位置不会自动搬移或清理旧备份。
+
 ### 网页控制台
 
 ```bash

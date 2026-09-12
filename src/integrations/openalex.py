@@ -29,7 +29,13 @@ def set_polite_email(email: str) -> None:
 
 
 def _get(path: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """请求 OpenAlex；404 返回 None，其余失败重试后抛出（调用方据此停止）。
+
+    不再吞错返回 None：上层需要区分"确实没有数据"和"采集失败"，
+    否则追踪游标会在失败时被错误推进，导致该窗口文献永久漏采。
+    """
     params = {**params, "mailto": _MAILTO}
+    last_error: Exception | None = None
     for attempt in range(3):
         try:
             resp = _session.get(f"{OPENALEX_BASE}{path}", params=params, timeout=20)
@@ -37,13 +43,15 @@ def _get(path: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
                 return None  # 确定性不存在，不重试
             if resp.status_code == 429:
                 time.sleep(2 * (attempt + 1))
+                last_error = RuntimeError(f"HTTP 429 (attempt {attempt + 1})")
                 continue
             resp.raise_for_status()
             return resp.json()
         except Exception as e:  # noqa: BLE001
+            last_error = e
             logger.warning("OpenAlex 请求失败 (%s/%s): %s", attempt + 1, 3, e)
             time.sleep(1.5 * (attempt + 1))
-    return None
+    raise RuntimeError(f"OpenAlex 请求重试耗尽: {path}") from last_error
 
 
 def _clean_abstract(inverted_index: Optional[dict]) -> str:
@@ -140,10 +148,19 @@ def get_author_recent_works(openalex_id: str, from_date: str, limit: int = 25) -
 
 
 def search_works(query: str, from_date: str = "", limit: int = 50) -> list[dict[str, Any]]:
-    """按检索式订阅新文献（OpenAlex default.search）。"""
+    """按检索式订阅新文献（OpenAlex default.search）。
+
+    query 以 ``filter:`` 开头时作为原生 OpenAlex filter 使用（例如期刊订阅：
+    ``filter:primary_location.source.id:S111155417``），不再包裹 default.search。
+    """
     if not query:
         return []
-    filt = f"default.search:{query}" + (f",from_publication_date:{from_date}" if from_date else "")
+    if query.startswith("filter:"):
+        filt = query.removeprefix("filter:")
+    else:
+        filt = f"default.search:{query}"
+    if from_date:
+        filt += f",from_publication_date:{from_date}"
     data = _get("/works", {"filter": filt, "sort": "publication_date:desc",
                            "per-page": min(limit, 200)})
     if not data:

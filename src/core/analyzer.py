@@ -50,7 +50,10 @@ CHAT_HISTORY_MESSAGES: int = 12
 CHAT_MAX_TOKENS: int = 4096
 
 # 分析提示词版本：改动提示词结构时递增，并记录进 articles.analysis_prompt_version
-PROMPT_VERSION: str = "v2"
+# v3：摘要路径改为"仅中文翻译"；全文路径维持 7 节深度解读
+PROMPT_VERSION: str = "v3"
+# 摘要仅翻译所需输出上限（全文深度解读仍使用 max_tokens/ANALYSIS_* 常量）
+ABSTRACT_TRANSLATION_MAX_TOKENS: int = 2048
 
 
 # ──────────────────────────────────────────────
@@ -288,8 +291,8 @@ class LLMAnalyzer:
 **b) 速记版 Pipeline**（3-5步，不用论文术语，直白具体）
 """
         else:
-            prompt = f"""你是一位经验丰富的化学领域研究人员。
-当前这篇论文【仅获取到摘要，未获取到全文】。
+            prompt = f"""你是专业的学术翻译。
+请把下面这篇化学/材料论文的摘要原文完整翻译为中文。
 
 【期刊】{journal}
 【标题】{title}
@@ -297,34 +300,15 @@ class LLMAnalyzer:
 【论文摘要】
 {content}
 
-请严格按照以下格式输出，并遵守【极严苛指令】：
-⚠️ 对于摘要中没有提及的内容，必须原封不动输出"因未获取到全文，摘要中无此信息"，绝对禁止依靠领域知识猜测或补全。
-
-### 0. 摘要翻译
-将论文摘要原文翻译为中文，保持学术语言风格，不做删减。
----
-### 1. 方法动机
-仅基于摘要提取动机和背景（若没有则写"因未获取到全文，摘要中无此信息"）。
----
-### 2. 方法设计
-因未获取到全文，摘要中无此信息。
----
-### 3. 与其他方法对比
-因未获取到全文，摘要中无此信息。
----
-### 4. 实验表现
-仅基于摘要提取关键结果（若摘要中无具体数据，写"因未获取到全文，摘要中无此信息"）。
----
-### 5. 学习与应用
-因未获取到全文，摘要中无此信息。
----
-### 6. 总结
-**a) 一句话核心思想**（基于摘要概括，≤20字）
-**b) 速记版 Pipeline**：因未获取到全文，摘要中无此信息。
+要求：
+1. 忠实原文，逐句翻译，不增不减、不概括、不评论、不补充任何摘要以外的信息。
+2. 保持学术语言风格；专业术语保留英文原文并可在括号内附中文解释。
+3. 只输出译文，不要输出任何标题、前言、注释或格式标记。
 """
 
-        analysis_max_tokens: int = min(
-            max(self.max_tokens, ANALYSIS_MIN_TOKENS), ANALYSIS_MAX_TOKENS
+        analysis_max_tokens: int = (
+            ABSTRACT_TRANSLATION_MAX_TOKENS if not has_fulltext
+            else min(max(self.max_tokens, ANALYSIS_MIN_TOKENS), ANALYSIS_MAX_TOKENS)
         )
 
         if chunk_note:
@@ -335,6 +319,26 @@ class LLMAnalyzer:
 
         try:
             analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
+            analysis = self._strip_model_deliberation(analysis, is_translation=not has_fulltext)
+            # 质量门槛：deepseek-flash 偶发把推理草稿/英文原文回显当输出。
+            # 翻译路径要求结果确为中文叙述；不达标按失败处理，下轮自动重试，
+            # 绝不让"翻译工作笔记"冒充译文入库。
+            if not has_fulltext:
+                def _cjk_ratio(s: str) -> float:
+                    cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+                    return cjk / max(len(s), 1)
+                if len(analysis) < 120 or _cjk_ratio(analysis) < 0.6:
+                    logger.warning(
+                        "[LLM_QUALITY] 摘要翻译输出不达标（长度 %d, 中文占比 %.2f），"
+                        "按失败处理待重试 | title=%s | model=%s",
+                        len(analysis), _cjk_ratio(analysis), title[:50], self.model,
+                    )
+                    return AnalysisResult(
+                        success=False,
+                        analysis="",
+                        evidence_level="ABSTRACT_ONLY",
+                        error=f"translation_quality_failed:len={len(analysis)}",
+                    )
             evidence_level = "FULLTEXT" if has_fulltext else "ABSTRACT_ONLY"
             return AnalysisResult(
                 success=True,
@@ -493,6 +497,92 @@ class LLMAnalyzer:
                 exc_info=True,
             )
             raise LLMStreamError(f"{type(e).__name__}: {e}") from e
+
+    # ──────────────────────────────────────────────
+    # 模型输出清洗（deepseek-flash 偶尔把推理草稿混进正式输出）
+    # ──────────────────────────────────────────────
+
+    _DELIB_PREFIX_RE = re.compile(
+        r"^(?:我们需要|我们要|用户要求|用户说|需要翻译|需要判断|需要回答|"
+        r"好的[，,]?|首先[，,]?|让我来?)[^\n]{0,80}"
+    )
+    _DELIB_HINTS = (
+        "我们需要回答用户", "我们需要提供", "我们需要仔细翻译", "我们要仔细翻译",
+        "需要翻译。", "用户说“", "用户说\"", "应该只输出译文", "不要输出任何标题",
+        "术语对照", "术语表", "翻译草稿", "思考过程", "让我们逐步",
+    )
+
+    @classmethod
+    def _strip_model_deliberation(cls, text: str, *, is_translation: bool) -> str:
+        """剥掉模型混入正式输出的推理草稿，返回干净的正文。
+
+        deepseek-flash 对新提示词偶发输出"我们需要回答用户……"式的思考过程。
+        翻译场景：推理在译文之前（先分析术语再给译文），取最后一个可辨识的
+        译文起始段；全文解读场景：推理混在开头，仅剥除推理前缀行。
+        无法可靠清洗时原样返回（不丢内容）。
+        """
+        if not text:
+            return text
+        stripped = text.strip()
+
+        def _clean_prefix(s: str) -> str:
+            # 逐行剥掉推理特征的行/前缀
+            lines = s.splitlines()
+            out = []
+            for line in lines:
+                probe = line.strip()
+                if any(h in probe[:30] for h in cls._DELIB_HINTS):
+                    continue
+                line = cls._DELIB_PREFIX_RE.sub("", line) or line
+                out.append(line)
+            return "\n".join(out).strip()
+
+        if is_translation:
+            # 输出形态差异很大：有的是"整段译文"，有的是"逐句中文+英文原句对照"，
+            # 推理草稿交织其间。统一策略：行级过滤——
+            #   1) 剥推理前缀行；2) 丢弃元讨论/术语表/纯英文引用行；
+            #   3) 收集剩余中文叙述行并按原顺序拼接。
+            # 行级比段落级稳健：译文句是长中文行，推理是短元讨论行或英文引用行。
+            cleaned = _clean_prefix(stripped)
+
+            def cjk_ratio(s: str) -> float:
+                cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+                return cjk / max(len(s), 1)
+
+            deliberation = re.compile(
+                r"(我们需要|我们必须|我们要|用户(要求|说|写)|需要翻译|需要逐句|需要提供|"
+                r"需要准确|需要谨慎|应该只输出|注意术语|术语[对表]|翻译本身|要确保|"
+                r"可译为|可写|可保留|可能意味着|加括号|开始翻译|逐句对应|可以[一-以]?保持|"
+                r"不添加标题|Need check|Maybe better|Possible translation|Let's craft|"
+                r"摘要原文有|通常中文|题目有|标题中|这满足|这里看上下文|照抄|有歧义|"
+                r"不要输出任何标题|需要决定|需要处理|需要只输出|可能只需要|不应该?输出|"
+                r"是否保留|最好是?|可以这样|要求[“\"不应]|要求只|要求[不忠]|注意标题|"
+                r"保留英文原文|保持学术|术语如|主要专业术语|忠实逐句|只翻译|格式标记)")
+            term_table = re.compile(
+                r"^\s*[\"“'\-•*\d]*\s*(?:[A-Za-z][^→\n]*→|-\s+[\"“']?[A-Za-z]|[A-Za-z][^（()]{0,40}（[^）]*）\s*[=＝]?)"
+            )
+            quote_en = re.compile(r'^[“"][A-Za-z]')
+            original_en = re.compile(r"^原文[:：]?\s*(?:Abstract|ABSTRACT)?", re.I)
+            keep: list[str] = []
+            for raw_line in cleaned.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("> ⚠️"):
+                    continue
+                orig_m = original_en.match(line)
+                if orig_m and cjk_ratio(line[orig_m.end():]) < 0.3:
+                    continue
+                if term_table.match(line) or quote_en.match(line):
+                    continue
+                if deliberation.search(line):
+                    continue
+                if len(line) < 12 or cjk_ratio(line) < 0.4:
+                    continue
+                keep.append(line)
+            if keep:
+                return "".join(keep) if all(len(k) < 200 for k in keep) else "\n".join(keep)
+            return cleaned
+        # 非翻译（深度解读）：只做保守前缀清理
+        return _clean_prefix(stripped)
 
     # ──────────────────────────────────────────────
     # 智能全文切分

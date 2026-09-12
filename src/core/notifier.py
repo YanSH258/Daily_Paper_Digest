@@ -5,8 +5,10 @@ notifier.py - 输出与推送模块
   2. 🔬 相关文章深度解读（仅相关文章）
 支持：Markdown 文件 / HTML 文件 / 邮件推送 / 飞书 Webhook
 """
+import os
 import re
 import smtplib
+import hashlib
 import logging
 import requests
 from pathlib import Path
@@ -88,6 +90,108 @@ def classify_article(article: Dict[str, Any]) -> str:
 
 # 邮件必要配置字段
 REQUIRED_EMAIL_KEYS: List[str] = ['smtp_server', 'smtp_port', 'username', 'password', 'recipients']
+
+
+class EmailDeliveryUnknown(TimeoutError):
+    """邮件是否送达不确定：已接受投递后发生异常，不能自动重发（会重复）。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class FeishuDigestDeliveryUnknown(TimeoutError):
+    """整渠道结果不确定，禁止普通补发从头重送；仅暴露安全的段数信息。"""
+
+    def __init__(self, delivered_parts: int, total_parts: int) -> None:
+        self.delivered_parts = delivered_parts
+        self.total_parts = total_parts
+        super().__init__(f"飞书日报投递结果未知，已确认 {delivered_parts}/{total_parts} 段，请核对远端")
+
+
+def _feishu_text_body_size(text: str) -> int:
+    """复用 requests 的 json= 序列化（含转义与 UTF-8），不发请求。"""
+    request = requests.PreparedRequest()
+    request.prepare_headers({})
+    request.prepare_body(data=None, files=None,
+                         json={"msg_type": "text", "content": {"text": text}})
+    return len(request.body)
+
+
+def _feishu_digest_parts(text: str, date_str: str) -> List[str]:
+    """发送前完整分段；去除各段标题后可逐字符还原 Markdown。"""
+    limit = 20000
+    header = f"📚 化学文献日报 {date_str}"
+    if _feishu_text_body_size(header + "\n\n" + text) <= limit:
+        return [header + "\n\n" + text]
+
+    # 先为序号/总数预留相同位数；跨 9→10、99→100 时重新分段，
+    # 直到所有真实标题均不超过预留宽度。不限制段数或截断正文。
+    digits = 1
+    while True:
+        placeholder = "9" * digits
+        prefix = f"{header}（第 {placeholder}/{placeholder} 段）\n\n"
+        chunks = []
+        start = 0
+        while start < len(text):
+            low, high = 0, min(len(text) - start, limit)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if _feishu_text_body_size(prefix + text[start:start + mid]) <= limit:
+                    low = mid
+                else:
+                    high = mid - 1
+            if low == 0:
+                raise ValueError("飞书分段标题和单个字符超过 20000 字节限制")
+            chunks.append(text[start:start + low])
+            start += low
+        if not chunks:
+            raise ValueError("飞书日报标题超过 20000 字节限制")
+        total = len(chunks)
+        if len(str(total)) <= digits:
+            return [f"{header}（第 {index}/{total} 段）\n\n{chunk}"
+                    for index, chunk in enumerate(chunks, 1)]
+        digits = len(str(total))
+
+
+def _report_analysis_sections(analysis: str) -> tuple[list[tuple[str, str]], bool]:
+    """Remove known empty template sections for display, without changing stored analysis."""
+    truncated = "AI 解读因达到输出长度上限被截断" in analysis
+    cleaned = re.sub(r"(?m)^.*\[系统提示：AI 解读因达到输出长度上限被截断[^\n]*$", "", analysis)
+    heading = ""
+    body: list[str] = []
+    sections: list[tuple[str, str]] = []
+    placeholder = re.compile(
+        r"^因未获取到全文，摘要中无此信息[。.]?(?:（摘要中未提及具体结果数据或性能指标。?）)?$"
+    )
+
+    def flush():
+        content = "\n".join(body).strip()
+        if content:
+            sections.append((heading, content))
+
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        match = re.match(r"^#{1,6}\s+(?:\d+[.、]\s*)?(.+)$", stripped)
+        if match:
+            flush()
+            heading = match.group(1).strip()
+            body = []
+            continue
+        if re.fullmatch(r"[-*_]{3,}", stripped):
+            continue
+        probe = re.sub(r"\*\*", "", stripped)
+        if placeholder.fullmatch(probe):
+            continue
+        if re.fullmatch(r"[ab][)）]\s*(?:一句话核心思想|速记版\s*Pipeline)\s*(?:（基于摘要概括，≤20字）)?[：:]?", probe):
+            continue
+        labelled = re.match(r"[ab][)）]\s*(?:一句话核心思想|速记版\s*Pipeline)\s*[：:]\s*(.*)$", probe)
+        if labelled:
+            if placeholder.fullmatch(labelled.group(1)):
+                continue
+            stripped = labelled.group(1)
+        body.append(stripped)
+    flush()
+    return sections, truncated
 
 
 class Notifier:
@@ -189,6 +293,160 @@ class Notifier:
             logger.info(f"推送渠道状态 — {' | '.join(summary_parts)}")
 
         return str(md_path), push_results
+
+    def render_digest_version(self, payload: dict,
+                              out_dir: Optional[Path] = None) -> list[dict[str, Any]]:
+        """从固定快照渲染版本化日报文件（原子写入），返回产物清单。
+
+        payload（digest.service._render_payload 产出）：
+          {digest_date, version, version_id, content_hash, stats,
+           items: [{rank, article_id, category, scores, reason, snapshot}]}
+        文件布局：<output_dir>/daily/<date>/v<version>/report.{md,html}
+        不选文、不查库、不发送——渲染是快照的纯函数。
+        """
+        date_str = payload["digest_date"]
+        version = payload["version"]
+        base = (Path(out_dir) if out_dir else self.output_dir) / "daily" / date_str / f"v{version}"
+        base.mkdir(parents=True, exist_ok=True)
+
+        # 固定快照按持久化 rank 展示，不能复用会按相关性重排的 legacy renderer。
+        # 文献/模型文本作为文本转义，禁止其注入 HTML 或任意协议链接。
+        from html import escape
+        from urllib.parse import quote, urlsplit
+
+        def text(value):
+            return re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1",
+                          escape(str(value if value is not None else "")))
+
+        stats = payload.get("stats") or {}
+        category_names = {
+            "mlip": "机器学习势函数", "ai_materials": "AI 材料", "dft": "DFT / 第一性原理",
+            "llm_science": "LLM 科学", "top_chemistry": "顶刊化学", "other": "其他",
+        }
+        by_category = stats.get("by_category") or {}
+        category_text = "、".join(
+            f"{category_names.get(key, key)} {count} 篇"
+            for key, count in by_category.items() if count
+        ) or "无"
+        lines = [
+            f"# 化学文献日报 {text(date_str)}", "",
+            f"> 从 {stats.get('candidates', '?')} 篇候选文献中精选 {stats.get('selected', '?')} 篇"
+            f"（{category_text}）"
+            + "。", "",
+        ]
+        items = sorted(payload.get("items") or [], key=lambda it: it["rank"])
+        if not items:
+            lines += ["今天暂无符合筛选条件的文献。", ""]
+        for it in items:
+            a = it.get("snapshot") or {}
+            # Invisible anchors preserve the ID/rank mapping used to verify report fidelity.
+            lines += [f"<a id=\"paper-{int(it['article_id'])}-rank-{int(it['rank'])}\"></a>"
+                      if it.get("article_id") is not None else "",
+                      f"## {it['rank']}. {text(a.get('title') or '无标题')}", ""]
+            metadata = [str(value) for value in (a.get("journal"), a.get("pub_date")) if value]
+            if metadata:
+                lines += [" · ".join(text(value) for value in metadata), ""]
+            category = category_names.get(it.get("category"))
+            if category:
+                lines.append(f"- 研究方向：{text(category)}")
+            reason = it.get("reason") or a.get("relevance_reason")
+            if reason and str(reason).strip() not in ("未记录", "无", "暂无"):
+                lines.append(f"- 推荐理由：{text(reason)}")
+            evidence = {"FULLTEXT": "已获取全文", "ABSTRACT": "仅有摘要", "TITLE_ONLY": "仅有标题"}.get(a.get("evidence_level"))
+            if evidence:
+                lines.append(f"- 阅读材料：{evidence}")
+            url = str(a.get("url") or "").strip()
+            try:
+                valid_url = urlsplit(url).scheme.lower() in ("http", "https")
+            except ValueError:
+                valid_url = False
+            if valid_url:
+                safe_url = quote(url, safe=":/?#[]@!$&'*,;=%~+-_")
+                lines.append(f"- 原文链接：[访问原文]({safe_url})")
+            if a.get("doi"):
+                lines.append(f"- DOI：{text(a['doi'])}")
+            abstract = a.get("abstract")
+            if abstract:
+                lines += ["", "### 摘要", "", text(abstract), ""]
+            sections, truncated = _report_analysis_sections(str(a.get("analysis") or ""))
+            if sections:
+                lines += ["", "### AI 解读", ""]
+                for heading, content in sections:
+                    if heading:
+                        lines += [f"#### {text(heading)}", ""]
+                    lines += [text(content), ""]
+            if truncated:
+                lines += ["解读内容不完整。", ""]
+            if not abstract and not sections:
+                lines += ["", "暂无摘要和解读，可通过原文链接查看论文。", ""]
+            elif a.get("analysis") and not sections:
+                lines += ["", "现有材料不足以提供解读，请参阅原文。", ""]
+        md_content = "\n".join(lines)
+        html_content = self._build_html(md_content, date_str)
+
+        artifacts: list[dict[str, Any]] = []
+        requested = payload.get("formats", ("markdown", "html"))
+        for fmt, name, content in (("markdown", "report.md", md_content),
+                                   ("html", "report.html", html_content)):
+            if fmt not in requested:
+                continue
+            path = base / name
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, path)  # 原子替换：临时文件写完再落最终名
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            artifacts.append({"format": fmt, "path": str(path),
+                              "content_hash": content_hash, "status": "rendered"})
+        return artifacts
+
+    def send_digest_files(self, *, md_path: Optional[str], html_path: Optional[str],
+                          date_str: str, channels: List[str]) -> None:
+        """向指定渠道投递已渲染的日报文件；失败抛异常，超时统一抛 TimeoutError。
+
+        由 digest.service 在领取发送记录后的事务外调用；本方法不写任何状态。
+        """
+        for ch in channels:
+            try:
+                if ch == "email":
+                    email_cfg = self.output_cfg.get("email", {})
+                    if html_path and Path(html_path).exists():
+                        content, is_html = Path(html_path).read_text(encoding="utf-8"), True
+                    elif md_path and Path(md_path).exists():
+                        content, is_html = Path(md_path).read_text(encoding="utf-8"), False
+                    else:
+                        raise FileNotFoundError("日报产物缺失，无法投递")
+                    self._send_email(content, date_str, email_cfg,
+                                     is_html=is_html, attachments=[])
+                elif ch == "feishu":
+                    feishu_cfg = self.output_cfg.get("feishu", {})
+                    if not md_path or not Path(md_path).exists():
+                        raise FileNotFoundError("日报 Markdown 产物缺失，无法投递")
+                    # newline="" 保留 CRLF/CR，不能在读取时改变固定 Markdown。
+                    with Path(md_path).open(encoding="utf-8", newline="") as report:
+                        parts = _feishu_digest_parts(report.read(), date_str)
+                    delivered_parts = 0
+                    for part in parts:
+                        try:
+                            self._send_feishu_text(part, feishu_cfg)
+                        except (TimeoutError, requests.exceptions.Timeout) as e:
+                            # 即使首段超时也可能已送达，不能自动重试。
+                            raise FeishuDigestDeliveryUnknown(delivered_parts, len(parts)) from e
+                        except Exception as e:
+                            if delivered_parts:
+                                raise FeishuDigestDeliveryUnknown(delivered_parts, len(parts)) from e
+                            raise
+                        delivered_parts += 1
+                else:
+                    raise ValueError(f"未知渠道 {ch}")
+            except TimeoutError:
+                raise
+            except requests.exceptions.Timeout as e:
+                raise TimeoutError(f"{ch} 投递超时") from e
+            except smtplib.SMTPException as e:
+                # SMTP 超时可能是 socket.timeout 的别名，也可能是 SMTPException
+                if "timeout" in str(e).lower():
+                    raise TimeoutError(f"{ch} 投递超时") from e
+                raise
 
     def resend(self, date_str: str) -> tuple[str, Dict[str, Optional[bool]]]:
         """重发已有日报（不重新抓取/评分/分析），供补发失败推送使用。
@@ -584,9 +842,29 @@ class Notifier:
                 msg_obj.attach(part)
                 logger.info(f"已附加文件: {attach_path.name}")
 
-            with smtplib.SMTP_SSL(cfg["smtp_server"], cfg["smtp_port"]) as server:
+            server: Optional[smtplib.SMTP_SSL] = None
+            try:
+                server = smtplib.SMTP_SSL(cfg["smtp_server"], cfg["smtp_port"])
                 server.login(cfg["username"], cfg["password"])
-                server.sendmail(cfg["username"], cfg["recipients"], msg_obj.as_string())
+                refused = server.sendmail(cfg["username"], cfg["recipients"], msg_obj.as_string())
+            except Exception:
+                raise
+            finally:
+                if server is not None:
+                    try:
+                        server.quit()
+                    except Exception as quit_error:  # noqa: BLE001
+                        # sendmail 已把邮件交给服务器；QUIT 阶段失败不代表未送达
+                        if not isinstance(quit_error, (smtplib.SMTPServerDisconnected,)):
+                            logger.warning(f"SMTP QUIT 异常（邮件可能已送达）: {quit_error}")
+            if refused:
+                # sendmail 返回值：{拒收地址: (错误码, 说明)}；只要有人收到就算部分送达
+                delivered = [r for r in cfg["recipients"] if r not in refused]
+                if delivered:
+                    raise EmailDeliveryUnknown(
+                        f"部分收件人被拒收：{refused}；已送达：{delivered}。请核对收件情况，"
+                        "不要直接重发（会重复投递已送达地址）")
+                raise smtplib.SMTPRecipientsRefused(refused)
             logger.info(f"邮件推送成功 (格式: {mime_type})")
         except ValueError:
             # 配置校验异常直接向上传递，不重复记录
@@ -603,8 +881,18 @@ class Notifier:
     def _send_feishu_text(self, text: str, cfg: Dict[str, Any]) -> None:
         """发送纯文本到飞书 Webhook（供重发/摘要场景复用）。"""
         payload = {"msg_type": "text", "content": {"text": text}}
-        resp = requests.post(cfg["webhook_url"], json=payload, timeout=10)
-        resp.raise_for_status()
+        try:
+            resp = requests.post(cfg["webhook_url"], json=payload, timeout=10)
+            resp.raise_for_status()
+            result = resp.json()
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            # A lost or unreadable response cannot prove the POST was rejected.
+            # Treat even the first part as uncertain; never blindly replay it.
+            raise TimeoutError("飞书响应无法确认，需核对远端") from exc
+        if not isinstance(result, dict) or not any(k in result for k in ("code", "StatusCode")):
+            raise TimeoutError("飞书响应缺少结果码，需核对远端")
+        if any(result[k] != 0 for k in ("code", "StatusCode") if k in result):
+            raise RuntimeError("飞书未接受推送（非零结果码）")
 
     def _send_feishu(self, relevant: List[Dict[str, Any]],
                      all_articles: List[Dict[str, Any]],

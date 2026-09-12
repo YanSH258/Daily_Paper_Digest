@@ -22,6 +22,8 @@ const Article = {
       document.getElementById("loading").hidden = true;
       document.getElementById("layout").hidden = false;
       this.render(a);
+      this.loadRelated(a);
+      this.loadJournal(a);
       this.loadWatchState();
       this.loadHighlights();
       Chat.init(a.id);
@@ -46,6 +48,9 @@ const Article = {
       ` · <b>作者：</b>${API.esc(a.authors || "-")}` +
       (a.doi ? ` · <b>DOI：</b><a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener">${API.esc(a.doi)}</a>` : "");
 
+    const translated = document.getElementById("aTitleZh");
+    translated.hidden = !a.title_zh;
+    translated.textContent = a.title_zh ? a.title_zh + " · 机器翻译" : "";
     const score = Number(a.relevance || 0);
     document.getElementById("aPills").innerHTML = `
       <span class="pill blue">${API.esc(a.topic || "未分类")}</span>
@@ -60,11 +65,10 @@ const Article = {
       ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
     `;
 
-    const reasonEl = document.getElementById("aReason");
-    if (a.relevance_reason) {
-      reasonEl.hidden = false;
-      reasonEl.innerHTML = `<b>推荐理由：</b>${API.esc(a.relevance_reason)}`;
-    }
+    document.getElementById("aReason").textContent = a.relevance_reason || "暂无研究关联依据，暂不判断对你课题的适用性。";
+    document.getElementById("analysisEvidence").textContent = a.evidence_level === "FULLTEXT"
+      ? "AI 解读 · 基于全文，请结合原文核实" : a.evidence_level === "ABSTRACT_ONLY"
+      ? "AI 解读 · 基于摘要" : "AI 解读 · 依据范围未确认";
 
     // 操作行
     const fb = a.relevance_feedback || "";
@@ -86,17 +90,8 @@ const Article = {
     document.getElementById("feedbackNote").textContent =
       fb === "relevant" ? "已标记为相关，推荐评估会参考。" : fb === "irrelevant" ? "已标记为不相关。" : "";
 
-    // 结构化解读：按 ### 分节，总结置顶
-    if (a.analysis) {
-      const sections = this.splitSections(a.analysis);
-      const concl = sections.find((s) => /总结|速记/.test(s.title));
-      if (concl) {
-        document.getElementById("conclusionCard").hidden = false;
-        document.getElementById("conclusionBody").innerHTML = MarkdownLite.render(concl.body.trim());
-      }
-      document.getElementById("analysisCard").hidden = false;
-      document.getElementById("analysisBody").innerHTML = MarkdownLite.render(a.analysis);
-    }
+    document.getElementById("analysisBody").innerHTML = a.analysis
+      ? MarkdownLite.render(a.analysis) : '<p class="muted">暂无解读。阅读摘要和原文后再判断研究价值。</p>';
 
     // 摘要
     document.getElementById("abstractBody").innerHTML =
@@ -122,6 +117,33 @@ const Article = {
     if (a.zotero_key) {
       zBtn.textContent = "✓ 已在 Zotero";
       document.getElementById("zoteroNote").textContent = "条目 key: " + a.zotero_key;
+    }
+  },
+
+  async loadJournal(a) {
+    const box = document.getElementById("journalInfo");
+    box.textContent = a.journal || "期刊信息未提供";
+    try {
+      const data = await API.get("/api/journal-metrics");
+      const metric = (data.items || []).find(m => m.name === a.journal);
+      if (!metric) return;
+      box.innerHTML = `<strong>${API.esc(a.journal)}</strong>` +
+        `<p class="small">影响因子：${API.esc(metric.if_value ?? "未提供")} · 分区：${API.esc(metric.cas_zone ?? "未提供")}</p>` +
+        '<p class="small muted">本地期刊指标；指标年份未确认</p>';
+    } catch (e) { box.append(document.createTextNode("（指标暂不可用）")); }
+  },
+
+  async loadRelated(a) {
+    const box = document.getElementById("relatedArticles");
+    if (!a.topic) { box.textContent = "尚无研究方向，暂无相关文献。"; return; }
+    try {
+      const data = await API.get("/api/articles?" + new URLSearchParams({topic: a.topic, limit: "6", min_score: "0"}));
+      const items = (data.items || []).filter(item => Number(item.id) !== Number(a.id)).slice(0, 5);
+      box.innerHTML = items.length ? items.map(item =>
+        `<a class="related-item" href="/article/${Number(item.id)}">${API.esc(API.cleanTitle(item.title || "无标题"))}<small>同研究方向：${API.esc(a.topic)}</small></a>`
+      ).join("") : '<p class="small muted">库内暂无同方向文献。</p>';
+    } catch (e) {
+      box.innerHTML = '<p class="small muted">相关文献加载失败。</p><button onclick="Article.loadRelated(Article.a)">重试</button>';
     }
   },
 

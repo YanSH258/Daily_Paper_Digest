@@ -21,11 +21,12 @@ daily-paper-web --config config/config.yaml --port 8080
 
 | 意图 | 工具 |
 |------|------|
-| 今天读什么 | `today_top_n` |
+| 今天读什么 | `preview_daily_digest`（版本化预览）/ `today_top_n`（legacy） |
 | 找文献 | `search_papers` |
 | 深入某篇 | `get_paper`（全文默认不返回，需要引用原文时传 include_fulltext=true） |
 | 管理阅读 | `set_reading_status` / `star_paper` / `add_note` / `add_tags` |
 | 组织课题 | `list_topics` / `create_topic` / `add_papers_to_topic` / `get_topic` |
+| 正式日报 | `get_digest_history` 选版本 → `get_digest` 看快照；`publish_daily_digest` 发布（写操作） |
 | 归档 | `push_to_zotero` |
 | 追踪 | `watch_paper` / `watch_author` |
 | 跑任务 | `run_pipeline` / `task_status` |
@@ -35,9 +36,10 @@ daily-paper-web --config config/config.yaml --port 8080
 ## 工作流
 
 ### 晨间简报（用户说"今天有什么文献 / 今天读什么"）
-1. `today_top_n` 取今日精选，按 rank 顺序汇报，每篇一句话理由（用 relevance_reason + title_zh）
+1. `preview_daily_digest` 取今日 Top-N，按 rank 顺序汇报，每篇一句话理由
 2. 有 `watch_paper` 或星标的文章如有新引用，单独提醒
 3. 结尾问一句："要把哪几篇加入待读清单？"——用户点名后批量 `set_reading_status(id, "queued")`
+4. 用户明确要"正式发布/推送日报"时才用 `publish_daily_digest`（写操作；当日已有版本会幂等复用）
 
 ### 周回顾（用户说"这周怎么样 / 周报"）
 1. `list_reports` 看本周周报是否已生成；没有则提示用户可运行 `run_pipeline(mode="weekly")`（先征得同意）
@@ -51,6 +53,6 @@ daily-paper-web --config config/config.yaml --port 8080
 ## 硬性规则
 
 1. **成本**：`run_pipeline`、`compare_papers`、`related_work_draft`、`chat_with_paper` 都会调用 LLM 或触发全量抓取——**必须先向用户说明并获得同意**，不得主动调用。
-2. **推送**：`push_to_zotero` 影响用户外部账号，批量推送前列出将推送的文献清单征得确认。
-3. **上下文卫生**：`get_paper` 默认不带全文；只有当用户要求引用原文细节时才传 `include_fulltext=true`，且注意全文可达数万字。
+2. **推送与发布**：`push_to_zotero` 影响用户外部账号，批量推送前列出将推送的文献清单征得确认；`publish_daily_digest` 是写操作（固定快照并可能触发邮件/飞书投递），调用前向用户确认日期与渠道。
+3. **上下文卫生**：`get_paper` 默认不带全文；只有当用户要求引用原文细节时才传 `include_fulltext=true`，且注意全文可达数万字。`get_digest` 的条目摘要/解读已截断，需要完整内容用网页预览。
 4. **诚实汇报**：任务失败（如 LLM 余额不足、服务未启动）原样转述错误，不要编造结果。服务未启动时提示：`daily-paper-web --config config/config.yaml`。

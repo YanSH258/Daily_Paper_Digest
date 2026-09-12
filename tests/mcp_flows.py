@@ -1,90 +1,52 @@
-"""模拟 agent 真实工作流：晨间简报 / 文献整理。检查每次调用的上下文体积。"""
+"""Opt-in, strictly read-only MCP workflow/context audit.
+
+Set MCP_FLOW_ALLOW_EXTERNAL=1 and DPD_E2E_API explicitly. For isolated protocol
+coverage run mcp_smoke_local.py instead. No fallback to arbitrary article IDs.
+"""
 import asyncio
-import json
 import os
-import sys
 from pathlib import Path
+import sys
+import json
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-from mcp import ClientSession, StdioServerParameters  # noqa: E402
-from mcp.client.stdio import stdio_client  # noqa: E402
-
-REPO = Path(__file__).resolve().parent.parent
-API_BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090"
-
-
-def parse(result):
-    err = getattr(result, "isError", False)
-    payload = None
-    for block in result.content:
-        text = getattr(block, "text", None)
-        if text:
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                payload = text
-            break
-    return err, payload
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src"))
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from mcp_e2e import EXPECTED_TOOLS, parse
 
 
-def size_of(payload) -> int:
-    return len(json.dumps(payload, ensure_ascii=False)) if not isinstance(payload, str) else len(payload)
-
-
-async def main() -> int:
-    params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(REPO / "src" / "mcp_server.py")],
-        env={"DPD_API": API_BASE, "PATH": os.environ.get("PATH", "")},
-    )
-    issues = []
+async def main():
+    address = os.environ.get("DPD_E2E_API", "").strip()
+    if os.environ.get("MCP_FLOW_ALLOW_EXTERNAL") != "1" or not address:
+        print("拒绝运行：设置 MCP_FLOW_ALLOW_EXTERNAL=1 和 DPD_E2E_API 测试地址。")
+        return 2
+    env = dict(os.environ, DPD_API=address)
+    env["PYTHONPATH"] = os.pathsep.join(str(Path(p).resolve()) for p in sys.path if p)
+    params = StdioServerParameters(command=sys.executable,
+                                  args=[str(REPO / "src/mcp_server.py")], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            print("──── 晨间简报流程 ────")
-            err, digest = parse(await session.call_tool("today_top_n", {}))
-            n = size_of(digest)
-            print(f"1. today_top_n → {n} 字符")
-            if n > 20000:
-                issues.append(f"today_top_n 载荷过大: {n}")
-            top = (digest.get("selected") or [{}])[0]
-            print(f"   汇报示例: #{top.get('rank')} {str(top.get('title'))[:50]}")
-            print(f"   理由: {str(top.get('relevance_reason'))[:60]}")
+            assert {t.name for t in (await session.list_tools()).tools} == EXPECTED_TOOLS
 
-            err, queued = parse(await session.call_tool("search_papers", {"read_status": "queued"}))
-            n = size_of(queued)
-            print(f"2. search_papers(queued) → {n} 字符, {queued.get('total')} 篇待读")
-            if n > 30000:
-                issues.append(f"search 载荷过大: {n}")
-            for it in (queued.get("items") or [])[:3]:
-                if len(it.get("abstract") or "") > 300:
-                    issues.append("search 结果 abstract 未裁剪")
-                    break
+            async def call(name, args, maximum=30000):
+                error, data = parse(await session.call_tool(name, args))
+                assert not error and isinstance(data, dict), (name, data)
+                size = len(json.dumps(data, ensure_ascii=False))
+                assert size <= maximum, (name, size)
+                print(f"{name}: {size} 字符")
+                return data
 
-            err, paper = parse(await session.call_tool(
-                "get_paper", {"paper_id": (queued.get("items") or [{}])[0].get("id", 1)}))
-            n = size_of(paper)
-            print(f"3. get_paper(不含全文) → {n} 字符")
-            if n > 30000:
-                issues.append(f"get_paper 不含全文仍过大: {n}")
-
-            print("──── 整理流程 ────")
-            err, highs = parse(await session.call_tool("search_papers", {"min_score": 8, "limit": 10}))
-            print(f"1. 高分文献 → {size_of(highs)} 字符, {highs.get('total')} 篇")
-            err, data = parse(await session.call_tool("star_paper",
-                                                      {"paper_id": (highs.get("items") or [{}])[0].get("id", 1),
-                                                       "starred": True}))
-            print(f"2. star_paper → ok={data.get('ok')}" if not err else f"2. star_paper → {data}")
-
-            print("──── 上下文审计 ────")
-            if issues:
-                for i in issues:
-                    print("  ✗", i)
-            else:
-                print("  ✓ 所有载荷在合理范围内")
-
-    return 1 if issues else 0
+            await call("preview_daily_digest", {})
+            history = await call("get_digest_history", {"limit": 5})
+            if history.get("items"):
+                await call("get_digest", {"version_id": history["items"][0]["version_id"]}, 50000)
+            queued = await call("search_papers", {"read_status": "queued"})
+            if queued.get("items"):
+                await call("get_paper", {"paper_id": queued["items"][0]["id"]})
+            await call("search_papers", {"min_score": 8, "limit": 10})
+    return 0
 
 
 if __name__ == "__main__":

@@ -33,13 +33,15 @@ from core.db       import Database
 from core.fetcher  import JournalFetcher, RSS_ONLY_PUBLISHERS
 from core.analyzer import LLMAnalyzer, PROMPT_VERSION
 from core.notifier import Notifier, classify_article
-from core.tracking import collect_tracking_articles, record_tracking_edges
+from core.tracking import (collect_tracking_articles, mark_tracking_cursor,
+                           record_tracking_edges)
 from digest.config import validate_digest_config
+from digest.service import DigestError, DigestService
 from fetchers.models import FetchResult
-from utils.paths   import resolve_against_root
+from utils.paths   import init_config, resolve_against_root, resolve_config_paths
 
 # ── 日志配置 ──────────────────────────────────────────────────
-LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
+LOG_DIR = resolve_against_root("data/logs")
 
 _logger_ready = False
 
@@ -105,15 +107,19 @@ def _apply_env_overrides(cfg: dict) -> dict:
 
 
 def load_config(path: str = "config/config.yaml") -> dict:
-    with open(path, "r", encoding="utf-8") as f:
+    with resolve_against_root(path).open("r", encoding="utf-8") as f:
         cfg: dict = yaml.safe_load(f)
-    return _apply_env_overrides(cfg)
+    cfg = resolve_config_paths(_apply_env_overrides(cfg))
+    db_path = cfg.get("database", {}).get("path")
+    if db_path and db_path != ":memory:":
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    return cfg
 
 
 def load_config_from_obj(cfg: dict) -> dict:
     """基于内存中的配置对象（如 ruamel CommentedMap）生成应用环境变量后的副本，
     供设置保存前做完整校验，不落盘。"""
-    return _apply_env_overrides(copy.deepcopy(cfg))
+    return resolve_config_paths(_apply_env_overrides(copy.deepcopy(cfg)))
 
 
 def validate_config(config: dict) -> None:
@@ -214,9 +220,7 @@ class RunLock:
         except ImportError:  # 非 POSIX 平台降级为仅进程内约束
             fcntl = None  # noqa: F841
         self._fcntl_available = fcntl is not None
-        db_path = Path(config.get("database", {}).get("path", "data/db/chem_daily.db"))
-        if not db_path.is_absolute():
-            db_path = Path(__file__).resolve().parent.parent / db_path
+        db_path = resolve_against_root(config.get("database", {}).get("path", "data/db/chem_daily.db"))
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = db_path.parent / ".pipeline.lock"
         self._handle: Optional[Any] = None
@@ -392,6 +396,12 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             edges = record_tracking_edges(db, list(zip(inserted_ids, new_articles)), tracking_meta)
             if edges:
                 stats["citation_edges"] = edges
+            # 追踪文章已全部尝试入库：此时才推进引文/作者游标。
+            # 入库失败（save_articles_batch 部分失败）时不推进对应窗口，下轮可重试。
+            if not (stats["saved"] < len(new_articles)):
+                mark_tracking_cursor(db, tracking_meta)
+            else:
+                logger.warning("  有文章入库失败，本次不推进追踪游标（失败窗口将重试）")
         logger.info(f"  已入库基础记录 {stats['saved']} 篇（待评分）")
         progress("saved_base")
 
@@ -646,54 +656,73 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             logger.exception(f"HTML 索引生成失败: {e}")
         progress("index")
 
-        # ── Step 7: 生成报告并推送 ─────────────────────────────
-        logger.info("Step 7: 生成报告并推送")
-        relevant_articles.sort(key=lambda a: -(a.get("relevance") or 0))
-        existing_report = db.get_report(date_str)
-
+        # ── Step 7: 发布版本化日报（快照 → 渲染 → 渠道投递）────
+        logger.info("Step 7: 发布版本化日报")
+        output_cfg = config.get("output", {})
+        report_channels = [
+            ch for ch, enabled in (
+                ("email", output_cfg.get("email", {}).get("enabled", False)),
+                ("feishu", output_cfg.get("feishu", {}).get("enabled", False)),
+            ) if enabled
+        ]
+        digest_service = DigestService(db, config, notifier=notifier)
+        # 无任何新处理且当日已有发布版本：保留已有内容，不覆盖不重推。
+        # 无新增但当日尚未发布时，仍从历史合格池选文发布（任务书 §4.1）
+        existing_version = db.get_latest_published_digest_version(date_str)
         if (not new_articles and not score_retry and not analysis_retry
-                and existing_report is not None):
-            # 无任何新处理且当日报告已存在：保留已有内容，不覆盖不重推
-            reason = "无新增文章且当日报告已存在，跳过重新生成与推送"
+                and existing_version is not None):
+            reason = "无新增文章且当日日报版本已存在，跳过重新生成与推送"
             stats["report_skipped_reason"] = reason
+            existing_result = digest_service.get_digest(existing_version["id"])
+            stats.update(digest_version_id=existing_result["version_id"],
+                         digest_version=existing_result["version"],
+                         digest_overall_status=existing_result["overall_status"],
+                         digest_errors=existing_result["errors"],
+                         selected_count=existing_result["selected_count"])
             logger.info(f"  {reason}")
         else:
-            # 同日多批运行：合并库中当日已评分相关文章，避免覆盖丢失上午批次
-            day_relevant: dict[Any, dict] = {}
+            digest_result = None
             try:
-                next_day = (datetime.strptime(date_str, "%Y-%m-%d").date()
-                            + timedelta(days=1)).isoformat()
-                for row in db.list_articles_created_between(date_str, next_day):
-                    if (row.get("relevance") or 0) >= threshold:
-                        day_relevant[row.get("id")] = row
-            except Exception as e:  # noqa: BLE001
-                logger.warning("合并当日报告文章失败（继续用本批）: %s", e)
-            for a in relevant_articles:
-                if a.get("id") is not None:
-                    day_relevant[a["id"]] = a
-            report_articles = sorted(
-                day_relevant.values(),
-                key=lambda x: -(x.get("relevance") or 0),
-            )
-            day_new_count = max(len(new_articles), len(day_relevant))
-            md_path, push_results = notifier.notify(
-                report_articles,
-                all_articles=new_articles,
-                date_str=date_str,
-            )
-            db.save_report(
-                report_date=date_str,
-                file_path=md_path,
-                total_found=day_new_count,
-                total_pushed=len(report_articles),
-                push_results=push_results,
-            )
-            stats["report_path"] = md_path
-            stats["push_results"] = push_results
-            if len(report_articles) > len(relevant_articles):
+                digest_result = digest_service.publish_digest(date_str, channels=report_channels)
+            except DigestError as e:
+                # 历史/配置/持久化失败：停止正式发布，不默认当成空历史
+                logger.error(f"  日报发布失败 [{e.code}]: {e}")
+                stats["report_skipped_reason"] = f"{e.code}: {e}"
+                stats["digest_overall_status"] = "failed"
+                stats["digest_errors"] = [e.to_dict()]
+            if digest_result is not None:
+                md_art = next((a for a in digest_result["artifacts"]
+                               if a.get("format") == "markdown"), None)
+                stats["report_path"] = (md_art or {}).get("path")
+                stats["digest_version_id"] = digest_result["version_id"]
+                stats["digest_version"] = digest_result["version"]
+                stats["selected_count"] = digest_result["selected_count"]
+                stats["digest_overall_status"] = digest_result["overall_status"]
+                stats["digest_errors"] = digest_result["errors"]
+                stats["digest_artifacts"] = digest_result["artifacts"]
+                stats["digest_deliveries"] = digest_result["deliveries"]
+                push_results = {
+                    d["channel"]: d["status"] == "sent"
+                    for d in digest_result["deliveries"]
+                    if d.get("status") in ("sent", "failed")
+                }
+                stats["push_results"] = push_results or None
+                if digest_result.get("note"):
+                    logger.info(f"  {digest_result['note']}")
+                for err in digest_result["errors"]:
+                    logger.warning(f"  日报告警 [{err.get('code')}]: {err.get('message')}")
+                # 兼容指针：daily_reports 保留为最新版本索引（权威内容在 digest_versions）
+                db.save_report(
+                    report_date=date_str,
+                    file_path=stats["report_path"] or "",
+                    total_found=stats.get("fetched_rss", 0),
+                    total_pushed=digest_result["selected_count"],
+                    push_results=push_results or None,
+                )
                 logger.info(
-                    "  日报已合并当日更早批次: 本批相关 %d → 当日合计 %d",
-                    len(relevant_articles), len(report_articles),
+                    "  日报版本 v%d 已发布（created=%s, 精选 %d 篇）: %s",
+                    digest_result["version"], digest_result["created"],
+                    digest_result["selected_count"], stats["report_path"],
                 )
 
         logger.info(
@@ -708,8 +737,11 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             has_failure = bool(
                 stats["db_errors"] or stats["scored_failed"]
                 or stats["analyzed_failed"] or not push_ok
+                or stats.get("digest_overall_status") in ("partial", "failed")
             )
-            db.task_finish(task_id, status="partial" if has_failure else "success", stats=stats)
+            task_status = ("failed" if stats.get("digest_overall_status") == "failed"
+                           else "partial" if has_failure else "success")
+            db.task_finish(task_id, status=task_status, stats=stats)
         return stats
     except Exception as e:
         if own_task:
@@ -742,53 +774,84 @@ def run_scheduler(config: dict):
 # ── CLI 入口 ──────────────────────────────────────────────────
 
 def push_only(config: dict, date_str: str) -> dict:
-    """只补发指定日期的日报推送，不重新抓取、评分或分析。"""
-    notifier = Notifier(config)
-    md_path, push_results = notifier.resend(date_str)
-    logger.info(f"补发完成: {push_results}")
-
+    """优先补发最新固定版本；无版本记录时兼容旧日报文件。"""
     db = Database(config["database"]["path"])
-    rep = db.get_report(date_str)
-    db.save_report(
-        report_date=date_str,
-        file_path=rep["file_path"] if rep else md_path,
-        total_found=rep["total_found"] if rep else 0,
-        total_pushed=rep["total_pushed"] if rep else 0,
-        push_results=push_results,
-    )
-    return {"date": date_str, "report_path": md_path, "push_results": push_results}
+    try:
+        version = db.get_latest_published_digest_version(date_str)
+        notifier = Notifier(config)
+        if version is not None:
+            result = DigestService(db, config, notifier=notifier).retry_digest_send(version["id"])
+            md_path = next((a.get("path") for a in result["artifacts"]
+                            if a.get("format") == "markdown"), None)
+            # retry 的 deliveries 只含本次尝试；兼容结果保留全部渠道状态。
+            sends = db.list_digest_sends(version["id"])
+            push_results = {
+                s["channel"]: (True if s["status"] == "sent" else
+                               False if s["status"] == "failed" else None)
+                for s in sends
+            }
+            db.save_report(
+                report_date=date_str, file_path=md_path or "",
+                total_found=result["stats"].get("candidates", 0),
+                total_pushed=result["selected_count"], push_results=push_results,
+            )
+            logger.info("版本 v%s 补发完成: %s", result["version"], push_results)
+            return {**result, "report_path": md_path, "push_results": push_results}
+
+        # 有版本记录但没有已发布版本时，也不能拿旧文件冒充补发。
+        if db.list_digest_versions(date_from=date_str, date_to=date_str, limit=1):
+            raise DigestError("当日版本尚未发布，无法补发", code="CONFLICT")
+        md_path, push_results = notifier.resend(date_str)
+        rep = db.get_report(date_str)
+        db.save_report(
+            report_date=date_str,
+            file_path=rep["file_path"] if rep else md_path,
+            total_found=rep["total_found"] if rep else 0,
+            total_pushed=rep["total_pushed"] if rep else 0,
+            push_results=push_results,
+        )
+        logger.info("旧日报补发完成: %s", push_results)
+        return {"date": date_str, "report_path": md_path, "push_results": push_results,
+                "version_id": None, "version": None}
+    finally:
+        db.close()
 
 
 def run_weekly(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None) -> dict:
     """生成文献周报（方向分布对比/阅读盘点/引文追踪/热词）。"""
     from utils.weekly import build_weekly, _week_bounds
     db = Database(config["database"]["path"])
-    md_path, html_path, label = build_weekly(config, db, date_str)
-    start, end, _ = _week_bounds(date_str or datetime.now().strftime("%Y-%m-%d"))
-    week_articles = db.list_articles_created_between(start, end)
-    relevant = [a for a in week_articles
-                if (a.get("relevance") or 0) >= config.get("relevance_threshold", 5)]
-    db.save_report(
-        report_date=f"week-{label}",
-        file_path=md_path,
-        total_found=len(week_articles),
-        total_pushed=len(relevant),
-        kind="weekly",
-    )
-    return {"label": label, "report_path": md_path, "html_path": html_path,
-            "total_found": len(week_articles), "total_pushed": len(relevant)}
+    try:
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        md_path, html_path, label = build_weekly(config, db, date_str)
+        start, end, _ = _week_bounds(date_str)
+        week_articles = db.list_articles_created_between(start, end)
+        relevant = [a for a in week_articles
+                    if (a.get("relevance") or 0) >= config.get("relevance_threshold", 5)]
+        db.save_report(
+            report_date=f"week-{label}",
+            file_path=md_path,
+            total_found=len(week_articles),
+            total_pushed=len(relevant),
+            kind="weekly",
+        )
+        return {"label": label, "report_path": md_path, "html_path": html_path,
+                "total_found": len(week_articles), "total_pushed": len(relevant)}
+    finally:
+        db.close()
 
 
 def backup_database(config: dict, keep: int = 7) -> str:
     """备份数据库到 data/backups/，滚动保留最近 keep 份。"""
-    import shutil
-    src = Path(config["database"]["path"])
-    if not src.is_absolute():
-        src = Path(__file__).resolve().parent.parent / src
-    backup_dir = src.parent / "backups"
+    import sqlite3
+    from contextlib import closing
+    src = resolve_against_root(config["database"]["path"])
+    backup_dir = resolve_against_root(config.get("backup", {}).get("directory") or "data/backups")
     backup_dir.mkdir(parents=True, exist_ok=True)
-    dest = backup_dir / f"{src.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}{src.suffix}"
-    shutil.copy2(src, dest)
+    dest = backup_dir / f"{src.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}{src.suffix}"
+    with closing(sqlite3.connect(src.as_uri() + "?mode=ro", uri=True)) as source:
+        with closing(sqlite3.connect(dest)) as backup:
+            source.backup(backup)
     backups = sorted(backup_dir.glob(f"{src.stem}-*{src.suffix}"))
     for old in backups[:-keep] if keep > 0 else []:
         old.unlink(missing_ok=True)
@@ -799,31 +862,44 @@ def backup_database(config: dict, keep: int = 7) -> str:
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(description="化学文献日报工具")
-    parser.add_argument("--config",   default="config/config.yaml", help="配置文件路径")
+    parser.add_argument("--config",   default="config/config.yaml", help="配置路径（相对数据根）")
+    parser.add_argument("--init-config", action="store_true", help="从内置模板创建配置，不覆盖已有文件")
     parser.add_argument("--schedule", action="store_true",   help="开启每日定时模式")
     parser.add_argument("--date",     default=None,          help="指定报告日期 (YYYY-MM-DD)")
     parser.add_argument("--push-only", default=None, metavar="DATE",
                         help="只补发指定日期的日报推送（不重新抓取/评分/分析）")
     parser.add_argument("--weekly", action="store_true", help="生成本周文献周报")
     parser.add_argument("--backup", action="store_true", help="备份数据库（滚动保留最近 N 份）")
-    parser.add_argument("--digest-dry-run", action="store_true",
-                        help="从现有库生成每日 Top-N 并打印选中/落选原因（不写库）")
-    parser.add_argument("--digest", action="store_true",
-                        help="生成每日 Top-N 并写入 digest_entries（不抓取）")
+    digest_mode = parser.add_mutually_exclusive_group()
+    digest_mode.add_argument("--digest-dry-run", action="store_true",
+                             help="预览 Top-N；只写审阅文本，不记录选择历史或发送")
+    digest_mode.add_argument("--digest", action="store_true",
+                             help="固定并渲染当日正式日报版本；同日复用，不抓取、不发送")
     args = parser.parse_args()
+
+    if args.init_config:
+        try:
+            path = init_config(args.config)
+        except FileExistsError:
+            parser.error(f"配置已存在，不覆盖: {resolve_against_root(args.config)}")
+        print(f"配置已创建: {path}；请编辑后再运行。")
+        return
 
     config = load_config(args.config)
     validate_config(config)
 
-    # 启动时把上次异常退出遗留的 running 任务标记为 interrupted
-    try:
-        _db = Database(config["database"]["path"])
-        n = _db.mark_interrupted_tasks()
-        if n:
-            logger.info(f"已将 {n} 个遗留运行中的任务标记为 interrupted")
-        _db.close()
-    except Exception as e:
-        logger.warning(f"初始化任务记录失败: {e}")
+    # 查询/发布已有文献不拥有其他进程的流水线任务，不修改其 running 状态。
+    if not (args.digest_dry_run or args.digest or args.push_only or args.backup):
+        try:
+            _db = Database(config["database"]["path"])
+            try:
+                n = _db.mark_interrupted_tasks()
+                if n:
+                    logger.info(f"已将 {n} 个遗留运行中的任务标记为 interrupted")
+            finally:
+                _db.close()
+        except Exception as e:
+            logger.warning(f"初始化任务记录失败: {e}")
 
     if args.push_only:
         result = push_only(config, args.push_only)
@@ -843,16 +919,15 @@ def main():
         from digest.builder import build_daily_digest, format_dry_run_report
         db = Database(config["database"]["path"])
         try:
-            result = build_daily_digest(
-                db, config, date_str=args.date, dry_run=not args.digest,
-            )
-            report = format_dry_run_report(result)
-            print(report)
-            logger.info("Digest %s 完成: selected=%s dry_run=%s",
-                        args.date or "today",
-                        result["selection"].stats.get("selected"),
-                        result["dry_run"])
-            if not args.digest:
+            if args.digest:
+                import json
+                result = DigestService(db, config, notifier=Notifier(config)).publish_digest(
+                    args.date or datetime.now().strftime("%Y-%m-%d"), channels=[])
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                result = build_daily_digest(db, config, date_str=args.date, dry_run=True)
+                report = format_dry_run_report(result)
+                print(report)
                 path = _write_dry_run_report(config, result["date"], report)
                 if path:
                     logger.info(f"  dry-run 审阅文件: {path}")

@@ -43,8 +43,9 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         except Exception as e:  # noqa: BLE001 - 单篇失败不阻断，且不推进游标
             logger.warning("引文追踪失败 (%s): %s", doi, e)
             continue
-        # 仅采集成功后才推进游标，避免失败窗口被跳过
-        db.mark_seed_checked(seed["id"])
+        # 游标推迟到文章成功入库之后（见函数末尾 mark_successful_seeds），
+        # 避免"采集返回但入库前进程中断"造成该窗口文献永久漏采
+        seed["__window_since"] = since
         for work in citing:
             w_doi = (work.get("doi") or "").strip().lower()
             if w_doi:
@@ -59,6 +60,7 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
             work["discovered_via"] = "citation_watch"
             work["publisher"] = "DEFAULT"
             articles.append(work)
+        meta.setdefault("seed_windows", {})[seed["id"]] = since
         if citing:
             logger.info("引文追踪: %s 新增 %d 篇引用", seed["title"][:50], len(citing))
 
@@ -74,7 +76,9 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         except Exception as e:  # noqa: BLE001
             logger.warning("作者追踪失败 (%s): %s", author["name"], e)
             continue
-        db.mark_author_run(author["id"])
+        # 同引文追踪：游标推迟到入库成功后推进（见 mark_tracking_cursor）
+        meta.setdefault("seed_windows", {})
+        meta.setdefault("author_windows", {})[author["id"]] = True
         count = 0
         for work in works:
             w_doi = (work.get("doi") or "").strip()
@@ -91,6 +95,20 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
             logger.info("作者追踪: %s 新增 %d 篇", author["name"], count)
 
     return articles, meta
+
+
+def mark_tracking_cursor(db, meta: dict[str, Any]) -> None:
+    """在追踪文章全部入库成功后调用：推进引文/作者游标。
+
+    collect_tracking_articles 不再提前推进游标；只有调用方确认入库完成后
+    才调用本函数，保证"失败窗口可重试、成功窗口不重复采集"。
+    """
+    if not meta:
+        return
+    for seed_id in (meta.get("seed_windows") or {}):
+        db.mark_seed_checked(seed_id)
+    for author_id in (meta.get("author_windows") or {}):
+        db.mark_author_run(author_id)
 
 
 def record_tracking_edges(db, inserted: list[tuple[Optional[int], dict]],

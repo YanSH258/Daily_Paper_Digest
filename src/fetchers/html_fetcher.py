@@ -98,12 +98,14 @@ def fetch_html(url: str, timeout: int = 20, selectors: dict = None,
                 network_mode=net["network_mode"],
                 access_path=net["access_path"],
             )
-        text = _extract_text(resp.text, selectors or {})
+        text, is_fulltext = _extract_text(resp.text, selectors or {})
         if text:
-            logger.info(f"  HTML 全文提取成功 ({len(text)} 字, {net['network_mode']})")
+            logger.info(
+                f"  HTML 提取成功 ({len(text)} 字, {'全文' if is_fulltext else '仅摘要'}, {net['network_mode']})")
             return FetchResult(
                 text=text,
-                best_available_format=BestFormat.HTML_FULLTEXT,
+                best_available_format=(BestFormat.HTML_FULLTEXT if is_fulltext
+                                       else BestFormat.ABSTRACT_ONLY),
                 fetch_status=FetchStatus.SUCCESS,
                 network_mode=net["network_mode"],
                 access_path=net["access_path"],
@@ -162,12 +164,14 @@ def fetch_html(url: str, timeout: int = 20, selectors: dict = None,
             access_path=net["access_path"],
         )
 
-    text = _extract_text(resp.text, selectors or {})
+    text, is_fulltext = _extract_text(resp.text, selectors or {})
     if text:
-        logger.info(f"  HTML 全文提取成功 ({len(text)} 字, {net['network_mode']})")
+        logger.info(
+            f"  HTML 提取成功 ({len(text)} 字, {'全文' if is_fulltext else '仅摘要'}, {net['network_mode']})")
         return FetchResult(
             text=text,
-            best_available_format=BestFormat.HTML_FULLTEXT,
+            best_available_format=(BestFormat.HTML_FULLTEXT if is_fulltext
+                                   else BestFormat.ABSTRACT_ONLY),
             fetch_status=FetchStatus.SUCCESS,
             network_mode=net["network_mode"],
             access_path=net["access_path"],
@@ -182,13 +186,13 @@ def fetch_html(url: str, timeout: int = 20, selectors: dict = None,
     )
 
 
-def _extract_text(html: str, selectors: dict) -> str:
-    """
-    从 HTML 提取正文文本，按优先级依次尝试：
-      1. publisher 指定全文选择器
-      2. publisher 指定摘要选择器（降级）
-      3. 通用容器选择器
-      4. 全页 <p> 回退
+def _extract_text(html: str, selectors: dict) -> tuple[str, bool]:
+    """从 HTML 提取正文文本，返回 (text, is_fulltext)。
+
+    按优先级尝试：
+      1. publisher 全文选择器（≥MIN_FULLTEXT_LEN → 全文）
+      2. publisher 摘要选择器（命中即摘要级，无论多长都不冒充全文）
+      3. 通用容器选择器 / 4. 全页 <p> 回退（≥MIN_FULLTEXT_LEN → 全文）
     """
     soup = BeautifulSoup(html, "lxml")
 
@@ -198,15 +202,16 @@ def _extract_text(html: str, selectors: dict) -> str:
         if len(paras) >= 3:
             text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
             if len(text) >= MIN_FULLTEXT_LEN:
-                return text[:MAX_STORED_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS], True
 
-    # 2. Publisher 摘要选择器（作为降级）
+    # 2. Publisher 摘要选择器（作为降级）：摘要选择器命中的就是摘要，
+    #    不能因为"够长"就当成全文——那会伪造证据等级并阻断浏览器全文回退
     for sel in selectors.get("abstract", []):
         paras = soup.select(sel)
         if paras:
             text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
             if len(text) >= MIN_ABSTRACT_LEN:
-                return text[:MAX_STORED_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS], False
 
     # 3. 通用容器选择器
     for container_sel in _GENERIC_CONTAINERS:
@@ -214,13 +219,13 @@ def _extract_text(html: str, selectors: dict) -> str:
         if container:
             text = re.sub(r'\s+', ' ', container.get_text(" ", strip=True)).strip()
             if len(text) >= MIN_FULLTEXT_LEN:
-                return text[:MAX_STORED_FULLTEXT_CHARS]
+                return text[:MAX_STORED_FULLTEXT_CHARS], True
 
     # 4. 全页 <p> 回退
     paras = soup.find_all("p")
     if paras:
         text = re.sub(r'\s+', ' ', " ".join(p.get_text(strip=True) for p in paras)).strip()
         if len(text) >= MIN_FULLTEXT_LEN:
-            return text[:MAX_STORED_FULLTEXT_CHARS]
+            return text[:MAX_STORED_FULLTEXT_CHARS], True
 
-    return ""
+    return "", False

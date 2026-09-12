@@ -2,7 +2,6 @@
 db.py - SQLite 数据库模块，用于文章去重和历史记录
 """
 import json
-import shutil
 import sqlite3
 import hashlib
 import difflib
@@ -49,7 +48,11 @@ class Database:
             )
             self._memory_conn.execute("PRAGMA busy_timeout=5000")
 
-        self._init_db()
+        try:
+            self._init_db()
+        except Exception:
+            self.close()
+            raise
 
     def get_connection(self) -> sqlite3.Connection:
         """返回当前线程的数据库连接（供外部统计/导出工具使用）。"""
@@ -78,7 +81,7 @@ class Database:
             self.__run_init(conn)
 
     def __run_init(self, conn: sqlite3.Connection) -> None:
-        conn.executescript("""
+        schema = """
             CREATE TABLE IF NOT EXISTS articles (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 doi         TEXT UNIQUE,
@@ -236,6 +239,60 @@ class Database:
                 UNIQUE(digest_date, digest_type, article_id)
             );
 
+            CREATE TABLE IF NOT EXISTS digest_versions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                digest_type  TEXT NOT NULL DEFAULT 'daily',
+                digest_date  TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'published',
+                request_key  TEXT,
+                request_hash TEXT,
+                config_json  TEXT NOT NULL DEFAULT '{}',
+                config_hash  TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                stats_json   TEXT NOT NULL DEFAULT '{}',
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(digest_type, digest_date, version)
+            );
+
+            CREATE TABLE IF NOT EXISTS digest_items (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_id    INTEGER NOT NULL,
+                article_id    INTEGER,
+                rank          INTEGER NOT NULL,
+                category      TEXT,
+                scores_json   TEXT,
+                reason        TEXT,
+                snapshot_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(version_id, rank)
+            );
+
+            CREATE TABLE IF NOT EXISTS digest_artifacts (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_id   INTEGER NOT NULL,
+                format       TEXT NOT NULL,
+                path         TEXT,
+                content_hash TEXT,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                error        TEXT,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(version_id, format)
+            );
+
+            CREATE TABLE IF NOT EXISTS digest_sends (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_id   INTEGER NOT NULL,
+                channel      TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                request_key  TEXT,
+                claim_token  TEXT,
+                claimed_at   TEXT,
+                last_error   TEXT,
+                finished_at  TEXT,
+                UNIQUE(version_id, channel)
+            );
+
             CREATE TABLE IF NOT EXISTS highlights (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 article_id  INTEGER NOT NULL,
@@ -252,7 +309,25 @@ class Database:
                 model       TEXT,
                 created_at  TEXT DEFAULT (datetime('now'))
             );
-        """)
+        """
+        # Compare with the target schema before executing *any* migration DDL.
+        # The backup API includes committed WAL pages; a filesystem copy does not.
+        self._migration_backed_up = False
+        if self._memory_conn is None:
+            existing_tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if existing_tables:
+                with sqlite3.connect(":memory:") as target:
+                    target.executescript(schema)
+                    target_tables = {r[0] for r in target.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'")}
+                    needs_migration = any(
+                        not {r[1] for r in target.execute(f'PRAGMA table_info({table})')}
+                        <= {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+                        for table in target_tables)
+                if needs_migration:
+                    self._backup_before_migration(conn)
+        conn.executescript(schema)
 
         # 启用 WAL 模式（仅文件数据库）
         if self._memory_conn is None:
@@ -261,6 +336,7 @@ class Database:
 
         # 迁移：兼容旧数据库（幂等，可重复执行）
         legacy_columns = [
+            ("created_at", "TEXT"),
             ("title_hash", "TEXT"),
             ("analysis", "TEXT"),
             ("topic", "TEXT"),
@@ -302,6 +378,7 @@ class Database:
             ("cited_count", "INTEGER"),
             ("title_zh", "TEXT"),
         ]
+        self._migrate_columns(conn, "digest_versions", [("request_hash", "TEXT")], backup_before=True)
         self._migrate_columns(conn, "articles", legacy_columns + stage_columns, backup_before=True)
         self._migrate_columns(conn, "daily_reports", [
             ("push_results", "TEXT"),
@@ -315,17 +392,14 @@ class Database:
             ("last_error", "TEXT"),
         ], backup_before=False)
 
-        # 期刊指标种子数据（幂等 upsert）
+        # 初始化仅补缺失期刊；已有指标（含时间戳）仅由手工编辑或显式重置更新。
         try:
             from utils.journal_metrics import SEED_METRICS
             for m in SEED_METRICS:
                 conn.execute(
                     "INSERT INTO journal_metrics (name, full_name, if_value, cas_zone, issn) "
                     "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(name) DO UPDATE SET "
-                    "full_name=excluded.full_name, if_value=excluded.if_value, "
-                    "cas_zone=excluded.cas_zone, issn=excluded.issn, "
-                    "updated_at=datetime('now')",
+                    "ON CONFLICT(name) DO NOTHING",
                     (m["name"], m.get("full_name"), m.get("if_value"), m.get("cas_zone"), m.get("issn")),
                 )
             conn.commit()
@@ -374,6 +448,26 @@ class Database:
                 "digest_entries 日期索引（防重查询）",
             ),
             (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_versions_request_key "
+                "ON digest_versions(request_key) WHERE request_key IS NOT NULL",
+                "digest_versions 幂等键唯一索引",
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_digest_items_version_article "
+                "ON digest_items(version_id, article_id) WHERE article_id IS NOT NULL",
+                "digest_items 版本内文章唯一",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_digest_versions_date "
+                "ON digest_versions(digest_type, digest_date)",
+                "digest_versions 日期索引",
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_digest_sends_status "
+                "ON digest_sends(status)",
+                "digest_sends 状态索引（补发查询）",
+            ),
+            (
                 "CREATE INDEX IF NOT EXISTS idx_chat_messages_article "
                 "ON chat_messages(article_id, id)",
                 "chat_messages 文章索引",
@@ -387,6 +481,20 @@ class Database:
 
         conn.commit()
         logger.info("数据库初始化完成: %s", self.db_path)
+
+    def _backup_before_migration(self, conn: sqlite3.Connection) -> None:
+        if self._memory_conn is not None or getattr(self, "_migration_backed_up", False):
+            return
+        src = Path(self.db_path)
+        backup = src.with_name(f"{src.stem}.backup-{datetime.now():%Y%m%d-%H%M%S-%f}{src.suffix}")
+        try:
+            with sqlite3.connect(str(backup)) as destination:
+                conn.backup(destination)
+        except Exception:
+            backup.unlink(missing_ok=True)
+            raise  # A failed backup must stop migration.
+        self._migration_backed_up = True
+        logger.info("迁移前已使用 SQLite backup API 备份数据库: %s", backup)
 
     def _migrate_columns(
         self, conn: sqlite3.Connection, table: str, columns: list[tuple[str, str]],
@@ -403,14 +511,8 @@ class Database:
         missing = [(c, d) for c, d in columns if c not in existing]
         if not missing:
             return
-        if backup_before and self._memory_conn is None:
-            try:
-                src = Path(self.db_path)
-                backup = src.with_name(f"{src.stem}.backup-{datetime.now():%Y%m%d-%H%M%S}{src.suffix}")
-                shutil.copy2(src, backup)
-                logger.info("检测到旧表结构，迁移前已自动备份数据库: %s", backup)
-            except Exception as e:
-                logger.error("数据库自动备份失败（继续迁移）: %s", e)
+        if backup_before:
+            self._backup_before_migration(conn)
         for col, definition in missing:
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
@@ -943,29 +1045,41 @@ class Database:
             if self._memory_conn is not None:
                 with self._memory_lock:
                     conn = self._memory_conn
-                    for table in related:
-                        if table == "citation_edges":
-                            conn.execute(
-                                f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
-                                ids + ids,
-                            )
-                        else:
-                            conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
-                    cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
-                    conn.commit()
-                    return cur.rowcount or 0
+                    try:
+                        for table in related:
+                            if table == "citation_edges":
+                                conn.execute(
+                                    f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
+                                    ids + ids,
+                                )
+                            else:
+                                conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
+                        cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
+                        deleted = cur.rowcount or 0
+                        conn.commit()
+                        return deleted
+                    except Exception:
+                        # 关联清理与文章删除必须同成功或同回滚，否则后续提交
+                        # 会把已删除的关联数据固化成永久丢失
+                        conn.rollback()
+                        raise
             conn = self._conn()
-            for table in related:
-                if table == "citation_edges":
-                    conn.execute(
-                        f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
-                        ids + ids,
-                    )
-                else:
-                    conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
-            cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
-            conn.commit()
-            return cur.rowcount or 0
+            try:
+                for table in related:
+                    if table == "citation_edges":
+                        conn.execute(
+                            f"DELETE FROM citation_edges WHERE seed_id IN ({ph}) OR citing_id IN ({ph})",
+                            ids + ids,
+                        )
+                    else:
+                        conn.execute(f"DELETE FROM {table} WHERE article_id IN ({ph})", ids)
+                cur = conn.execute(f"DELETE FROM articles WHERE id IN ({ph})", ids)
+                deleted = cur.rowcount or 0
+                conn.commit()
+                return deleted
+            except Exception:
+                conn.rollback()
+                raise
         except sqlite3.Error as e:
             logger.error("按 id 删除文章失败: %s", e)
             raise
@@ -1208,7 +1322,8 @@ class Database:
 
     def _list_journals_impl(self, conn: sqlite3.Connection, enabled_only: bool) -> list[dict[str, Any]]:
         sql = (
-            "SELECT id, name, rss, publisher, max_articles, enabled, source, created_at "
+            "SELECT id, name, rss, publisher, max_articles, enabled, source, "
+            "source_type, query, last_run, last_error, created_at "
             "FROM journals"
         )
         if enabled_only:
@@ -2180,6 +2295,385 @@ class Database:
         except sqlite3.Error as e:
             logger.error("list_digest_article_ids_since 失败: %s", e)
             return []
+
+    # ── 版本化日报：digest_versions / items / artifacts / sends ────
+
+    _VERSION_COLS = ("id, digest_type, digest_date, version, status, request_key, "
+                     "config_json, config_hash, content_hash, stats_json, created_at, request_hash")
+
+    @staticmethod
+    def _digest_json(value: str, field: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise ValueError("expected object")
+            return parsed
+        except (TypeError, ValueError) as e:
+            raise sqlite3.DatabaseError(f"Corrupt digest {field}") from e
+
+    @staticmethod
+    def _version_row(cur: sqlite3.Cursor, row) -> dict[str, Any]:
+        out = dict(zip([c[0] for c in cur.description], row))
+        out["stats"] = Database._digest_json(out.pop("stats_json"), "stats_json")
+        Database._digest_json(out["config_json"], "config_json")
+        return out
+
+    def save_digest_version(self, *, digest_date: str, items: list[dict[str, Any]],
+                            digest_type: str = "daily", config_json: str = "{}",
+                            config_hash: str = "", content_hash: str = "",
+                            stats_json: str = "{}",
+                            request_key: Optional[str] = None,
+                            status: str = "published", request_hash: Optional[str] = None,
+                            reuse_published: bool = False,
+                            channels: Optional[list[str]] = None) -> dict[str, Any]:
+        """事务内分配版本号并写入版本 + 全部条目快照；失败整笔回滚。
+
+        并发冲突依靠 UNIQUE(digest_type, digest_date, version) 与 request_key
+        唯一索引兜底，冲突抛 sqlite3.IntegrityError 由服务层转换为 CONFLICT。
+        """
+        conn = self._memory_conn if self._memory_conn is not None else self._conn()
+        lock = self._memory_lock if self._memory_conn is not None else None
+
+        def _txn() -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if request_key and request_hash:
+                    row = conn.execute(
+                        "SELECT id, digest_date, version, request_hash FROM digest_versions "
+                        "WHERE request_key = ?", (request_key,)).fetchone()
+                    if row:
+                        if row[1] != digest_date or row[3] != request_hash:
+                            raise sqlite3.IntegrityError("request_key content conflict")
+                        conn.commit()
+                        return {"version_id": row[0], "version": row[2], "created": False}
+                if reuse_published:
+                    row = conn.execute(
+                        "SELECT id, version FROM digest_versions WHERE digest_type = ? "
+                        "AND digest_date = ? AND status = 'published' ORDER BY version DESC LIMIT 1",
+                        (digest_type, digest_date)).fetchone()
+                    if row:
+                        conn.commit()
+                        return {"version_id": row[0], "version": row[1], "created": False}
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM digest_versions "
+                    "WHERE digest_type = ? AND digest_date = ?",
+                    (digest_type, digest_date),
+                ).fetchone()
+                version = int(row[0])
+                cur = conn.execute(
+                    "INSERT INTO digest_versions (digest_type, digest_date, version, "
+                    "status, request_key, config_json, config_hash, content_hash, stats_json, request_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (digest_type, digest_date, version, status, request_key,
+                     config_json, config_hash, content_hash, stats_json, request_hash),
+                )
+                version_id = cur.lastrowid
+                for i, it in enumerate(items, start=1):
+                    conn.execute(
+                        "INSERT INTO digest_items (version_id, article_id, rank, "
+                        "category, scores_json, reason, snapshot_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (version_id, it.get("article_id"), it.get("rank", i),
+                         it.get("category"), it.get("scores_json"),
+                         it.get("reason"), it.get("snapshot_json")),
+                    )
+                for fmt in ("markdown", "html"):
+                    conn.execute("INSERT INTO digest_artifacts (version_id, format, status) "
+                                 "VALUES (?, ?, 'pending')", (version_id, fmt))
+                for channel in dict.fromkeys(channels or []):
+                    conn.execute("INSERT INTO digest_sends (version_id, channel, status, request_key) "
+                                 "VALUES (?, ?, ?, ?)",
+                                 (version_id, channel, "pending" if items else "skipped", request_key))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return {"version_id": version_id, "digest_date": digest_date,
+                    "digest_type": digest_type, "version": version,
+                    "status": status, "item_count": len(items), "created": True}
+
+        if lock is not None:
+            with lock:
+                return _txn()
+        return _txn()
+
+    def get_digest_version_by_id(self, version_id: int) -> Optional[dict[str, Any]]:
+        sql = f"SELECT {self._VERSION_COLS} FROM digest_versions WHERE id = ?"
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (int(version_id),))
+                    row = cur.fetchone()
+                    return self._version_row(cur, row) if row else None
+            cur = self._conn().execute(sql, (int(version_id),))
+            row = cur.fetchone()
+            return self._version_row(cur, row) if row else None
+        except sqlite3.Error as e:
+            logger.error("get_digest_version_by_id 失败: %s", e)
+            raise
+
+    def get_digest_version_by_request_key(self, request_key: str) -> Optional[dict[str, Any]]:
+        sql = f"SELECT {self._VERSION_COLS} FROM digest_versions WHERE request_key = ?"
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (request_key,))
+                    row = cur.fetchone()
+                    return self._version_row(cur, row) if row else None
+            cur = self._conn().execute(sql, (request_key,))
+            row = cur.fetchone()
+            return self._version_row(cur, row) if row else None
+        except sqlite3.Error as e:
+            logger.error("get_digest_version_by_request_key 失败: %s", e)
+            raise
+
+    def get_latest_published_digest_version(self, digest_date: str,
+                                            digest_type: str = "daily") -> Optional[dict[str, Any]]:
+        sql = (f"SELECT {self._VERSION_COLS} FROM digest_versions "
+               f"WHERE digest_type = ? AND digest_date = ? AND status = 'published' "
+               f"ORDER BY version DESC LIMIT 1")
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (digest_type, digest_date))
+                    row = cur.fetchone()
+                    return self._version_row(cur, row) if row else None
+            cur = self._conn().execute(sql, (digest_type, digest_date))
+            row = cur.fetchone()
+            return self._version_row(cur, row) if row else None
+        except sqlite3.Error as e:
+            logger.error("get_latest_published_digest_version 失败: %s", e)
+            raise
+
+    def list_digest_versions(self, digest_type: str = "daily",
+                             date_from: Optional[str] = None,
+                             date_to: Optional[str] = None,
+                             limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        sql = f"SELECT {self._VERSION_COLS} FROM digest_versions WHERE digest_type = ?"
+        params: list[Any] = [digest_type]
+        if date_from:
+            sql += " AND digest_date >= ?"
+            params.append(date_from)
+        if date_to:
+            sql += " AND digest_date <= ?"
+            params.append(date_to)
+        sql += " ORDER BY digest_date DESC, version DESC LIMIT ? OFFSET ?"
+        params += [int(limit), int(offset)]
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, params)
+                    return [self._version_row(cur, r) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, params)
+            return [self._version_row(cur, r) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_digest_versions 失败: %s", e)
+            raise
+
+    def get_digest_items(self, version_id: int) -> list[dict[str, Any]]:
+        """按 rank 返回版本条目；scores_json / snapshot_json 解析为对象。"""
+        sql = ("SELECT id, version_id, article_id, rank, category, scores_json, "
+               "reason, snapshot_json FROM digest_items "
+               "WHERE version_id = ? ORDER BY rank ASC")
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (int(version_id),))
+                    rows = cur.fetchall()
+            else:
+                cur = self._conn().execute(sql, (int(version_id),))
+                rows = cur.fetchall()
+        except sqlite3.Error as e:
+            logger.error("get_digest_items 失败: %s", e)
+            raise
+        items = []
+        for r in rows:
+            it = dict(zip([c[0] for c in cur.description], r))
+            it["scores"] = self._digest_json(it.pop("scores_json"), "scores_json")
+            it["snapshot"] = self._digest_json(it.pop("snapshot_json"), "snapshot_json")
+            items.append(it)
+        return items
+
+    def list_published_digest_article_ids_since(self, digest_type: str, since_date: str,
+                                                before_date: str = "9999-12-31") -> list[int]:
+        """防重集合：旧 digest_entries 与新已发布版本条目合并去重。
+
+        与旧接口不同：读取失败抛 sqlite3.Error（历史读取失败必须显式报错，
+        不得默认当成空历史）。
+        """
+        sql = (
+            "SELECT DISTINCT article_id FROM ("
+            "  SELECT article_id FROM digest_entries"
+            "   WHERE digest_type = ? AND digest_date >= ? AND digest_date < ?"
+            "  UNION"
+            "  SELECT di.article_id FROM digest_items di"
+            "   JOIN digest_versions dv ON dv.id = di.version_id"
+            "   WHERE dv.digest_type = ? AND dv.digest_date >= ? AND dv.digest_date < ?"
+            "     AND dv.status = 'published'"
+            ") WHERE article_id IS NOT NULL"
+        )
+        params = (digest_type, since_date, before_date,
+                  digest_type, since_date, before_date)
+        if self._memory_conn is not None:
+            with self._memory_lock:
+                cur = self._memory_conn.execute(sql, params)
+                return [r[0] for r in cur.fetchall()]
+        cur = self._conn().execute(sql, params)
+        return [r[0] for r in cur.fetchall()]
+
+    def upsert_digest_artifact(self, version_id: int, fmt: str, *,
+                               path: Optional[str] = None,
+                               content_hash: Optional[str] = None,
+                               status: str = "pending",
+                               error: Optional[str] = None) -> None:
+        sql = (
+            "INSERT INTO digest_artifacts (version_id, format, path, content_hash, status, error) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(version_id, format) DO UPDATE SET "
+            "path=excluded.path, content_hash=excluded.content_hash, "
+            "status=excluded.status, error=excluded.error, updated_at=datetime('now')"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(sql, (version_id, fmt, path, content_hash, status, error))
+                    self._memory_conn.commit()
+            else:
+                conn = self._conn()
+                conn.execute(sql, (version_id, fmt, path, content_hash, status, error))
+                conn.commit()
+        except sqlite3.Error as e:
+            logger.error("upsert_digest_artifact 失败: %s", e)
+            raise
+
+    def list_digest_artifacts(self, version_id: int) -> list[dict[str, Any]]:
+        sql = ("SELECT id, version_id, format, path, content_hash, status, error, updated_at "
+               "FROM digest_artifacts WHERE version_id = ? ORDER BY format ASC")
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (int(version_id),))
+                    return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (int(version_id),))
+            return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_digest_artifacts 失败: %s", e)
+            raise
+
+    def init_digest_sends(self, version_id: int, channels: list[str]) -> int:
+        """为指定渠道创建 pending 发送记录（已存在的不动）。"""
+        n = 0
+        try:
+            for ch in channels:
+                sql = ("INSERT INTO digest_sends (version_id, channel, status) "
+                       "VALUES (?, ?, 'pending') "
+                       "ON CONFLICT(version_id, channel) DO NOTHING")
+                if self._memory_conn is not None:
+                    with self._memory_lock:
+                        cur = self._memory_conn.execute(sql, (version_id, ch))
+                        n += cur.rowcount or 0
+                        self._memory_conn.commit()
+                else:
+                    conn = self._conn()
+                    cur = conn.execute(sql, (version_id, ch))
+                    n += cur.rowcount or 0
+                    conn.commit()
+            return n
+        except sqlite3.Error as e:
+            logger.error("init_digest_sends 失败: %s", e)
+            raise
+
+    def list_digest_sends(self, version_id: int) -> list[dict[str, Any]]:
+        sql = ("SELECT id, version_id, channel, status, attempts, request_key, "
+               "claim_token, claimed_at, last_error, finished_at "
+               "FROM digest_sends WHERE version_id = ? ORDER BY channel ASC")
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(sql, (int(version_id),))
+                    return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+            cur = self._conn().execute(sql, (int(version_id),))
+            return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+        except sqlite3.Error as e:
+            logger.error("list_digest_sends 失败: %s", e)
+            raise
+
+    def claim_digest_send(self, version_id: int, channel: str,
+                          claim_token: str) -> Optional[dict[str, Any]]:
+        """领取一条发送记录：仅 pending/failed 可领取（attempts+1，写入领取令牌）。
+
+        领取失败（已被领取/不存在/sent/unknown）返回当前记录，调用方核对
+        claim_token 判断是否获得所有权。"""
+        claim_sql = (
+            "UPDATE digest_sends SET status = 'sending', claim_token = ?, "
+            "claimed_at = datetime('now'), attempts = attempts + 1, last_error = NULL "
+            "WHERE version_id = ? AND channel = ? AND status IN ('pending', 'failed')"
+        )
+        select_sql = (
+            "SELECT id, version_id, channel, status, attempts, request_key, "
+            "claim_token, claimed_at, last_error, finished_at "
+            "FROM digest_sends WHERE version_id = ? AND channel = ?"
+        )
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    self._memory_conn.execute(claim_sql, (claim_token, version_id, channel))
+                    self._memory_conn.commit()
+                    cur = self._memory_conn.execute(select_sql, (version_id, channel))
+                    row = cur.fetchone()
+                    return dict(zip([c[0] for c in cur.description], row)) if row else None
+            conn = self._conn()
+            conn.execute(claim_sql, (claim_token, version_id, channel))
+            conn.commit()
+            cur = conn.execute(select_sql, (version_id, channel))
+            row = cur.fetchone()
+            return dict(zip([c[0] for c in cur.description], row)) if row else None
+        except sqlite3.Error as e:
+            logger.error("claim_digest_send 失败: %s", e)
+            raise
+
+    def finish_digest_send(self, version_id: int, channel: str, claim_token: str,
+                           status: str, error: Optional[str] = None) -> bool:
+        """凭领取令牌回写发送结果；令牌不匹配（陈旧领取者）返回 False。"""
+        if status not in ("sent", "failed", "unknown"):
+            raise ValueError("Invalid delivery finish status")
+        sql = ("UPDATE digest_sends SET status = ?, last_error = ?, "
+               "finished_at = datetime('now') "
+               "WHERE version_id = ? AND channel = ? AND claim_token = ? AND status = 'sending'")
+        try:
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    cur = self._memory_conn.execute(
+                        sql, (status, error, version_id, channel, claim_token))
+                    self._memory_conn.commit()
+                    return bool(cur.rowcount)
+            conn = self._conn()
+            cur = conn.execute(sql, (status, error, version_id, channel, claim_token))
+            conn.commit()
+            return bool(cur.rowcount)
+        except sqlite3.Error as e:
+            self._conn().rollback()
+            logger.error("finish_digest_send 失败: %s", e)
+            raise
+
+    def resolve_digest_send(self, version_id: int, channel: str, delivered: bool) -> bool:
+        """Explicit reconciliation only; never performs transport or claims work."""
+        sql = ("UPDATE digest_sends SET status = ?, claim_token = NULL, claimed_at = NULL, "
+               "last_error = NULL, finished_at = CASE WHEN ? THEN datetime('now') ELSE NULL END "
+               "WHERE version_id = ? AND channel = ? AND status = 'unknown'")
+        def update():
+            conn = self._conn()
+            try:
+                cur = conn.execute(sql, ("sent" if delivered else "pending", delivered, version_id, channel))
+                conn.commit()
+                return bool(cur.rowcount)
+            except sqlite3.Error:
+                conn.rollback()
+                raise
+        if self._memory_conn is not None:
+            with self._memory_lock:
+                return update()
+        return update()
 
     def list_articles_created_between(self, start: str, end: str) -> list[dict[str, Any]]:
         """按入库日期区间（本地时区，含头不含尾）列出文章。"""

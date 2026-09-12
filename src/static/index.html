@@ -325,14 +325,14 @@
     <!-- ══ 05 历史日报 ══ -->
     <section class="view" id="view-reports" hidden>
       <div class="view-head">
-        <h2>历史日报</h2>
-        <p class="lede">按日期查看每日文献日报（发现数 / 推送数），点击预览在线阅读 HTML 版。</p>
+        <h2>日报与周报</h2>
+        <p class="lede">查看固定版本、报告产物与渠道状态；报告文件通过当前浏览器的 API Token 加载。</p>
       </div>
 
       <div class="card">
         <div class="row" style="justify-content:space-between;">
-          <h3>报告列表</h3>
-          <button onclick="Reports.genWeekly()">生成本周周报</button>
+          <h3>兼容报告索引</h3>
+          <button onclick="Reports.genWeekly()">生成本周周报（legacy）</button>
         </div>
         <div style="overflow:auto;">
           <table id="reportTable">
@@ -342,13 +342,25 @@
         </div>
       </div>
 
+      <div class="card" id="digestVersionsCard">
+        <div class="row"><h3>版本化日报</h3><button class="secondary" onclick="Reports.load()">刷新报告列表</button></div>
+        <p class="small muted">固定快照；恢复报告文件不会重新选文或发送。unknown 渠道需先核对收件情况。</p>
+        <div style="overflow:auto;"><table><thead><tr><th>日期</th><th>版本</th><th>精选</th><th>文件 / 渠道状态</th><th>操作</th></tr></thead><tbody id="digestVersionsBody"></tbody></table></div>
+        <p id="reportActionStatus" class="small" role="status" aria-live="polite"></p>
+      </div>
+
       <div class="card" id="reportPreviewCard" hidden>
         <h3>日报预览 · <span id="reportPreviewDate" class="mono"></span></h3>
         <div class="row" style="margin-bottom:12px;">
-          <button class="secondary" onclick="Reports.openInNew()">在新窗口打开</button>
+          <button class="secondary" onclick="Reports.download('html')">下载 HTML</button>
+          <button class="secondary" onclick="Reports.download('markdown')">下载 Markdown</button>
           <button class="secondary" onclick="Reports.toggleMd()" id="reportMdBtn">查看 Markdown 源文件</button>
+          <button class="secondary" onclick="Reports.loadPreview()">重试加载</button>
+          <button class="secondary" id="reportRenderBtn" onclick="Reports.renderVersion(undefined, this)">恢复报告文件</button>
         </div>
-        <iframe id="reportFrame" class="report-frame" title="日报预览"></iframe>
+        <p id="reportArtifactStatus" class="small"></p>
+        <p id="reportPreviewStatus" class="small" role="status" aria-live="polite"></p>
+        <iframe id="reportFrame" class="report-frame" title="日报预览" sandbox="" referrerpolicy="no-referrer"></iframe>
       </div>
     </section>
 

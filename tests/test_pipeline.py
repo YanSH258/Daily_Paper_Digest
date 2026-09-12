@@ -2,11 +2,13 @@
 
 抓取器 / LLM 分析器 / 推送全部使用进程内模拟，不联网、不调用真实模型。
 """
+import hashlib
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -92,12 +94,35 @@ class FakeNotifier:
         p.write_text("REPORT", encoding="utf-8")
         return str(p), {"email": True, "feishu": None}
 
+    def render_digest_version(self, payload):
+        """版本化渲染（模拟）：按快照条目写版本化文件。"""
+        base = self.output_dir / "daily" / payload["digest_date"] / f"v{payload['version']}"
+        base.mkdir(parents=True, exist_ok=True)
+        md = "\n".join(
+            f"{it['rank']}. [id={it['article_id']}] {it['snapshot'].get('title', '')}"
+            for it in payload["items"]
+        ) + "\n"
+        artifacts = []
+        for fmt, name in (("markdown", "report.md"), ("html", "report.html")):
+            p = base / name
+            p.write_text(md, encoding="utf-8")
+            artifacts.append({"format": fmt, "path": str(p),
+                              "content_hash": hashlib.sha256(md.encode()).hexdigest(),
+                              "status": "rendered"})
+        return artifacts
+
+    def send_digest_files(self, *, md_path, html_path, date_str, channels):
+        # 模拟投递成功：不真实发送；失败/超时场景在 test_digest_service 中注入
+        return
+
 
 class TestPipelineRetry(unittest.TestCase):
     def setUp(self):
         FakeAnalyzer.score_calls = {}
         FakeAnalyzer.analyze_calls = {}
-        self.tmp = tempfile.mkdtemp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
         out_dir = os.path.join(self.tmp, "out")
         os.makedirs(out_dir)
         self.cfg = {
@@ -109,9 +134,11 @@ class TestPipelineRetry(unittest.TestCase):
         }
         import main as M
         self.M = M
-        M.JournalFetcher = FakeFetcher
-        M.LLMAnalyzer = FakeAnalyzer
-        M.Notifier = FakeNotifier
+        for name, fake in (("JournalFetcher", FakeFetcher), ("LLMAnalyzer", FakeAnalyzer),
+                           ("Notifier", FakeNotifier)):
+            patcher = patch.object(M, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_full_retry_cycle(self):
         from core.db import Database
@@ -165,7 +192,10 @@ class TestPipelineRetry(unittest.TestCase):
         self.assertEqual(FakeAnalyzer.analyze_calls.get("10.1/a"), 1, "A 不应重复分析")
         self.assertEqual(FakeAnalyzer.score_calls.get("10.1/c"), 1, "低分文章不应重复评分")
         rep = db.get_report("2026-09-08")
-        self.assertEqual(rep["push_results"], '{"email": true, "feishu": null}')
+        # 新语义：配置未启用任何渠道 → 不请求投递（push_results 为空），
+        # "未请求渠道不算失败"；report_path 指向版本化文件
+        self.assertIsNone(rep["push_results"])
+        self.assertIn(os.path.join("daily", "2026-09-08", "v1"), rep["file_path"])
         db.close()
 
 

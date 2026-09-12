@@ -20,13 +20,19 @@ const API = {
     return h;
   },
 
-  async json(url, options = {}) {
+  errorMessage(error) {
+    if (!error) return "未知错误";
+    if (typeof error === "string") return error;
+    return [error.message || error.code || "请求失败", error.recovery_action].filter(Boolean).join("；");
+  },
+
+  async response(url, options = {}) {
     const res = await fetch(url, options);
     if (!res.ok) {
       let msg = "HTTP " + res.status;
       try {
         const j = await res.json();
-        if (j && (j.error || j.message)) msg = j.error || j.message;
+        if (j && (j.error || j.message)) msg = this.errorMessage(j.error || j.message);
       } catch (e) { /* 忽略非 JSON 错误体 */ }
       const err = new Error(msg);
       err.status = res.status;
@@ -35,7 +41,21 @@ const API = {
       }
       throw err;
     }
-    return res.json();
+    return res;
+  },
+
+  async json(url, options = {}) {
+    return (await this.response(url, options)).json();
+  },
+
+  async blob(url, options = {}) {
+    const target = new URL(url, location.origin);
+    if (target.origin !== location.origin || !target.pathname.startsWith("/reports/") || target.search) {
+      throw new Error("无效的报告地址，请刷新报告列表");
+    }
+    return (await this.response(target.href, {
+      ...options, headers: this.headers(false), cache: "no-store", redirect: "error",
+    })).blob();
   },
 
   get(url) {

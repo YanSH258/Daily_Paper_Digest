@@ -18,12 +18,13 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core.analyzer import LLMAnalyzer
 from core.db import Database
 from core.fetcher import JournalFetcher, detect_publisher_from_url
-from core.notifier import classify_article
+from core.notifier import Notifier, classify_article
+from digest.service import DigestError, DigestService
 from main import load_config, load_config_from_obj, run_once, setup_logging, validate_config
 from utils.paths import resolve_against_root
 
@@ -81,6 +82,7 @@ class TaskRunner:
                 "started_at": datetime.now().isoformat(timespec="seconds"),
                 "ended_at": None,
                 "last_error": None,
+                "last_stats": None,
             })
 
         thread = threading.Thread(
@@ -107,7 +109,9 @@ class TaskRunner:
                 stats = run_weekly(cfg, date_str=date_str, task_id=task_id)
             else:
                 stats = run_once(cfg, date_str=date_str, task_id=task_id)
-            success = True
+            success = not (stats and stats.get("digest_overall_status") == "failed")
+            if not success:
+                error_msg = "; ".join(e.get("message", "日报失败") for e in stats.get("digest_errors", [])) or "日报生成失败"
             logger.info("任务完成: task_id=%s", task_id)
         except Exception as e:  # pragma: no cover - 运行期保护
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -129,7 +133,8 @@ class TaskRunner:
         if self._db is not None:
             status = "success" if success else "failed"
             if success and stats and (stats.get("db_errors") or stats.get("scored_failed")
-                                      or stats.get("analyzed_failed")):
+                                      or stats.get("analyzed_failed")
+                                      or stats.get("digest_overall_status") == "partial"):
                 status = "partial"
             self._db.task_finish(task_id, status=status, stats=stats, error=error_msg,
                                  stage="done" if success else "failed")
@@ -182,8 +187,8 @@ class TaskRunner:
 
 class WebContext:
     def __init__(self, config_path: str) -> None:
-        self.config_path = config_path
-        self.config = load_config(config_path)
+        self.config_path = str(resolve_against_root(config_path))
+        self.config = load_config(self.config_path)
         validate_config(self.config)
         self.runner = TaskRunner(self.config)
         self.db = Database(self.config["database"]["path"])
@@ -755,9 +760,51 @@ def _list_reports(ctx: WebContext, limit: int = 30) -> list[dict[str, Any]]:
             "FROM daily_reports ORDER BY report_date DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+        for item in items:
+            md_path = item.get("file_path")
+            item["md_url"] = _report_url(ctx, md_path)
+            item["html_url"] = _report_url(ctx, str(Path(md_path).with_suffix(".html"))) if md_path else None
+        return items
     finally:
         conn.close()
+
+
+def _report_url(ctx: WebContext, file_path: Optional[str]) -> Optional[str]:
+    """Expose only output-contained paths; preserve version directories in URLs."""
+    if not file_path:
+        return None
+    try:
+        target = resolve_against_root(file_path).resolve()
+        relative = target.relative_to(ctx.output_dir.resolve())
+    except (ValueError, OSError):
+        return None
+    if target.suffix.lower() not in (".md", ".html"):
+        return None
+    return "/reports/" + quote(relative.as_posix(), safe="/")
+
+
+def _digest_http_view(ctx: WebContext, payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result["artifacts"] = [
+        {**artifact, "url": _report_url(ctx, artifact.get("path"))}
+        for artifact in payload.get("artifacts", [])
+    ]
+    return result
+
+
+def _task_http_view(ctx: WebContext) -> dict[str, Any]:
+    state = ctx.runner.get_state()
+    stats = state.get("last_stats") or {}
+    version_id = stats.get("digest_version_id")
+    if version_id:
+        state["digest_url"] = f"/#digest_version={int(version_id)}"
+        try:
+            detail = _digest_service(ctx).get_digest(int(version_id))
+            state["digest"] = _digest_http_view(ctx, {k: v for k, v in detail.items() if k != "items"})
+        except DigestError as exc:
+            state["digest_error"] = exc.to_dict()
+    return state
 
 
 def _mask_secret(v: Optional[str]) -> str:
@@ -1533,10 +1580,23 @@ def _trends_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]
 
 
 
-def _digest_view(ctx: WebContext, date_str: str = "", dry_run: bool = True) -> dict[str, Any]:
-    """每日 Top-N 选文（digest 模块的 HTTP 入口）。
+def _digest_service(ctx: WebContext) -> DigestService:
+    """构建版本化日报服务（渲染/投递由 Notifier 承担）。"""
+    return DigestService(ctx.db, ctx.config, notifier=Notifier(ctx.config))
 
-    GET  = dry-run 只读；POST = 正式落盘 digest_entries。
+
+def _digest_error_response(e: DigestError) -> tuple[dict[str, Any], int]:
+    """DigestError → (payload, http_status)；不暴露堆栈与凭据。"""
+    status = {"INVALID_CONFIG": 400, "INVALID_DATE": 400,
+              "NOT_FOUND": 404, "CONFLICT": 409}.get(e.code, 500)
+    return {"ok": False, "error": e.to_dict()}, status
+
+
+def _digest_view(ctx: WebContext, date_str: str = "", dry_run: bool = True) -> dict[str, Any]:
+    """每日 Top-N 选文（digest 模块的 HTTP 入口，legacy）。
+
+    GET  = dry-run 只读；POST = 落盘 legacy digest_entries（不创建版本、不发送）。
+    已由版本化接口 /api/digests* 取代，保留仅为兼容既有调用方。
     """
     from digest.builder import build_daily_digest
     result = build_daily_digest(ctx.db, ctx.config, date_str=date_str or None, dry_run=dry_run)
@@ -1716,10 +1776,6 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         req_token = self.headers.get("X-API-Token", "")
-        # iframe/直链无法带 Header，允许 ?token= 查询参数
-        if not req_token:
-            q = parse_qs(urlparse(self.path).query)
-            req_token = (q.get("token") or [""])[0]
         if req_token == token:
             return True
         self._json_response({"error": "unauthorized"}, code=401)
@@ -1783,23 +1839,35 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/reports/"):
                 if (self.ctx.config.get("web") or {}).get("protect_read") and not self._require_token():
                     return
-                filename = path.removeprefix("/reports/")
-                safe_name = Path(filename).name
-                if safe_name != filename:
+                filename = unquote(path.removeprefix("/reports/"))
+                # 允许版本化子路径 daily/<date>/v<version>/report.md；
+                # 拒绝 ..、反斜杠与绝对路径，确保目标仍在 output_dir 内
+                if ".." in filename or "\\" in filename or filename.startswith("/"):
                     self._json_response({"error": "bad filename"}, code=400)
                     return
-                suffix = Path(safe_name).suffix.lower()
+                rel_parts = [p for p in filename.split("/") if p not in ("", ".")]
+                if not rel_parts:
+                    self._json_response({"error": "bad filename"}, code=400)
+                    return
+                safe_rel = Path(*rel_parts)
+                target = (self.ctx.output_dir / safe_rel).resolve()
+                try:
+                    target.relative_to(self.ctx.output_dir.resolve())
+                except ValueError:
+                    self._json_response({"error": "bad filename"}, code=400)
+                    return
+                suffix = target.suffix.lower()
                 ctype = "text/plain; charset=utf-8"
                 if suffix == ".html":
                     ctype = "text/html; charset=utf-8"
                 elif suffix == ".md":
                     ctype = "text/markdown; charset=utf-8"
-                self._serve_file(self.ctx.output_dir / safe_name, ctype)
+                self._serve_file(target, ctype)
                 return
 
             if path == "/api/status":
                 self._json_response({
-                    "task": self.ctx.runner.get_state(),
+                    "task": _task_http_view(self.ctx),
                     "db": _db_summary(self.ctx),
                     "output_dir": str(self.ctx.output_dir),
                     "db_path": str(self.ctx.db_path),
@@ -1830,6 +1898,73 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/digest":
                 self._json_response(_digest_view(
                     self.ctx, (query.get("date", [""])[0] or "").strip(), dry_run=True))
+                return
+
+            if path == "/api/digests/preview":
+                # 只读预览：不写任何业务表
+                if (self.ctx.config.get("web") or {}).get("protect_read") \
+                        and not self._require_token():
+                    return
+                date = (query.get("date", [""])[0] or "").strip() \
+                    or datetime.now().strftime("%Y-%m-%d")
+                try:
+                    payload = _digest_service(self.ctx).preview_digest(date)
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                self._json_response({"ok": True, **payload})
+                return
+
+            if path == "/api/digests":
+                # 版本历史分页（只读）
+                if (self.ctx.config.get("web") or {}).get("protect_read") \
+                        and not self._require_token():
+                    return
+                try:
+                    svc = _digest_service(self.ctx)
+                    payload = svc.list_digest_history(
+                        date_from=(query.get("date_from", [None])[0] or None),
+                        date_to=(query.get("date_to", [None])[0] or None),
+                        limit=int((query.get("limit", ["50"])[0] or "50")),
+                        offset=int((query.get("offset", ["0"])[0] or "0")),
+                    )
+                    summaries = []
+                    for row in payload["items"]:
+                        try:
+                            detail = svc.get_digest(row["version_id"])
+                            summary = {**row, **{k: v for k, v in detail.items() if k != "items"}}
+                            summaries.append(_digest_http_view(self.ctx, summary))
+                        except DigestError as exc:
+                            summaries.append({**row, "summary_error": exc.to_dict()})
+                    payload = {**payload, "items": summaries}
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                except ValueError:
+                    self._json_response({"ok": False, "error": "limit/offset 必须是数字"}, code=400)
+                    return
+                self._json_response({"ok": True, **payload})
+                return
+
+            if path.startswith("/api/digests/"):
+                # 固定快照详情：/api/digests/{id}
+                rid = path.removeprefix("/api/digests/")
+                if not rid.isdigit():
+                    self._json_response({"ok": False, "error": "invalid digest version id"},
+                                        code=400)
+                    return
+                if (self.ctx.config.get("web") or {}).get("protect_read") \
+                        and not self._require_token():
+                    return
+                try:
+                    payload = _digest_http_view(self.ctx, _digest_service(self.ctx).get_digest(int(rid)))
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                self._json_response({"ok": True, **payload})
                 return
 
             if path == "/api/results":
@@ -2146,7 +2281,79 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 data = _read_json_body(self) or {}
                 payload = _digest_view(self.ctx, str(data.get("date") or ""), dry_run=False)
+                # legacy：仅落盘旧 digest_entries 选择历史，不创建版本、不发送
+                payload["deprecated"] = (
+                    "此端点只写 legacy 选择历史；正式发布请使用 POST /api/digests/publish")
                 self._json_response(payload, code=200)
+                return
+
+            if path == "/api/digests/publish":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                try:
+                    result = _digest_service(self.ctx).publish_digest(
+                        data.get("date"),
+                        request_key=data.get("request_key") or None,
+                        channels=data.get("channels"),
+                    )
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                self._json_response({"ok": result["overall_status"] != "failed",
+                                     **_digest_http_view(self.ctx, result)})
+                return
+
+            if path == "/api/digests/regenerate":
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                try:
+                    result = _digest_service(self.ctx).regenerate_digest(
+                        data.get("date"),
+                        request_key=data.get("request_key"),
+                        channels=data.get("channels"),
+                    )
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                self._json_response({"ok": result["overall_status"] != "failed",
+                                     **_digest_http_view(self.ctx, result)})
+                return
+
+            if path.startswith("/api/digests/") and (
+                    path.endswith(("/render", "/retry-send", "/recover-send", "/resolve-send"))):
+                if not self._require_token():
+                    return
+                parts = path.removeprefix("/api/digests/").split("/")
+                action = parts[1] if len(parts) == 2 else ""
+                if len(parts) != 2 or not parts[0].isdigit() or action not in ("render", "retry-send", "recover-send", "resolve-send"):
+                    self._json_response({"ok": False, "error": "invalid digest route"}, code=400)
+                    return
+                data = _read_json_body(self) or {}
+                svc = _digest_service(self.ctx)
+                try:
+                    if action == "render":
+                        result = svc.render_digest(int(parts[0]))
+                    elif action == "recover-send":
+                        result = svc.recover_digest_send(
+                            int(parts[0]), channel=data.get("channel"),
+                            claim_token=data.get("claim_token"))
+                    elif action == "resolve-send":
+                        result = svc.resolve_digest_send(
+                            int(parts[0]), channel=data.get("channel"),
+                            delivered=data.get("delivered"))
+                    else:
+                        result = svc.retry_digest_send(
+                            int(parts[0]), channels=data.get("channels"))
+                except DigestError as e:
+                    payload, code = _digest_error_response(e)
+                    self._json_response(payload, code=code)
+                    return
+                self._json_response({"ok": result["overall_status"] != "failed",
+                                     **_digest_http_view(self.ctx, result)})
                 return
 
             if path == "/api/compare" or path == "/api/related-work":
