@@ -14,9 +14,24 @@ const Today = {
   async load() {
     const errEl = document.getElementById("todayError");
     errEl.hidden = true;
-    const date = document.getElementById("todayDate").value;
+    let date = document.getElementById("todayDate").value;
+    let data = null;
     try {
-      this.data = await API.get("/api/today?date=" + encodeURIComponent(date));
+      data = await API.get("/api/today?date=" + encodeURIComponent(date));
+      // 跨天/当天未运行时今天为空：自动回退到最近一个有精选的日期（最多回看 7 天）
+      if ((data.total || 0) === 0) {
+        for (let i = 1; i <= 7 && (data.total || 0) === 0; i++) {
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          const cand = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          data = await API.get("/api/today?date=" + encodeURIComponent(cand));
+          if ((data.total || 0) > 0) {
+            date = cand;
+            document.getElementById("todayDate").value = cand;
+          }
+        }
+      }
+      this.data = data;
       this.render();
     } catch (e) {
       errEl.textContent = "今日数据加载失败: " + e.message;
