@@ -1109,22 +1109,29 @@ class Database:
         return [dict(zip(keys, r)) for r in rows]
 
     def get_retry_articles(self, threshold: float, days: int = 7) -> dict[str, list[dict[str, Any]]]:
-        """查询需要重试失败阶段的历史文章（评分失败 / 相关但分析失败）。"""
+        """查询需要重试/补齐的历史文章。
+
+        评分重试：'failed'（模型失败）**或** "空且 processed=0"（任务被打断、
+        入库后从未评分的僵尸文章，如服务重启杀死运行中的任务）。
+        分析重试：'failed' 或 "空且 processed=0"，且相关性已达阈值。
+        """
         sql_base = (
             "SELECT * FROM articles "
             "WHERE COALESCE(created_at, datetime('now')) >= datetime('now', ?) AND "
         )
         params = (f"-{int(days)} days",)
+        score_cond = "(score_status = 'failed' OR (COALESCE(score_status, '') = '' AND processed = 0))"
+        analysis_cond = ("((analysis_status = 'failed' OR COALESCE(analysis_status, '') = '') "
+                         "AND processed = 0 AND COALESCE(relevance, 0) >= ?)")
         try:
             if self._memory_conn is not None:
                 with self._memory_lock:
                     cur_s = self._memory_conn.execute(
-                        sql_base + "score_status = 'failed'", params)
+                        sql_base + score_cond, params)
                     score_rows = cur_s.fetchall()
                     score_cols = [d[0] for d in cur_s.description]
                     cur_a = self._memory_conn.execute(
-                        sql_base + "analysis_status = 'failed' AND COALESCE(relevance, 0) >= ?",
-                        params + (threshold,))
+                        sql_base + analysis_cond, params + (threshold,))
                     analysis_rows = cur_a.fetchall()
                     analysis_cols = [d[0] for d in cur_a.description]
                 return {
@@ -1132,12 +1139,11 @@ class Database:
                     "analysis_failed": [dict(zip(analysis_cols, r)) for r in analysis_rows],
                 }
             conn = self._conn()
-            cur_s = conn.execute(sql_base + "score_status = 'failed'", params)
+            cur_s = conn.execute(sql_base + score_cond, params)
             score_rows = cur_s.fetchall()
             score_cols = [d[0] for d in cur_s.description]
             cur_a = conn.execute(
-                sql_base + "analysis_status = 'failed' AND COALESCE(relevance, 0) >= ?",
-                params + (threshold,))
+                sql_base + analysis_cond, params + (threshold,))
             analysis_rows = cur_a.fetchall()
             analysis_cols = [d[0] for d in cur_a.description]
             return {

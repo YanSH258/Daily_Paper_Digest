@@ -406,9 +406,12 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         progress("saved_base")
 
         # ── Step 2.6: 载入需要重试的历史文章 ──────────────────
+        # 排除本批新文章（它们刚入库、状态为空是正常的，由 Step 3 统一评分），
+        # 否则重试查询会把本批文章重复拾起导致双重评分。
+        new_id_set = {a["id"] for a in new_articles}
         retry = db.get_retry_articles(threshold, days=retry_window_days)
-        score_retry = retry.get("score_failed", [])
-        analysis_retry = retry.get("analysis_failed", [])
+        score_retry = [a for a in retry.get("score_failed", []) if a["id"] not in new_id_set]
+        analysis_retry = [a for a in retry.get("analysis_failed", []) if a["id"] not in new_id_set]
         stats["retried_score"] = len(score_retry)
         stats["retried_analysis"] = len(analysis_retry)
         if score_retry or analysis_retry:
