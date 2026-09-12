@@ -171,7 +171,8 @@
           <label class="small"><input type="checkbox" id="watchCitations" onchange="Article.toggleWatch(this.checked)" /> 关注新引用</label>
         </div>
         <div class="ops-row">
-          <button class="secondary" id="reanalyzeBtn" onclick="Article.reanalyze()">🔄 AI 重新解读</button>
+          <button class="secondary" id="reanalyzeBtn" onclick="Article.reanalyze()">🔄 AI 解读</button>
+          <button class="secondary" id="refetchBtn" onclick="Article.reanalyze(true)">📥 取全文并解读</button>
           <span class="small muted" id="reanalyzeMsg"></span>
         </div>
         <div class="small muted" id="zoteroNote"></div></details>

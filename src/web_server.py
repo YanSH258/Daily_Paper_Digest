@@ -1433,7 +1433,7 @@ def _llm_models(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], 
 
 # ── 研究工作台：Zotero / 追踪 / 专题 / 对比 / 趋势 / 高亮 ─────
 
-def _reanalyze_article(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
+def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = None) -> tuple[dict[str, Any], int]:
     """单篇手动 AI 解读：按证据等级（全文/摘要）重新解读并更新。
 
     与批量流水线不同：这里同步执行（约 30-90 秒），失败返回可读错误；
@@ -1459,6 +1459,30 @@ def _reanalyze_article(ctx: WebContext, article_id: int) -> tuple[dict[str, Any]
                 article["abstract"] = work["abstract"]
         except Exception:  # noqa: BLE001 - 补全失败不阻断解读
             pass
+
+    # 可选：先抓全文再解读（粗筛模式下按需深读的入口）
+    if data.get("fetch_fulltext"):
+        try:
+            from core.fetcher import JournalFetcher
+            fetcher = JournalFetcher(ctx.config)
+            fr = fetcher.fetch_fulltext_with_status(article)
+            ev = getattr(fr.evidence_level, "value", str(fr.evidence_level))
+            updates = {
+                "fetch_status": getattr(fr.fetch_status, "value", str(fr.fetch_status)),
+                "evidence_level": ev,
+                "fulltext_url": fr.source_url or None,
+            }
+            if fr.has_fulltext and fr.text:
+                import hashlib as _h2
+                updates["fulltext_text"] = fr.text
+                updates["content_hash"] = _h2.sha256(fr.text.encode("utf-8")).hexdigest()
+                article["fulltext_text"] = fr.text
+                article["evidence_level"] = "FULLTEXT"
+            db_ok = ctx.db.update_article_fields(article_id, **updates)
+            if not db_ok:
+                logger.warning("单篇取全文落库失败 (id=%s)", article_id)
+        except Exception as e:  # noqa: BLE001 - 取全文失败回退为现有内容解读
+            logger.warning("单篇取全文失败 (id=%s): %s", article_id, e)
 
     started = time.monotonic()
     try:
@@ -2238,7 +2262,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not aid_raw.isdigit():
                     self._json_response({"error": "invalid article id"}, code=400)
                     return
-                payload, code = _reanalyze_article(self.ctx, int(aid_raw))
+                payload, code = _reanalyze_article(
+                    self.ctx, int(aid_raw), _read_json_body(self) or {})
                 self._json_response(payload, code=code)
                 return
 

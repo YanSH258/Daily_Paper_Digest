@@ -88,6 +88,7 @@ const Detail = {
           : `<a class="ext-link" onclick="Detail.pushZotero()">推送 Zotero</a>`}
         <label class="small"><input type="checkbox" id="watchSeed" ${Detail.watched ? "checked" : ""} onchange="Detail.toggleWatch(this.checked)" /> 关注新引用</label>
         <a class="ext-link" onclick="Detail.reanalyze()" title="调用 LLM 重新生成 AI 解读（约 30-90 秒）">${a.analysis_status === 'failed' ? '⚠️ 重新解读' : '🔄 重新解读'}</a>
+        <a class="ext-link" onclick="Detail.reanalyze(true)" title="先下载全文（arXiv/OA）再做 AI 解读，质量更高">📥 取全文并解读</a>
         ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
         ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener">DOI ↗</a>` : ""}
       </div>
@@ -208,16 +209,17 @@ const Detail = {
     } catch (e) { alert("推送失败: " + e.message); }
   },
 
-  async reanalyze() {
+  async reanalyze(fetchFulltext = false) {
     const a = this.article;
     if (!a) return;
-    if (!confirm(`对《${API.cleanTitle(a.title || "").slice(0, 40)}…》运行 AI 解读？\n将调用 LLM（约 30-90 秒），${a.evidence_level === "FULLTEXT" ? "基于全文" : "仅基于摘要"}。`)) return;
+    const mode = fetchFulltext ? "先获取全文（arXiv/OA 可自动下载）再做 AI 解读" : `基于${a.evidence_level === "FULLTEXT" ? "已存全文" : "标题摘要"}`;
+    if (!confirm(`对《${API.cleanTitle(a.title || "").slice(0, 40)}…》运行 AI 解读？\n模式：${mode}\n将调用 LLM（约 30-120 秒）。`)) return;
     // 简单忙碌提示：替换解读 Tab 内容
     const pane = document.getElementById("drawer-pane-analysis");
     if (pane) pane.innerHTML = '<div class="small muted" style="padding:20px 0;">🔄 AI 解读运行中（约 30-90 秒），请勿关闭…</div>';
     this.switchTab("analysis");
     try {
-      const resp = await API.post(`/api/articles/${a.id}/reanalyze`, {});
+      const resp = await API.post(`/api/articles/${a.id}/reanalyze`, { fetch_fulltext: fetchFulltext });
       if (resp.ok) {
         this.article = resp.item;
         this.render(resp.item);

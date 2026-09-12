@@ -225,16 +225,16 @@ const Article = {
     } catch (e) { alert("收藏失败: " + e.message); }
   },
 
-  async reanalyze() {
+  async reanalyze(fetchFulltext = false) {
     const a = this.a;
     if (!a) return;
-    if (!confirm(`运行 AI 解读？（调用 LLM，约 30-90 秒，${a.evidence_level === "FULLTEXT" ? "基于全文" : "仅基于摘要"}）`)) return;
+    if (fetchFulltext && !confirm("先获取全文（arXiv/OA 自动下载）再做 AI 解读？将调用 LLM，约 30-120 秒。")) return;
     const btn = document.getElementById("reanalyzeBtn");
     const msg = document.getElementById("reanalyzeMsg");
     btn.disabled = true;
     msg.textContent = "解读运行中…";
     try {
-      const resp = await API.post(`/api/articles/${this.id}/reanalyze`, {});
+      const resp = await API.post(`/api/articles/${this.id}/reanalyze`, { fetch_fulltext: fetchFulltext });
       if (resp.ok) {
         this.a = resp.item;
         this.render(this.a);

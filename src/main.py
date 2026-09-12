@@ -437,6 +437,25 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                     logger.info(f"  评分前摘要补全: {a['title'][:50]}... ({len(completed)} 字)")
         progress("abstract_backfill")
 
+        # ── Step 2.75: 标题自动翻译（免费接口，粗筛阅读用）────
+        if new_articles:
+            from utils.translate import looks_chinese, translate_title
+            t_email = config.get("unpaywall_email", "")
+            translated = 0
+            for a in new_articles[:80]:  # 单次任务上限，防止接口超时拖长任务
+                title = (a.get("title") or "").strip()
+                if not title or looks_chinese(title) or a.get("title_zh"):
+                    continue
+                zh = translate_title(title, email=t_email, pause=0.3)
+                if zh:
+                    db.update_article_fields(a["id"], title_zh=zh)
+                    a["title_zh"] = zh
+                    translated += 1
+            if translated:
+                stats["titles_translated"] = translated
+                logger.info(f"  标题自动翻译: {translated} 篇")
+        progress("title_translation")
+
         # ── Step 2.8: WOS 元数据增强（可选，需 WOS_API_KEY）────
         if new_articles and (os.environ.get("WOS_API_KEY") or config.get("wos", {}).get("api_key")):
             try:

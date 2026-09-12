@@ -76,6 +76,7 @@ class ZoteroClient:
         self.collection = str(cfg.get("collection") or "").strip()
         self.include_note = bool(cfg.get("include_note", True))
         self.attach_oa_pdf = bool(cfg.get("attach_oa_pdf", True))
+        self.unpaywall_email_for_pdf = str((config or {}).get("unpaywall_email") or "your@email.com")
         if not self.api_key:
             raise ZoteroError("Zotero 未配置 api_key（环境变量 ZOTERO_API_KEY 或 config.zotero.api_key）")
         self.user_id = (os.environ.get("ZOTERO_USER_ID") or str(cfg.get("user_id") or "")).strip()
@@ -195,7 +196,7 @@ class ZoteroClient:
                 logger.warning("Zotero 附加笔记失败: %s", e)
 
         if self.attach_oa_pdf:
-            oa_url = self._oa_pdf_url(article)
+            oa_url = self._resolve_pdf_url(article)
             if oa_url:
                 try:
                     self._attach_pdf(key, oa_url)
@@ -234,11 +235,41 @@ class ZoteroClient:
             lines.append(f"<pre>{plain}</pre>")
         return "".join(lines)
 
-    @staticmethod
-    def _oa_pdf_url(article: dict) -> Optional[str]:
+    def _resolve_pdf_url(self, article: dict) -> Optional[str]:
+        """为条目找一个可下载的 PDF 链接（供 Zotero 附件）。
+
+        优先级：已抓取记录的全文链接 → arXiv（预印本 PDF 恒可用）
+        → Unpaywall 查 OA 副本（正式出版物，一次 API 调用）。
+        """
         url = article.get("fulltext_url") or ""
         if url.lower().endswith(".pdf") or "pdf" in url.lower():
             return url
+
+        # arXiv：从 URL 或 DOI 构造，PDF 恒可用
+        import re as _re
+        arxiv = None
+        for src in (article.get("url") or "", article.get("doi") or ""):
+            m = _re.search(r"arxiv\.org/(?:abs|pdf)/([^\s?#]+)", str(src))
+            if m:
+                arxiv = m.group(1).rstrip(".")
+                break
+            m = _re.search(r"10\.48550/arXiv\.(\S+)", str(src), _re.I)
+            if m:
+                arxiv = m.group(1)
+                break
+        if arxiv:
+            return f"https://arxiv.org/pdf/{arxiv}"
+
+        # 正式出版物：查 Unpaywall 的 OA PDF 副本
+        doi = (article.get("doi") or "").strip()
+        if doi:
+            try:
+                from fetchers.oa_fetcher import get_oa_url
+                oa = get_oa_url(doi, email=self.unpaywall_email_for_pdf)
+                if oa and ".pdf" in oa.lower():
+                    return oa
+            except Exception as e:  # noqa: BLE001 - 查询失败不阻断推送
+                logger.debug("Unpaywall OA 查询失败 (%s): %s", doi, e)
         return None
 
     def _attach_pdf(self, item_key: str, pdf_url: str) -> None:
