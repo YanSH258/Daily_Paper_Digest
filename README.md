@@ -2,6 +2,8 @@
 
 化学/材料方向的 AI 文献日报：自动抓顶刊 RSS → 大模型打分解读 → 生成报告并推送。自带网页控制台管理文献库。
 
+> 📦 **完整安装与配置指南（macOS / Windows PowerShell / AI Agent 插件）见 [INSTALL.md](INSTALL.md)**
+
 ## 功能
 
 - 多期刊 RSS 订阅（可在网页端添加/OPML 导入）
