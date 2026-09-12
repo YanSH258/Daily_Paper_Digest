@@ -968,6 +968,8 @@ class Database:
     def _cleanup_where(self, min_score: float) -> tuple[str, list[Any]]:
         """低分清理条件：默认保护收藏/笔记/标签/Zotero/阅读状态/反馈。"""
         where = [
+            # 未评分（relevance IS NULL）的文章不是"低分"，是待评分——绝不清理
+            "relevance IS NOT NULL",
             "COALESCE(relevance, 0) < ?",
             "COALESCE(starred, 0) = 0",
             "(note IS NULL OR trim(note) = '')",

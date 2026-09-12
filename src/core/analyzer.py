@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 DEFAULT_TEMPERATURE: float = 0.3
 DEFAULT_MAX_TOKENS: int = 8192
-RELEVANCE_MAX_TOKENS: int = 800
+# 中转站模型可能先输出大段思考再给 JSON：800 会被思考耗尽导致 JSON 截断，
+# 放宽到 2000 保证最终 JSON 完整输出
+RELEVANCE_MAX_TOKENS: int = 2000
 ANALYSIS_MIN_TOKENS: int = 4096
 ANALYSIS_MAX_TOKENS: int = 8192
 
