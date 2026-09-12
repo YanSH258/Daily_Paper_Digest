@@ -51,3 +51,6 @@ data/logs/
 # Local docs / plans / reviews (not for public repo)
 docs/
 
+
+# macOS
+.DS_Store
