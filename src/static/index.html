@@ -160,6 +160,13 @@
         </div>
         <div id="summary" class="small" style="margin-bottom:12px;"></div>
 
+        <!-- 清理低分：页内确认（不依赖浏览器弹窗） -->
+        <div id="cleanupConfirm" class="batch-bar" hidden>
+          <span class="small" style="font-weight:600;">清理低分：</span>
+          <span id="cleanupMsg" class="small">统计中...</span>
+          <button class="link-btn" onclick="Library.cleanupCancel()">取消</button>
+        </div>
+
         <!-- 批量操作栏 -->
         <div id="batchBar" class="batch-bar" hidden>
           <span id="batchCount" class="small"></span>

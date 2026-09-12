@@ -131,61 +131,47 @@ const Library = {
   },
 
   async cleanupLow() {
-    const minScore = Number(this.currentMinScore() || 0);
-    if (!minScore || minScore <= 0) {
-      alert("请先在筛选里把相关性设为 ≥3 / ≥5 / ≥7 等，再点「清理低分」。");
-      return;
-    }
-    // Token 仅在服务端配置了 web.api_token 时才需要；未配置则直接调用
-    try {
-      const preview = await API.post("/api/articles/cleanup", {
-        min_score: minScore,
-        preview: true,
-      });
-      if (!preview.ok) throw new Error(preview.error || "预览失败");
-      const sample = (preview.sample || [])
-        .map((s) => `· [${Number(s.relevance || 0).toFixed(1)}] ${(s.title || "").slice(0, 60)}`)
-        .join("\n");
-      const ok = confirm(
-        `将删除相关性 < ${minScore} 且无收藏/笔记/标签/Zotero/阅读状态的文献\n` +
-          `共 ${preview.would_delete} 篇\n\n` +
-          `${preview.protected || ""}\n\n样例：\n${sample}\n\n确认删除？此操作不可恢复（本地已有备份）。`
-      );
-      if (!ok) return;
-      // 先导出 CSV 备份（浏览器下载 + 服务端落盘），再删除
+    // 一键自包含：直接给出三档阈值与数量，点哪档删哪档（不依赖筛选与浏览器弹窗）
+    const bar = document.getElementById("cleanupConfirm");
+    const msg = document.getElementById("cleanupMsg");
+    if (!bar || !msg) return;
+    bar.hidden = false;
+    msg.textContent = "统计中...";
+    const tiers = [3, 5, 7];
+    const counts = {};
+    for (const t of tiers) {
       try {
-        const csvRes = await fetch("/api/articles/cleanup/export", {
-          method: "POST",
-          headers: API.headers(),
-          body: JSON.stringify({ min_score: minScore }),
-        });
-        if (csvRes.ok) {
-          const blob = await csvRes.blob();
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          const cd = csvRes.headers.get("Content-Disposition") || "";
-          const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
-          a.download = m ? decodeURIComponent(m[1]) : `cleanup-backup-lt${minScore}.csv`;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        }
-      } catch (e) { /* 备份失败仍继续删除，服务端可能已落盘 */ }
-      const res = await API.post("/api/articles/cleanup", {
-        min_score: minScore,
-        preview: false,
-      });
-      if (!res.ok) throw new Error(res.error || "删除失败");
-      alert(`已备份并删除 ${res.deleted} 篇（备份见浏览器下载与 data/output/）`);
-      this.page = 0;
-      this.load();
-    } catch (e) {
-      const msg = String(e.message || e);
-      if (/unauthorized|401/i.test(msg)) {
-        alert("服务端已开启 API Token 保护：请在左下角填入与设置里相同的 Token 后再清理。");
-      } else {
-        alert("清理失败: " + msg);
+        const p = await API.post("/api/articles/cleanup", { min_score: t, preview: true });
+        counts[t] = p.would_delete || 0;
+      } catch (e) {
+        msg.innerHTML = `<span class="err">统计失败: ${API.esc(e.message)}</span>`;
+        return;
       }
     }
+    msg.innerHTML = "选择阈值（收藏 / 笔记 / 标签 / Zotero / 阅读状态会被保留）：" +
+      tiers.map((t) => `<button class="secondary small-btn" onclick="Library.cleanupExecute(${t})">≥${t}：删除 ${counts[t]} 篇</button>`).join(" ");
+  },
+
+  async cleanupExecute(t) {
+    const msg = document.getElementById("cleanupMsg");
+    const btns = msg ? msg.parentElement.querySelectorAll("button") : [];
+    btns.forEach((b) => { if (b.className.includes("small-btn")) b.disabled = true; });
+    try {
+      const resp = await API.post("/api/articles/cleanup", { min_score: t, preview: false });
+      if (resp.ok) {
+        msg.innerHTML = `<span class="ok">✓ 已删除 ${resp.deleted} 篇</span>`;
+        this.load();
+      } else {
+        msg.innerHTML = `<span class="err">删除失败: ${API.esc(resp.error || "未知")}</span>`;
+      }
+    } catch (e) {
+      msg.innerHTML = `<span class="err">删除失败: ${API.esc(e.message)}</span>`;
+    }
+  },
+
+  cleanupCancel() {
+    const bar = document.getElementById("cleanupConfirm");
+    if (bar) bar.hidden = true;
   },
 
   async translateTitles() {
