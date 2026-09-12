@@ -170,6 +170,10 @@
           <button class="primary" id="zoteroBtn" onclick="Article.pushZotero()">推送 Zotero</button>
           <label class="small"><input type="checkbox" id="watchCitations" onchange="Article.toggleWatch(this.checked)" /> 关注新引用</label>
         </div>
+        <div class="ops-row">
+          <button class="secondary" id="reanalyzeBtn" onclick="Article.reanalyze()">🔄 AI 重新解读</button>
+          <span class="small muted" id="reanalyzeMsg"></span>
+        </div>
         <div class="small muted" id="zoteroNote"></div></details>
         <div class="small muted" id="feedbackNote" style="margin-top:6px;"></div>
       </div>

@@ -1433,6 +1433,64 @@ def _llm_models(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], 
 
 # ── 研究工作台：Zotero / 追踪 / 专题 / 对比 / 趋势 / 高亮 ─────
 
+def _reanalyze_article(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
+    """单篇手动 AI 解读：按证据等级（全文/摘要）重新解读并更新。
+
+    与批量流水线不同：这里同步执行（约 30-90 秒），失败返回可读错误；
+    成功后文章的 analysis/analysis_status 等字段就地更新。
+    """
+    item = _get_article_detail(ctx, article_id)
+    if item is None:
+        return {"ok": False, "error": "article not found"}, 404
+    try:
+        analyzer = LLMAnalyzer(ctx.config)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"LLM 初始化失败，请检查配置: {e}"}, 500
+
+    article = dict(item)
+    # 缺摘要时先尝试 OpenAlex 补全，避免"仅凭标题"解读
+    if not (article.get("abstract") or "").strip() and article.get("doi"):
+        try:
+            from integrations import openalex
+            openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+            work = openalex.get_work_by_doi(article["doi"])
+            if work and work.get("abstract"):
+                ctx.db.update_article_fields(article_id, abstract=work["abstract"])
+                article["abstract"] = work["abstract"]
+        except Exception:  # noqa: BLE001 - 补全失败不阻断解读
+            pass
+
+    started = time.monotonic()
+    try:
+        result = analyzer.analyze_article(article)
+    except Exception as e:  # noqa: BLE001 - 兜底保证前端拿到可读错误
+        logger.error("单篇解读异常: %s", e, exc_info=True)
+        result = {"success": False, "analysis": "", "error": str(e)}
+
+    latency = int((time.monotonic() - started) * 1000)
+    if not result.get("success"):
+        err = result.get("error") or "未知错误"
+        ctx.db.update_article_fields(article_id, analysis_status="failed",
+                                     analysis_error=str(err)[:500])
+        return {"ok": False, "error": f"解读失败: {err}"}, 200
+
+    from core.analyzer import PROMPT_VERSION
+    import hashlib as _hashlib
+    input_text = article.get("fulltext_text") or article.get("abstract") or ""
+    now = datetime.now().isoformat(timespec="seconds")
+    ctx.db.update_article_fields(
+        article_id,
+        analysis=result["analysis"], analysis_status="ok",
+        analysis_model=analyzer.model, analysis_prompt_version=PROMPT_VERSION,
+        analysis_input_hash=_hashlib.sha256(
+            (input_text + "|" + PROMPT_VERSION).encode("utf-8")).hexdigest(),
+        analyzed_at=now, analysis_error=None, processed=1,
+    )
+    updated = _get_article_detail(ctx, article_id)
+    return {"ok": True, "latency_ms": latency, "model": analyzer.model,
+            "evidence_level": result.get("evidence_level"), "item": updated}, 200
+
+
 def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
     item = _get_article_detail(ctx, article_id)
     if item is None:
@@ -2170,6 +2228,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 data = _read_json_body(self)
                 payload, code = _set_feedback(self.ctx, int(article_id_raw), data)
+                self._json_response(payload, code=code)
+                return
+
+            if path.startswith("/api/articles/") and path.endswith("/reanalyze"):
+                if not self._require_token():
+                    return
+                aid_raw = path.removeprefix("/api/articles/").removesuffix("/reanalyze")
+                if not aid_raw.isdigit():
+                    self._json_response({"error": "invalid article id"}, code=400)
+                    return
+                payload, code = _reanalyze_article(self.ctx, int(aid_raw))
                 self._json_response(payload, code=code)
                 return
 

@@ -225,6 +225,31 @@ const Article = {
     } catch (e) { alert("收藏失败: " + e.message); }
   },
 
+  async reanalyze() {
+    const a = this.a;
+    if (!a) return;
+    if (!confirm(`运行 AI 解读？（调用 LLM，约 30-90 秒，${a.evidence_level === "FULLTEXT" ? "基于全文" : "仅基于摘要"}）`)) return;
+    const btn = document.getElementById("reanalyzeBtn");
+    const msg = document.getElementById("reanalyzeMsg");
+    btn.disabled = true;
+    msg.textContent = "解读运行中…";
+    try {
+      const resp = await API.post(`/api/articles/${this.id}/reanalyze`, {});
+      if (resp.ok) {
+        this.a = resp.item;
+        this.render(this.a);
+        msg.textContent = `✓ 完成（${Math.round(resp.latency_ms / 1000)}s）`;
+      } else {
+        msg.textContent = "✗ " + (resp.error || "失败");
+      }
+    } catch (e) {
+      msg.textContent = "✗ " + e.message;
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => { msg.textContent = ""; }, 5000);
+    }
+  },
+
   toggleBody(id, header) {
     const el = document.getElementById(id);
     el.hidden = !el.hidden;
