@@ -381,11 +381,12 @@
       <div class="card">
         <h3>触发抓取</h3>
         <div class="row">
-          <button onclick="Tasks.trigger('default')">运行（默认模式）</button>
-          <button onclick="Tasks.trigger('abstract')" class="secondary">运行（仅摘要模式）</button>
-          <button onclick="Tasks.trigger('fulltext')" class="secondary">运行（强制全文模式）</button>
+          <button onclick="Tasks.trigger('light')">▶ 粗筛运行</button>
+          <button onclick="Tasks.trigger('deep')" class="secondary">🔬 深度运行</button>
           <span id="runResult" class="small"></span>
         </div>
+        <p class="small muted" style="margin:6px 0 0;">粗筛：抓取 + LLM 评分 + 标题翻译（每篇一次评分调用）。
+        深度：在粗筛之上额外抓取全文并对相关文章做 AI 解读（token 消耗大，慎用）。</p>
       </div>
 
       <div class="card">

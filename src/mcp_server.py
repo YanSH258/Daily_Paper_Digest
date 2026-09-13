@@ -357,12 +357,15 @@ def _build_server():
     # ── 任务与报告 ──────────────────────────────────────────────
 
     @mcp.tool()
-    def run_pipeline(mode: str = "default") -> dict:
-        """触发一次抓取流水线（后台运行）。mode: default / abstract / fulltext / weekly。
+    def run_pipeline(mode: str = "light") -> dict:
+        """触发一次抓取流水线（后台运行）。mode: light(粗筛：评分+翻译) / deep(深度：全文+解读) / weekly(周报)。
 
-        成本提示：会抓取全部订阅源并对新文献调用 LLM 评分。仅在用户明确
-        要求运行/更新时调用；调用后用 task_status 轮询进度。
+        成本提示：light 会抓取全部订阅源并对新文献调用 LLM 评分；deep 额外
+        抓全文+AI 解读（消耗大）。仅在用户明确要求运行/更新时调用；
+        调用后用 task_status 轮询进度。
         """
+        legacy = {"default": "light", "abstract": "light", "fulltext": "deep"}
+        mode = legacy.get(mode, mode)
         resp = _call("POST", "/api/run", body={"mode": mode})
         status = _call("GET", "/api/status")
         return {**resp, "task": status.get("task")}
