@@ -98,6 +98,7 @@ class DomainRateLimiter:
         "springer.com": 2.0,
         "iopscience.iop.org": 2.0,
         "feeds.aps.org": 3.0,
+        "api.openalex.org": 1.0,
     }
 
     def __init__(self, domain_config: dict = None, default_rate: float = 5.0):

@@ -442,6 +442,8 @@ class JournalFetcher:
         perf_cfg = config.get("performance", {})
         self.concurrency = perf_cfg.get("concurrency", 5)
         self._request_manager = RequestManager(config=config)
+        from integrations import openalex
+        openalex.configure(config)
         self._browser_lock = threading.Lock()
 
     def fetch_all(self, health_callback=None) -> list[dict]:
@@ -463,6 +465,8 @@ class JournalFetcher:
                     arts = self._fetch_arxiv_source(journal)
                 elif source_type == "openalex":
                     arts = self._fetch_openalex_source(journal)
+                elif source_type == "crossref":
+                    arts = self._fetch_crossref_source(journal)
                 else:
                     rss_url = journal.get("rss", "")
                     if not rss_url:
@@ -477,13 +481,17 @@ class JournalFetcher:
                 if health_callback and journal.get("id"):
                     health_callback(journal["id"], False, str(e))
 
-        if concurrency > 1 and len(journals) > 1:
+        openalex_jobs = [(idx, journal) for idx, journal in enumerate(journals)
+                         if journal.get("source_type", "rss") == "openalex"]
+        other_jobs = [(idx, journal) for idx, journal in enumerate(journals)
+                      if journal.get("source_type", "rss") != "openalex"]
+        if other_jobs:
             with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(concurrency, len(journals))) as executor:
-                list(executor.map(_one, enumerate(journals)))
-        else:
-            for idx, journal in enumerate(journals):
-                _one((idx, journal))
+                    max_workers=min(concurrency, len(other_jobs))) as executor:
+                list(executor.map(_one, other_jobs))
+        if openalex_jobs:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                list(executor.map(_one, openalex_jobs))
         return [a for r in results for a in r]
 
     def _fetch_arxiv_source(self, journal: dict) -> list[dict]:
@@ -526,6 +534,18 @@ class JournalFetcher:
                 "cited_count": w.get("cited_count"),
                 "discovered_via": "openalex_query",
             })
+        return articles
+
+    def _fetch_crossref_source(self, journal: dict) -> list[dict]:
+        from integrations.crossref import journal_works
+        articles = journal_works(
+            (journal.get("query") or "").strip(),
+            limit=int(journal.get("max_articles", self.max_per_journal)),
+            days=self.date_filter_days, timeout=self.timeout,
+        )
+        for article in articles:
+            article["journal"] = journal.get("name") or article["journal"]
+            article["publisher"] = DOI_PUBLISHER_MAP.get(article["doi"].split("/")[0], "DEFAULT")
         return articles
 
     def _apply_date_filter(self, articles: list[dict]) -> list[dict]:
@@ -722,10 +742,9 @@ class JournalFetcher:
             if art:
                 articles.append(art)
 
-        if self.date_filter_days > 0:
-            cutoff = (datetime.now() - timedelta(days=self.date_filter_days)).strftime("%Y-%m-%d")
-            articles = [a for a in articles if a.get("pub_date", "9999") >= cutoff]
-        return articles
+        # Missing publication dates remain unknown, rather than being silently
+        # discarded. Use the same policy as other feeds; never invent a date.
+        return self._apply_date_filter(articles)
 
     def _fetch_rss(self, rss_url: str, publisher: str) -> Optional[Any]:  # R3: Optional[feedparser.FeedParserDict]，用 Optional[Any]
         if publisher == "RSC":

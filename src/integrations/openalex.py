@@ -7,18 +7,29 @@ openalex.py - OpenAlex API 封装（免费、无需 key）
 - 作者检索与作者新文章
 统一返回与库内 article dict 兼容的规范化结构，供追踪流水线直接入库。
 """
+import email.utils
 import logging
+import random
 import re
+import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import requests
 
+from core.rate_limiter import get_domain_limiter
+
 logger = logging.getLogger(__name__)
 
 OPENALEX_BASE = "https://api.openalex.org"
+OPENALEX_URL = f"{OPENALEX_BASE}/works"
 _MAILTO = "your@email.com"
 _session = requests.Session()
+_request_config: dict[str, Any] = {}
+_openalex_lock = threading.Lock()
+_cooldown_lock = threading.Lock()
+_cooldown_until = 0.0
 
 
 def set_polite_email(email: str) -> None:
@@ -28,30 +39,70 @@ def set_polite_email(email: str) -> None:
         _MAILTO = email
 
 
-def _get(path: str, params: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """请求 OpenAlex；404 返回 None，其余失败重试后抛出（调用方据此停止）。
+def configure(config: Optional[dict[str, Any]] = None) -> None:
+    """设置 OpenAlex 共享限速所需的运行时配置。"""
+    global _request_config
+    _request_config = config or {}
 
-    不再吞错返回 None：上层需要区分"确实没有数据"和"采集失败"，
-    否则追踪游标会在失败时被错误推进，导致该窗口文献永久漏采。
-    """
+
+def _retry_after(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _set_cooldown(seconds: float) -> None:
+    global _cooldown_until
+    with _cooldown_lock:
+        _cooldown_until = max(_cooldown_until, time.monotonic() + min(seconds, 300.0))
+
+
+def _wait_cooldown() -> None:
+    with _cooldown_lock:
+        wait = max(0.0, _cooldown_until - time.monotonic())
+    if wait:
+        time.sleep(wait)
+
+
+def _get(path: str, params: dict[str, Any], *, timeout: int = 20) -> Optional[dict[str, Any]]:
+    """请求 OpenAlex；共享限速、串行门控并尊重 429 Retry-After。"""
     params = {**params, "mailto": _MAILTO}
     last_error: Exception | None = None
+    limiter = get_domain_limiter(_request_config)
     for attempt in range(3):
-        try:
-            resp = _session.get(f"{OPENALEX_BASE}{path}", params=params, timeout=20)
-            if resp.status_code == 404:
-                return None  # 确定性不存在，不重试
-            if resp.status_code == 429:
-                time.sleep(2 * (attempt + 1))
-                last_error = RuntimeError(f"HTTP 429 (attempt {attempt + 1})")
-                continue
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:  # noqa: BLE001
-            last_error = e
-            logger.warning("OpenAlex 请求失败 (%s/%s): %s", attempt + 1, 3, e)
-            time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"OpenAlex 请求重试耗尽: {path}") from last_error
+        retry_wait = 0.0
+        with _openalex_lock:
+            _wait_cooldown()
+            if not limiter.acquire(OPENALEX_URL, timeout=60):
+                raise RuntimeError(f"OpenAlex rate_limited: limiter timeout ({path})")
+            try:
+                resp = _session.get(f"{OPENALEX_BASE}{path}", params=params, timeout=timeout)
+                if resp.status_code == 404:
+                    return None
+                if resp.status_code == 429:
+                    retry_wait = _retry_after(resp.headers.get("Retry-After")) or (2 ** (attempt + 1) + random.uniform(0, 1))
+                    _set_cooldown(retry_wait)
+                    last_error = RuntimeError(f"HTTP 429 rate_limited attempt {attempt + 1}")
+                else:
+                    resp.raise_for_status()
+                    return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if not isinstance(exc, RuntimeError) or "rate_limited" not in str(exc):
+                    logger.warning("OpenAlex 请求失败 (%s/%s): %s", attempt + 1, 3, exc)
+                    retry_wait = 1.5 * (attempt + 1)
+        if attempt < 2 and retry_wait:
+            time.sleep(retry_wait)
+    raise RuntimeError(f"OpenAlex 请求重试耗尽 ({path}, rate_limited={isinstance(last_error, RuntimeError) and '429' in str(last_error)})") from last_error
 
 
 def _clean_abstract(inverted_index: Optional[dict]) -> str:

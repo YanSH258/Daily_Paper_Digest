@@ -20,6 +20,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from integrations import openalex
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -206,22 +208,15 @@ def get_openalex_abstract(
     else:
         user_agent = f"mailto:{resolved_email}"
 
-    session: requests.Session = _create_session()
     try:
-        resp: requests.Response = session.get(
-            f"https://api.openalex.org/works/doi:{doi}",
-            params={"select": "abstract_inverted_index,title"},
-            headers={"User-Agent": user_agent},
+        openalex.set_polite_email(resolved_email)
+        data = openalex._get(
+            f"/works/doi:{doi}",
+            {"select": "abstract_inverted_index,title"},
             timeout=timeout,
         )
-        if resp.status_code != 200:
-            logger.warning(
-                "OpenAlex 返回非200状态码 %d（DOI: %s）。",
-                resp.status_code,
-                doi,
-            )
+        if not data:
             return ""
-        data: dict[str, Any] = resp.json()
         inv_index: Optional[dict[str, list[int]]] = data.get("abstract_inverted_index")
         if not inv_index:
             return ""
@@ -246,8 +241,6 @@ def get_openalex_abstract(
             exc_info=True,
         )
         return ""
-    finally:
-        session.close()
 
 
 def _strip_jats(text: str) -> str:

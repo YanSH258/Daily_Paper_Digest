@@ -2365,11 +2365,11 @@ class Database:
                 sql = ("UPDATE journals SET last_run = ?, consecutive_failures = 0, "
                        "last_error = NULL WHERE id = ?")
             else:
-                sql = ("UPDATE journals SET last_run = ?, "
-                       "consecutive_failures = COALESCE(consecutive_failures, 0) + 1, "
+                # last_run is the successful incremental cursor. Keep it intact
+                # after failures so a later retry covers the failed window.
+                sql = ("UPDATE journals SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1, "
                        "last_error = ? WHERE id = ?")
-            params = (datetime.now().isoformat(timespec="seconds"),
-                      error[:300] if not ok else None, journal_id) if not ok else \
+            params = (error[:300], journal_id) if not ok else \
                      (datetime.now().isoformat(timespec="seconds"), journal_id)
             if self._memory_conn is not None:
                 with self._memory_lock:
