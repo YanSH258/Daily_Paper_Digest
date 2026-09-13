@@ -28,7 +28,7 @@ from core.notifier import Notifier, classify_article
 from digest.service import DigestError, DigestService
 from main import (DEFAULT_SCHEDULER_TIMEZONE, get_scheduler_timezone, load_config,
                   load_config_from_obj, run_once, setup_logging, validate_config,
-                  validate_scheduler_time)
+                  validate_scheduler_time, RunBusyError, RunLock)
 from utils.paths import resolve_against_root, resolve_config_file
 
 logger = logging.getLogger("web")
@@ -99,8 +99,8 @@ class TaskRunner:
             "last_stats": None,
         }
 
-    def _make_run_cfg(self, mode: str) -> dict[str, Any]:
-        cfg = copy.deepcopy(self._base_config)
+    def _make_run_cfg(self, mode: str, base_config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        cfg = copy.deepcopy(base_config if base_config is not None else self._base_config)
         fetcher_cfg = cfg.setdefault("fetcher", {})
         analyzer_cfg = cfg.setdefault("analyzer", {})
         if mode == "deep":
@@ -113,17 +113,22 @@ class TaskRunner:
             analyzer_cfg["analyze_abstract_only"] = False
         return cfg
 
-    def start_run(self, trigger: str, mode: str = "default", date_str: Optional[str] = None) -> tuple[bool, str]:
+    def start_run(self, trigger: str, mode: str = "default", date_str: Optional[str] = None,
+                  run_mode: str = "normal") -> tuple[bool, str]:
+        if run_mode not in {"normal", "trial", "preview"}:
+            return False, "run_mode 必须是 normal/trial/preview"
         with self._lock:
             if self.state["running"]:
                 return False, "任务正在运行"
 
             task_id = str(uuid.uuid4())
+            config_snapshot = copy.deepcopy(self._base_config)
             self.state.update({
                 "running": True,
                 "task_id": task_id,
                 "trigger": trigger,
                 "mode": mode,
+                "run_mode": run_mode,
                 "started_at": datetime.now().isoformat(timespec="seconds"),
                 "ended_at": None,
                 "last_error": None,
@@ -132,14 +137,16 @@ class TaskRunner:
 
         thread = threading.Thread(
             target=self._run_task,
-            args=(task_id, trigger, mode, date_str),
+            args=(task_id, trigger, mode, date_str, run_mode, config_snapshot),
             daemon=True,
         )
         thread.start()
         return True, task_id
 
-    def _run_task(self, task_id: str, trigger: str, mode: str, date_str: Optional[str]) -> None:
-        cfg = self._make_run_cfg(mode)
+    def _run_task(self, task_id: str, trigger: str, mode: str, date_str: Optional[str],
+                  run_mode: str = "normal", config_snapshot: Optional[dict[str, Any]] = None) -> None:
+        base = config_snapshot if config_snapshot is not None else copy.deepcopy(self._base_config)
+        cfg = self._make_run_cfg(mode, base)
         success = False
         error_msg = None
         stats: Optional[dict[str, Any]] = None
@@ -153,7 +160,10 @@ class TaskRunner:
                 from main import run_weekly
                 stats = run_weekly(cfg, date_str=date_str, task_id=task_id)
             else:
-                stats = run_once(cfg, date_str=date_str, task_id=task_id)
+                stats = run_once(
+                    cfg, date_str=date_str, task_id=task_id,
+                    trial=run_mode == "trial", preview=run_mode == "preview",
+                )
             success = not (stats and stats.get("digest_overall_status") == "failed")
             if not success:
                 error_msg = "; ".join(e.get("message", "日报失败") for e in stats.get("digest_errors", [])) or "日报生成失败"
@@ -179,6 +189,7 @@ class TaskRunner:
             status = "success" if success else "failed"
             if success and stats and (stats.get("db_errors") or stats.get("scored_failed")
                                       or stats.get("analyzed_failed")
+                                      or stats.get("source_failed") or stats.get("source_incomplete")
                                       or stats.get("digest_overall_status") == "partial"):
                 status = "partial"
             self._db.task_finish(task_id, status=status, stats=stats, error=error_msg,
@@ -846,6 +857,7 @@ def _digest_http_view(ctx: WebContext, payload: dict[str, Any]) -> dict[str, Any
 def _task_http_view(ctx: WebContext) -> dict[str, Any]:
     state = ctx.runner.get_state()
     stats = state.get("last_stats") or {}
+    state["trial_budget"] = int((ctx.config.get("processing") or {}).get("trial_budget", 30))
     version_id = stats.get("digest_version_id")
     if version_id:
         state["digest_url"] = f"/#digest_version={int(version_id)}"
@@ -1508,7 +1520,7 @@ def _llm_models(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], 
 
 # ── 研究工作台：Zotero / 追踪 / 专题 / 对比 / 趋势 / 高亮 ─────
 
-def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = None) -> tuple[dict[str, Any], int]:
+def _reanalyze_article_unlocked(ctx: WebContext, article_id: int, data: Optional[dict] = None) -> tuple[dict[str, Any], int]:
     """单篇手动 AI 解读：按证据等级（全文/摘要）重新解读并更新。
 
     与批量流水线不同：这里同步执行（约 30-90 秒），失败返回可读错误；
@@ -1588,6 +1600,19 @@ def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = 
     updated = _get_article_detail(ctx, article_id)
     return {"ok": True, "latency_ms": latency, "model": analyzer.model,
             "evidence_level": result.get("evidence_level"), "item": updated}, 200
+
+
+def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = None) -> tuple[dict[str, Any], int]:
+    """单篇解读与自动流水线共享文件锁，冲突时返回 409 供客户端重试。"""
+    lock = RunLock(ctx.config)
+    try:
+        lock.acquire()
+    except RunBusyError as exc:
+        return {"ok": False, "busy": True, "retryable": True, "error": str(exc)}, 409
+    try:
+        return _reanalyze_article_unlocked(ctx, article_id, data or {})
+    finally:
+        lock.release()
 
 
 def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
@@ -2252,6 +2277,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 data = _read_json_body(self)
                 mode = str(data.get("mode", "default"))
+                run_mode = str(data.get("run_mode", data.get("execution_mode", "normal")))
                 date_str = data.get("date")
                 # 兼容旧模式名：default/abstract → light；fulltext → deep
                 if mode == "abstract":
@@ -2263,8 +2289,13 @@ class Handler(BaseHTTPRequestHandler):
                 if mode not in {"light", "deep", "weekly"}:
                     self._json_response({"error": "mode must be one of light/deep/weekly"}, code=400)
                     return
+                if run_mode not in {"normal", "trial", "preview"}:
+                    self._json_response({"error": "run_mode must be one of normal/trial/preview"}, code=400)
+                    return
 
-                ok, msg = self.ctx.runner.start_run(trigger="manual", mode=mode, date_str=date_str)
+                ok, msg = self.ctx.runner.start_run(
+                    trigger="manual", mode=mode, date_str=date_str, run_mode=run_mode,
+                )
                 if not ok:
                     self._json_response({"ok": False, "error": msg, "message": msg}, code=409)
                     return

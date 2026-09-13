@@ -133,6 +133,11 @@ class TestPipelineRetry(unittest.TestCase):
             "relevance_threshold": 5,
             "fetcher": {"use_fulltext": True, "retry_window_days": 7},
         }
+        for target, value in (("fetchers.oa_fetcher.get_dedup_abstract", ""),
+                              ("utils.translate.translate_title", "")):
+            mocker = patch(target, return_value=value)
+            mocker.start()
+            self.addCleanup(mocker.stop)
         import main as M
         self.M = M
         for name, fake in (("JournalFetcher", FakeFetcher), ("LLMAnalyzer", FakeAnalyzer),
@@ -196,8 +201,8 @@ class TestPipelineRetry(unittest.TestCase):
         # 配置未启用任何渠道 → 不请求投递；有评分/分析恢复时日报更新为新版本
         self.assertIsNone(rep["push_results"])
         versions = db.list_digest_versions(date_from="2026-09-08", date_to="2026-09-08")
-        self.assertEqual([v["version"] for v in versions], [2, 1])
-        self.assertIn(os.path.join("daily", "2026-09-08", "v2"), rep["file_path"])
+        self.assertEqual([v["version"] for v in versions], [3, 2, 1])
+        self.assertIn(os.path.join("daily", "2026-09-08", "v3"), rep["file_path"])
         db.close()
 
 

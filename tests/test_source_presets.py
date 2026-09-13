@@ -131,9 +131,7 @@ class SourcePresetTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         env = dict(os.environ)
         py_paths = [str(repo / "src")]
-        deps = repo / ".deps"
-        if deps.is_dir():
-            py_paths.append(str(deps))
+        # The subprocess uses the current test interpreter and its installed dependencies.
         env["PYTHONPATH"] = os.pathsep.join(py_paths)
         env["DPD_DATA_ROOT"] = self._tmp.name  # 日志/数据不落到真实目录
         result = subprocess.run(

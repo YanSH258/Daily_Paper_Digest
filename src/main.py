@@ -182,6 +182,9 @@ def validate_config(config: dict) -> None:
     scheduler = config.get("scheduler") or {}
     validate_scheduler_time(scheduler.get("run_time", "08:00"))
     get_scheduler_timezone(config)
+    from processing import validate_budget
+    validate_budget(config)
+    validate_budget(config, trial=True)
 
 
 def _write_dry_run_report(config: dict, date_str: str, report: str) -> Optional[str]:
@@ -249,7 +252,7 @@ class RunLock:
     def __init__(self, config: dict) -> None:
         try:
             import fcntl
-        except ImportError:  # 非 POSIX 平台降级为仅进程内约束
+        except ImportError:  # Windows 使用 msvcrt 文件锁
             fcntl = None  # noqa: F841
         self._fcntl_available = fcntl is not None
         db_path = resolve_against_root(config.get("database", {}).get("path", "data/db/chem_daily.db"))
@@ -259,6 +262,19 @@ class RunLock:
 
     def acquire(self) -> None:
         if not self._fcntl_available:
+            import msvcrt
+            self._handle = open(self._lock_path, "a+b")
+            try:
+                self._handle.seek(0, 2)
+                if self._handle.tell() == 0:
+                    self._handle.write(b"0")
+                    self._handle.flush()
+                self._handle.seek(0)
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                self._handle.close()
+                self._handle = None
+                raise RunBusyError("已有流水线任务正在运行") from exc
             return
         import fcntl
         self._handle = open(self._lock_path, "w")
@@ -270,7 +286,16 @@ class RunLock:
             raise RunBusyError("已有流水线任务正在运行（数据库文件锁被占用）") from e
 
     def release(self) -> None:
-        if not self._fcntl_available or self._handle is None:
+        if self._handle is None:
+            return
+        if not self._fcntl_available:
+            import msvcrt
+            try:
+                self._handle.seek(0)
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                self._handle.close()
+                self._handle = None
             return
         import fcntl
         try:
@@ -307,7 +332,63 @@ def dedupe_batch(articles: list[dict]) -> list[dict]:
     return unique
 
 
-def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None) -> dict:
+def preview_collection(config: dict, date_str: str) -> dict:
+    """采集预检只读文章库，不构造 Database 或模型，也不推进游标。"""
+    import sqlite3
+    from processing import admission_decision, build_queue, validate_budget
+    config = copy.deepcopy(config)
+    config["_run_date"] = date_str
+    path = Path(config["database"]["path"]).resolve()
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        journals = [dict(r) for r in conn.execute("SELECT * FROM journals WHERE enabled=1 ORDER BY id")]
+        existing = [dict(r) for r in conn.execute("SELECT * FROM articles")]
+    config["journals"] = journals
+    fetcher = JournalFetcher(config)
+    try:
+        raw = fetcher.fetch_all()
+        sources = getattr(fetcher, "source_results", [])
+    finally:
+        fetcher.close()
+    result = {"preview": True, "date": date_str, "fetched_raw": len(raw),
+              "outside_window": 0, "needs_date": 0, "invalid_date": 0,
+              "new_eligible": 0, "new_quarantined": 0, "already_in_db": 0,
+              "score_attempted": 0, "llm_requests": 0, "sources": sources,
+              "report_skipped_reason": "采集预览不调用模型、不入库、不生成正式日报或推送"}
+    unique = dedupe_batch(raw)
+    result["cross_source_duplicates"] = len(raw) - len(unique)
+    known = dedupe_batch(existing)
+    dois = {a.get("doi") for a in known if a.get("doi")}
+    urls = {a.get("url") for a in known if a.get("url")}
+    titles = {" ".join(str(a.get("title") or "").lower().split()) for a in known}
+    pending = []
+    for a in existing:
+        if a.get("score_status") == "ok" or a.get("processed"):
+            continue
+        decision = admission_decision(a, date_str, config)
+        if a.get("processing_status") == "eligible" or (a.get("processing_status") in (None, "", "unreviewed") and decision["decision"] == "eligible"):
+            pending.append({**a, "processing_status": "eligible"})
+    for index, a in enumerate(unique, 1):
+        decision = admission_decision(a, date_str, config)
+        if decision["decision"] != "eligible":
+            result[decision["decision"]] += 1
+        title = " ".join(str(a.get("title") or "").lower().split())
+        if (a.get("doi") and a["doi"] in dois) or (a.get("url") and a["url"] in urls) or (title and title in titles):
+            result["already_in_db"] += 1
+            continue
+        if decision["decision"] == "eligible":
+            result["new_eligible"] += 1
+            pending.append({**a, "id": -index, "processing_status": "eligible"})
+        else:
+            result["new_quarantined"] += 1
+    selected = build_queue(pending, config, validate_budget(config))
+    result.update(score_queue_total=len(pending), score_planned=len(selected),
+                  score_deferred=len(pending) - len(selected))
+    return result
+
+
+def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None,
+             *, trial: bool = False, preview: bool = False) -> dict:
     """执行一次完整流水线，返回结构化运行结果。
 
     分阶段状态实时落库（score_status / evidence_level / analysis_status），
@@ -315,9 +396,18 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     外部调用方（如 TaskRunner）传入 task_id 时由其负责收尾任务记录；
     否则 run_once 自己记录 start/finish。
     """
-    date_str  = date_str or datetime.now().strftime("%Y-%m-%d")
+    config = copy.deepcopy(config)
+    date_str = date_str or datetime.now(get_scheduler_timezone(config)).strftime("%Y-%m-%d")
+    config["_run_date"] = date_str
+    if preview:
+        return preview_collection(config, date_str)
     threshold = config.get("relevance_threshold", 5)
     retry_window_days = int(config.get("fetcher", {}).get("retry_window_days", 7))
+    processing_cfg = config.get("processing", {}) or {}
+    from processing import admission_decision, validate_budget
+    validate_budget(config, trial=trial)
+    score_budget = int(processing_cfg.get("trial_max_score_articles", 30) if trial else
+                       processing_cfg.get("max_score_articles_per_run", 100))
 
     stats: dict[str, Any] = {
         "date": date_str,
@@ -327,6 +417,9 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         "candidates": 0, "fulltext_fetched": 0, "abstract_completed": 0,
         "analyzed_ok": 0, "analyzed_failed": 0, "analyzed_skipped": 0,
         "saved": 0, "db_errors": 0,
+        "fetched_raw": 0, "outside_window": 0, "needs_date": 0,
+        "invalid_date": 0, "new_eligible": 0, "new_quarantined": 0,
+        "score_queue_total": 0, "score_attempted": 0, "score_deferred": 0,
         "report_skipped_reason": None, "report_path": None,
         "push_results": None,
     }
@@ -338,24 +431,29 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
 
     logger.info(f"========== 开始运行: {date_str} (task_id={task_id}) ==========")
 
-    db       = Database(config["database"]["path"])
-    config["journals"] = load_journals_config(config, db)
-    fetcher  = JournalFetcher(config)
-    analyzer = LLMAnalyzer(config)
-    notifier = Notifier(config)
-
-    # 推荐质量闭环：注入用户历史偏好样例
-    fb = db.get_feedback_examples()
-    analyzer.set_feedback_examples(fb.get("liked", []), fb.get("disliked", []))
-    if fb.get("liked") or fb.get("disliked"):
-        logger.info(
-            f"  偏好注入: 喜欢 {len(fb['liked'])} 条 / 不喜欢 {len(fb['disliked'])} 条"
-        )
-
-    # 跨进程互斥：CLI / 网页触发 / 定时任务同一时间只允许一个流水线实例
-    # （先拿锁再记任务，锁失败不会留下悬空的 running 记录）
     _run_lock = RunLock(config)
     _run_lock.acquire()
+    db = fetcher = None
+    try:
+        db       = Database(config["database"]["path"])
+        config["journals"] = load_journals_config(config, db)
+        fetcher  = JournalFetcher(config)
+        analyzer = LLMAnalyzer(config)
+        notifier = Notifier(config)
+
+        # 推荐质量闭环：注入用户历史偏好样例
+        fb = db.get_feedback_examples()
+        analyzer.set_feedback_examples(fb.get("liked", []), fb.get("disliked", []))
+        if fb.get("liked") or fb.get("disliked"):
+            logger.info(
+                f"  偏好注入: 喜欢 {len(fb['liked'])} 条 / 不喜欢 {len(fb['disliked'])} 条"
+            )
+
+    except Exception:
+        if db is not None:
+            db.close()
+        _run_lock.release()
+        raise
 
     if own_task:
         db.task_start(task_id, trigger="cli", mode="default", date_str=date_str)
@@ -367,12 +465,13 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     try:
         # ── Step 1: 抓取 RSS ──────────────────────────────────
         logger.info("Step 1: 抓取期刊 RSS")
+        source_health = {}
         raw_articles = fetcher.fetch_all(
-            health_callback=lambda jid, ok, err="": db.update_journal_health(jid, ok, err)
+            health_callback=lambda jid, ok, err="": source_health.update({jid: (ok, err)})
         )
         stats["fetched_rss"] = len(raw_articles)
-        logger.info(f"  RSS 共抓取: {len(raw_articles)} 篇原始文章")
-
+        stats["fetched_raw"] = len(raw_articles)
+        logger.info(f"  来源共抓取: {len(raw_articles)} 篇原始文章")
         # ── Step 1.2: 引文/作者追踪采集 ───────────────────────
         tracking_articles, tracking_meta = [], {}
         if config.get("tracking", {}).get("enabled", True):
@@ -384,8 +483,20 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 logger.info(f"  追踪采集: 引文/作者新文章 {len(tracking_articles)} 篇")
         raw_articles = list(raw_articles) + list(tracking_articles)
         stats["fetched"] = len(raw_articles)
+        stats["fetched_raw"] = sum(r.get("raw_count", 0) for r in getattr(fetcher, "source_results", [])) + len(tracking_articles) if getattr(fetcher, "source_results", []) else len(raw_articles)
+        for article in raw_articles:
+            decision = admission_decision(article, date_str, config)
+            article["_admission"] = decision
+            article["processing_status"] = decision["decision"]
+            article["processing_reason"] = decision["reason"]
+            article["date_source"] = decision["date_source"]
+            if decision.get("publication_date"):
+                article["pub_date"] = decision["publication_date"]
+            if decision["decision"] != "eligible":
+                stats[decision["decision"]] += 1
 
         # ── Step 1.5: 批次内去重 ──────────────────────────────
+        all_discoveries = list(raw_articles)
         raw_articles = dedupe_batch(raw_articles)
         stats["batch_duplicates"] = stats["fetched"] - len(raw_articles)
         logger.info(
@@ -416,48 +527,67 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         if stats["saved"] < len(new_articles):
             stats["db_errors"] += 1
             logger.error(f"  有 {len(new_articles) - stats['saved']} 篇文章入库失败")
+        inserted_pairs = []
         for a, aid in zip(new_articles, inserted_ids):
             a["id"] = aid
+            if aid is not None:
+                inserted_pairs.append((aid, a))
+        if db.persist_admission([(aid, a["_admission"]) for aid, a in inserted_pairs]) != len(inserted_pairs):
+            raise RuntimeError("准入状态持久化失败，停止处理且不推进游标")
         new_articles = [a for a in new_articles if a.get("id") is not None]
         # 追踪来源与引文关联落库
         for a in new_articles:
             via = a.get("discovered_via")
             if via and via != "rss":
                 db.update_article_fields(a["id"], discovered_via=via)
+        discovery_pairs = []
+        for discovery in all_discoveries:
+            aid = db.record_article_sources(discovery)
+            if aid is not None:
+                discovery_pairs.append((aid, discovery))
         if tracking_meta:
-            edges = record_tracking_edges(db, list(zip(inserted_ids, new_articles)), tracking_meta)
+            edges = record_tracking_edges(db, discovery_pairs, tracking_meta)
             if edges:
                 stats["citation_edges"] = edges
             # 追踪文章已全部尝试入库：此时才推进引文/作者游标。
             # 入库失败（save_articles_batch 部分失败）时不推进对应窗口，下轮可重试。
-            if not (stats["saved"] < len(new_articles)):
+            if stats["saved"] == stats.get("new_articles", 0):
                 mark_tracking_cursor(db, tracking_meta)
             else:
                 logger.warning("  有文章入库失败，本次不推进追踪游标（失败窗口将重试）")
         logger.info(f"  已入库基础记录 {stats['saved']} 篇（待评分）")
         progress("saved_base")
 
-        # ── Step 2.6: 载入需要重试的历史文章 ──────────────────
-        # 排除本批新文章（它们刚入库、状态为空是正常的，由 Step 3 统一评分），
-        # 否则重试查询会把本批文章重复拾起导致双重评分。
+        source_results = getattr(fetcher, "source_results", [])
+        stats["sources"] = source_results
+        stats["source_failed"] = sum(not r["success"] for r in source_results)
+        stats["source_incomplete"] = sum(r["success"] and not r["complete"] for r in source_results)
+        persisted = stats["saved"] == stats["new_articles"] and not stats["db_errors"]
+        for result in source_results:
+            db.record_source_result(result, persisted=persisted)
+        stats["new_eligible"] = sum(a.get("processing_status") == "eligible" for a in new_articles)
+        stats["new_quarantined"] = len(new_articles) - stats["new_eligible"]
+        stats["cross_source_duplicates"] = stats["batch_duplicates"]
+        stats["already_in_db"] = stats["db_duplicates"]
+        queue = db.get_processing_queue(config, date_str, trial=trial)
+        to_score = queue.pop("selected")
+        stats.update(queue)
+        stats["score_attempted"] = 0
         new_id_set = {a["id"] for a in new_articles}
-        retry = db.get_retry_articles(threshold, days=retry_window_days)
-        score_retry = [a for a in retry.get("score_failed", []) if a["id"] not in new_id_set]
-        analysis_retry = [a for a in retry.get("analysis_failed", []) if a["id"] not in new_id_set]
+        score_retry = [a for a in to_score if a.get("score_status") == "failed"]
         stats["retried_score"] = len(score_retry)
+        analysis_queue = db.get_analysis_queue(config, date_str, trial=trial)
+        analysis_retry = analysis_queue["selected"]
+        stats["analysis_deferred"] = analysis_queue["analysis_deferred"]
+        analysis_retry = [a for a in analysis_retry if a["id"] not in {r["id"] for r in to_score}]
         stats["retried_analysis"] = len(analysis_retry)
-        if score_retry or analysis_retry:
-            logger.info(
-                f"  重试队列: 评分失败 {len(score_retry)} 篇，分析失败 {len(analysis_retry)} 篇"
-            )
-            for a in score_retry:
-                a["_retry_score"] = True
+        eligible_new_articles = to_score
 
         # ── Step 2.7: 缺摘要/摘要被 RSS 截断时先补全，再评分 ──
-        if new_articles:
+        if eligible_new_articles:
             from fetchers.oa_fetcher import get_dedup_abstract, looks_truncated_abstract
             unpaywall_email = config.get("unpaywall_email", "your@email.com")
-            for a in new_articles:
+            for a in eligible_new_articles:
                 if not a.get("doi"):
                     continue
                 abs_txt = (a.get("abstract") or "").strip()
@@ -479,11 +609,11 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         progress("abstract_backfill")
 
         # ── Step 2.75: 标题自动翻译（免费接口，粗筛阅读用）────
-        if new_articles:
+        if eligible_new_articles:
             from utils.translate import looks_chinese, translate_title
             t_email = config.get("unpaywall_email", "")
             translated = 0
-            for a in new_articles[:80]:  # 单次任务上限，防止接口超时拖长任务
+            for a in eligible_new_articles[:80]:  # 单次任务上限，防止接口超时拖长任务
                 title = (a.get("title") or "").strip()
                 if not title or looks_chinese(title) or a.get("title_zh"):
                     continue
@@ -498,12 +628,12 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         progress("title_translation")
 
         # ── Step 2.8: WOS 元数据增强（可选，需 WOS_API_KEY）────
-        if new_articles and (os.environ.get("WOS_API_KEY") or config.get("wos", {}).get("api_key")):
+        if eligible_new_articles and (os.environ.get("WOS_API_KEY") or config.get("wos", {}).get("api_key")):
             try:
                 from integrations.wos_client import WOSClient
                 wos = WOSClient(config)
                 enriched = 0
-                for a in new_articles[:30]:  # 限额，防止单次任务消耗过多配额
+                for a in eligible_new_articles[:30]:  # 限额，防止单次任务消耗过多配额
                     if not (a.get("doi") or a.get("title")):
                         continue
                     try:
@@ -536,13 +666,16 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             logger.debug(f"相似度先验跳过: {e}")
 
         # ── Step 3: LLM 相关性评分（新文章 + 评分失败重试）────
-        to_score = list(new_articles) + list(score_retry)
-        logger.info(f"Step 3: LLM 相关性评分 (阈值={threshold}，共 {len(to_score)} 篇)")
+        logger.info(f"Step 3: LLM 相关性评分 (阈值={threshold}，本轮 {len(to_score)}/{stats['score_queue_total']} 篇)")
         score_results: list[Any] = [None] * len(to_score)
+
+        score_counter_lock = __import__("threading").Lock()
 
         def _score_one(idx_article):
             idx, article = idx_article
             logger.info(f"  [{idx+1}/{len(to_score)}] 评分: {article['title'][:60]}...")
+            with score_counter_lock:
+                stats["score_attempted"] += 1
             try:
                 score_results[idx] = analyzer.filter_relevance(article)
             except Exception as e:  # noqa: BLE001 - 单篇评分失败不阻断批次
@@ -569,7 +702,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 stats["scored_ok"] += 1
                 if not ok:
                     stats["db_errors"] += 1
-                if res["score"] >= threshold:
+                if ok and res["score"] >= threshold:
                     candidate_articles.append(article)
                     logger.info(f"    ✓ 入选: {article['title'][:60]} (score={res['score']:.1f})")
                 else:
@@ -587,7 +720,9 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                     stats["db_errors"] += 1
 
         # 分析失败重试的文章直接进入候选（评分已通过）
-        candidate_articles.extend(analysis_retry)
+        candidate_articles = list({a["id"]: a for a in analysis_retry + candidate_articles}.values())
+        stats["analysis_deferred"] += max(0, len(candidate_articles) - score_budget)
+        candidate_articles = candidate_articles[:score_budget]
         stats["candidates"] = len(candidate_articles)
         logger.info(f"  初筛通过: {len(candidate_articles)} 篇")
         progress("scored")
@@ -700,6 +835,19 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             list(executor.map(_analyze_one, enumerate(relevant_articles)))
         progress("analyzed")
 
+        stats["score_succeeded"] = stats["scored_ok"]
+        stats["score_failed"] = stats["scored_failed"]
+        stats["llm_requests"] = analyzer.usage.get("requests", analyzer.usage.get("calls", 0))
+        stats["budget_completed"] = True
+        stats["backlog_remaining"] = stats["score_deferred"] + stats.get("analysis_deferred", 0)
+        if trial:
+            stats["trial"] = True
+            stats["report_skipped_reason"] = "试运行不生成正式日报或推送"
+            stats["tokens"] = dict(analyzer.usage)
+            if own_task:
+                db.task_finish(task_id, status="partial" if stats["scored_failed"] or stats["db_errors"] or stats.get("source_failed") or stats.get("source_incomplete") else "success", stats=stats)
+            return stats
+
         # ── Step 6: 更新 HTML 索引（邮件需要附加最新版本）─────
         logger.info("Step 6: 更新数据库 HTML 索引")
         html_index_path = notifier.output_dir / "paper_index.html"
@@ -729,7 +877,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         # 无任何新处理且当日已有发布版本：保留已有内容，不覆盖不重推。
         # 无新增但当日尚未发布时，仍从历史合格池选文发布（任务书 §4.1）
         existing_version = db.get_latest_published_digest_version(date_str)
-        if (not new_articles and not score_retry and not analysis_retry
+        if (not new_articles and not stats["scored_ok"] and not stats["analyzed_ok"]
                 and existing_version is not None):
             reason = "无新增文章且当日日报版本已存在，跳过重新生成与推送"
             stats["report_skipped_reason"] = reason
@@ -743,7 +891,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         else:
             digest_result = None
             try:
-                has_changes = bool(new_articles or score_retry or analysis_retry)
+                has_changes = bool(stats["scored_ok"] or stats["analyzed_ok"] or new_articles)
                 if has_changes and existing_version is not None:
                     digest_result = digest_service.regenerate_digest(
                         date_str,
@@ -805,7 +953,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 if stats.get("push_results") else True
             has_failure = bool(
                 stats["db_errors"] or stats["scored_failed"]
-                or stats["analyzed_failed"] or not push_ok
+                or stats["analyzed_failed"] or stats.get("source_failed") or stats.get("source_incomplete") or not push_ok
                 or stats.get("digest_overall_status") in ("partial", "failed")
             )
             task_status = ("failed" if stats.get("digest_overall_status") == "failed"
@@ -817,7 +965,12 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             db.task_finish(task_id, status="failed", stats=stats, error=str(e))
         raise
     finally:
-        _run_lock.release()
+        try:
+            if hasattr(fetcher, "close"):
+                fetcher.close()
+        finally:
+            db.close()
+            _run_lock.release()
 
 # ── 定时调度 ──────────────────────────────────────────────────
 
@@ -951,7 +1104,12 @@ def main():
                              "与 --dry-run 同用只预览不导入。不触发采集/评分/推送")
     parser.add_argument("--dry-run", action="store_true",
                         help="与 --import-sources 同用：只显示将导入的清单")
+    process_mode = parser.add_mutually_exclusive_group()
+    process_mode.add_argument("--trial", action="store_true", help="小批量评分试运行，不生成正式日报或推送")
+    process_mode.add_argument("--collect-preview", action="store_true", help="只读采集预览，不调用模型或写入业务库")
     args = parser.parse_args()
+    if args.dry_run and not args.import_sources:
+        parser.error("--dry-run 必须与 --import-sources 配合；采集预览使用 --collect-preview")
     setup_logging(args.config)
 
     if args.init_config:
@@ -995,6 +1153,10 @@ def main():
         return
 
     config = load_config(args.config)
+    if args.collect_preview:
+        import json
+        print(json.dumps(run_once(config, args.date, preview=True), ensure_ascii=False, indent=2))
+        return
     validate_config(config)
 
     # 查询/发布已有文献不拥有其他进程的流水线任务，不修改其 running 状态。
@@ -1047,7 +1209,7 @@ def main():
     if args.schedule:
         run_scheduler(config)
     else:
-        run_once(config, date_str=args.date)
+        run_once(config, date_str=args.date, trial=args.trial)
 
 
 if __name__ == "__main__":

@@ -357,8 +357,9 @@ def _build_server():
     # ── 任务与报告 ──────────────────────────────────────────────
 
     @mcp.tool()
-    def run_pipeline(mode: str = "light") -> dict:
+    def run_pipeline(mode: str = "light", run_mode: str = "normal") -> dict:
         """触发一次抓取流水线（后台运行）。mode: light(粗筛：评分+翻译) / deep(深度：全文+解读) / weekly(周报)。
+        run_mode: normal(正式) / trial(真实调用但不生成日报/推送，预算 30) / preview(只读模拟，不调用模型)。
 
         成本提示：light 会抓取全部订阅源并对新文献调用 LLM 评分；deep 额外
         抓全文+AI 解读（消耗大）。仅在用户明确要求运行/更新时调用；
@@ -366,7 +367,9 @@ def _build_server():
         """
         legacy = {"default": "light", "abstract": "light", "fulltext": "deep"}
         mode = legacy.get(mode, mode)
-        resp = _call("POST", "/api/run", body={"mode": mode})
+        if run_mode not in {"normal", "trial", "preview"}:
+            raise ValueError("run_mode must be normal/trial/preview")
+        resp = _call("POST", "/api/run", body={"mode": mode, "run_mode": run_mode})
         status = _call("GET", "/api/status")
         return {**resp, "task": status.get("task")}
 

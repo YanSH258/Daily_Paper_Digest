@@ -8,6 +8,7 @@ import re
 import json
 import time
 import logging
+import threading
 from typing import Any, Generator, Optional, TypedDict
 
 import openai
@@ -115,12 +116,14 @@ class LLMAnalyzer:
         self.client: OpenAI = OpenAI(
             api_key=provider_cfg["api_key"],
             base_url=provider_cfg["base_url"],
+            max_retries=0,
         )
         self.model: str = provider_cfg.get("model", "deepseek-flash")
         # 反馈注入（推荐质量闭环）：liked/disliked 样例由流水线设置
         self.feedback_examples: dict[str, list[dict[str, str]]] = {"liked": [], "disliked": []}
         # Token 用量统计（成本观测）
-        self.usage: dict[str, int] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.usage: dict[str, int] = {"calls": 0, "requests": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self._usage_lock = threading.Lock()
         logger.info(
             "[LLM_INIT] LLM 已初始化: provider=%s, model=%s",
             self.provider,
@@ -487,6 +490,8 @@ class LLMAnalyzer:
         """
         effective_max_tokens: int = max_tokens if max_tokens is not None else CHAT_MAX_TOKENS
         try:
+            with self._usage_lock:
+                self.usage["requests"] += 1
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -782,6 +787,8 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
 
         for attempt in range(retry):
             try:
+                with self._usage_lock:
+                    self.usage["requests"] += 1
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
@@ -793,9 +800,10 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
                 # Token 用量统计（成本观测）
                 usage = getattr(response, "usage", None)
                 if usage is not None:
-                    self.usage["calls"] += 1
-                    self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-                    self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+                    with self._usage_lock:
+                        self.usage["calls"] += 1
+                        self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+                        self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
                 raw_content = getattr(choice.message, "content", "") or ""
                 # 如果 content 为空且存在 reasoning_content，尝试使用它
                 if not raw_content and hasattr(choice.message, "reasoning_content"):
