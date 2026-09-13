@@ -44,6 +44,9 @@ def canonical_url(item: dict[str, Any]) -> Optional[str]:
     if source_type == "arxiv":
         return "https://export.arxiv.org/api/query?search_query=" + quote(query)
     if source_type == "openalex":
+        # filter: 前缀为原生 OpenAlex filter 语法（如期刊 ISSN 订阅），直接作为 filter 参数
+        if query.startswith("filter:"):
+            return "https://api.openalex.org/works?" + query
         return "https://api.openalex.org/works?search=" + quote(query)
     return None
 
@@ -86,8 +89,14 @@ def _normalize_entry(src: Any, index: int) -> dict[str, Any]:
         "coverage": _str_field(src, "coverage"),
         "limitations": _str_field(src, "limitations"),
         "verified": _str_field(src, "verified"),
+        "publisher": _str_field(src, "publisher"),
+        "max_articles": 100,
         "reason": "",
     }
+    try:
+        entry["max_articles"] = max(1, min(500, int(src.get("max_articles") or 100)))
+    except (TypeError, ValueError):
+        pass
     if not name:
         entry.update(ok=False, name=_entry_label(src, index),
                      reason="缺少来源名称")
@@ -128,7 +137,9 @@ def import_preset(path: str | Path, db, source: str = "preset") -> dict[str, Any
                             "url": entry["canonical_url"]})
             continue
         jid = db.add_journal(name=entry["name"], rss=entry["canonical_url"],
-                             publisher="DEFAULT", source=source,
+                             publisher=entry.get("publisher") or "DEFAULT",
+                             max_articles=entry.get("max_articles") or 100,
+                             source=source,
                              source_type=entry["source_type"], query=entry["query"])
         if jid is None:
             skipped.append({"name": entry["name"], "reason": "保存失败",
