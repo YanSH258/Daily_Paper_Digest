@@ -128,7 +128,12 @@ class Database:
                 discovered_via TEXT DEFAULT 'rss',
                 sim_prior     REAL,
                 cited_count   INTEGER,
-                title_zh      TEXT
+                title_zh      TEXT,
+                processing_status TEXT DEFAULT 'unreviewed',
+                processing_reason TEXT,
+                admitted_at TEXT,
+                queued_at TEXT,
+                date_source TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daily_reports (
@@ -156,6 +161,13 @@ class Database:
                 last_run    TEXT,
                 consecutive_failures INTEGER DEFAULT 0,
                 last_error  TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS article_sources (
+                article_id INTEGER NOT NULL,
+                source_key TEXT NOT NULL,
+                seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY(article_id, source_key)
             );
 
             CREATE TABLE IF NOT EXISTS chat_messages (
@@ -363,6 +375,11 @@ class Database:
             ("score_model", "TEXT"),
             ("score_basis", "TEXT"),
             ("relevance_reason", "TEXT"),
+            ("processing_status", "TEXT DEFAULT 'unreviewed'"),
+            ("processing_reason", "TEXT"),
+            ("admitted_at", "TEXT"),
+            ("queued_at", "TEXT"),
+            ("date_source", "TEXT"),
             # 全文与证据
             ("fetch_status", "TEXT"),
             ("evidence_level", "TEXT"),
@@ -590,6 +607,80 @@ class Database:
             except sqlite3.OperationalError as e:
                 logger.debug("列 %s.%s 已存在，跳过迁移: %s", table, col, e)
 
+    def persist_admission(self, article_ids: list[int] | list[tuple[int, dict[str, Any]]], decisions: Optional[dict[int, dict[str, Any]]] = None, queued_ids: Optional[list[int]] = None, clock: Optional[str] = None) -> int:
+        """Persist auditable admission decisions and queue timestamps atomically."""
+        now = clock or (datetime.utcnow().isoformat(timespec="seconds") + "Z")
+        pairs = article_ids if article_ids and isinstance(article_ids[0], tuple) else [(i, (decisions or {}).get(i, {})) for i in article_ids]
+        qset = set(queued_ids or [])
+        conn = self._conn()
+        try:
+            with conn:
+                for aid, d in pairs:
+                    status = d.get("decision") or d.get("processing_status") or "unreviewed"
+                    reason = d.get("reason")
+                    source = d.get("date_source")
+                    conn.execute("UPDATE articles SET processing_status=?, processing_reason=?, date_source=?, admitted_at=?, queued_at=CASE WHEN ? THEN COALESCE(queued_at, ?) ELSE queued_at END, updated_at=? WHERE id=?", (status, reason, source, now, aid in qset, now, now, aid))
+            return len(pairs)
+        except sqlite3.Error as e:
+            logger.error("保存准入决策失败: %s", e)
+            raise
+
+    def get_processing_queue(self, config: Optional[dict[str, Any]] = None, date_str: Optional[str] = None, trial: bool = False) -> dict[str, Any]:
+        from processing import admission_decision, build_queue, validate_budget
+        budget = validate_budget(config or {}, trial=trial)
+        conn = self._conn()
+        cur = conn.execute("SELECT * FROM articles WHERE processing_status IN ('unreviewed','eligible') AND (score_status IS NULL OR score_status NOT IN ('ok','success')) AND processed=0 ORDER BY COALESCE(queued_at, created_at), id")
+        rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        # Only legacy rows that pass admission are enrolled; quarantined legacy rows remain untouched.
+        eligible = []
+        for row in rows:
+            if row.get('processing_status') == 'unreviewed':
+                decision = admission_decision(row, date_str or datetime.now().date().isoformat(), config or {})
+                if decision.get('decision') != 'eligible':
+                    continue
+                row = {**row, 'processing_status': 'eligible', 'processing_reason': decision.get('reason'), 'date_source': decision.get('date_source')}
+            eligible.append(row)
+        selected = build_queue(eligible, config, budget)
+        ids = [r["id"] for r in selected]
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        deferred = set(r["id"] for r in eligible) - set(ids)
+        with conn:
+            for row in eligible:
+                conn.execute("UPDATE articles SET processing_status='eligible', admitted_at=COALESCE(admitted_at, ?), queued_at=COALESCE(queued_at, ?), date_source=COALESCE(date_source, ?) WHERE id=?", (now, now, row.get("date_source"), row["id"]))
+                if row["id"] in deferred:
+                    conn.execute("UPDATE articles SET processing_reason='budget_deferred', queued_at=COALESCE(queued_at, ?), updated_at=? WHERE id=? AND processing_status='eligible'", (now, now, row["id"]))
+            conn.executemany("UPDATE articles SET processing_status='eligible', queued_at=COALESCE(queued_at, ?), updated_at=? WHERE id=? AND processing_status='eligible'", [(now, now, i) for i in ids])
+        return {"selected": selected, "score_queue_total": len(eligible), "score_deferred": len(deferred), "score_attempted": 0, "budget": budget}
+
+    def get_analysis_queue(self, config: Optional[dict[str, Any]] = None, date_str: Optional[str] = None, trial: bool = False) -> dict[str, Any]:
+        from processing import validate_budget
+        budget = validate_budget(config, trial)
+        conn = self._conn()
+        cur = conn.execute("SELECT * FROM articles WHERE processing_status='eligible' AND score_status IN ('ok','success') AND COALESCE(relevance, 0) >= ? AND (analysis_status IS NULL OR analysis_status IN ('','failed')) AND processed=0 ORDER BY COALESCE(queued_at, created_at), id", (float((config or {}).get("relevance_threshold", 0)),))
+        rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        return {"selected": rows[:budget], "analysis_queue_total": len(rows), "analysis_deferred": max(0, len(rows)-budget), "budget": budget}
+
+    def get_admission_reason_counts(self) -> dict[str, int]:
+        cur = self._conn().execute("SELECT COALESCE(processing_reason, 'unknown'), COUNT(*) FROM articles GROUP BY COALESCE(processing_reason, 'unknown')")
+        return {str(k): int(v) for k, v in cur.fetchall()}
+
+    def record_source_result(self, result: dict[str, Any], persisted: bool) -> Optional[int]:
+        conn = self._conn()
+        conn.execute("CREATE TABLE IF NOT EXISTS source_sync (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT, started_at TEXT, window_end TEXT, persisted INTEGER NOT NULL, metadata_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
+        success = bool(result.get("success"))
+        complete = bool(result.get("complete"))
+        truncated = bool(result.get("truncated"))
+        eligible_cursor = bool(persisted and success and complete and not truncated)
+        cur = conn.execute("INSERT INTO source_sync(source_id,started_at,window_end,persisted,metadata_json) VALUES(?,?,?,?,?)", (result.get("source_id") or result.get("id"), result.get("started_at"), result.get("window_end"), int(eligible_cursor), json.dumps(result, ensure_ascii=False, default=str)))
+        # Cursor update and source result metadata share one transaction.
+        if eligible_cursor and result.get("source_id") and result.get("window_end"):
+            conn.execute("UPDATE journals SET last_run=?, consecutive_failures=0, last_error=NULL WHERE id=?", (result["window_end"], result["source_id"]))
+        elif result.get("source_id"):
+            err = result.get("error") or ("source fetch incomplete" if success else "source fetch failed")
+            conn.execute("UPDATE journals SET consecutive_failures=COALESCE(consecutive_failures,0)+1, last_error=? WHERE id=?", (str(err), result["source_id"]))
+        conn.commit()
+        return cur.lastrowid
+
     def close(self) -> None:
         """关闭所有数据库连接。"""
         if self._memory_conn is not None:
@@ -637,6 +728,23 @@ class Database:
             if h and conn.execute("SELECT id FROM articles WHERE title_hash = ?", (h,)).fetchone():
                 return True
         return False
+
+    def record_article_sources(self, article):
+        conn = self._conn()
+        row = None
+        if article.get("doi"):
+            row = conn.execute("SELECT id FROM articles WHERE lower(doi)=lower(?)", (article["doi"],)).fetchone()
+        if row is None and article.get("url"):
+            row = conn.execute("SELECT id FROM articles WHERE url=?", (article["url"],)).fetchone()
+        if row is None and article.get("title"):
+            row = conn.execute("SELECT id FROM articles WHERE title_hash=?", (_compute_title_hash(article["title"]),)).fetchone()
+        if row is None:
+            return None
+        sources = article.get("_sources") or [article.get("discovered_via") or "rss"]
+        with conn:
+            conn.executemany("INSERT OR IGNORE INTO article_sources(article_id,source_key) VALUES(?,?)",
+                             [(row[0], str(key)) for key in sources])
+        return row[0]
 
     def check_duplicate(self, article: dict[str, Any]) -> tuple[bool, str]:
         try:
@@ -892,15 +1000,22 @@ class Database:
                 "title_hash": _compute_title_hash(title) if title else None,
                 "analysis": article.get("analysis"),
                 "topic": article.get("topic"),
+                "processing_status": article.get("processing_status", "unreviewed"),
+                "processing_reason": article.get("processing_reason"),
+                "admitted_at": article.get("admitted_at"),
+                "queued_at": article.get("queued_at"),
+                "date_source": article.get("date_source") or article.get("pub_date_source"),
             })
 
         sql = """
             INSERT OR IGNORE INTO articles
                 (doi, title, journal, authors, pub_date, url, abstract,
-                 relevance, processed, title_hash, analysis, topic)
+                 relevance, processed, title_hash, analysis, topic,
+                 processing_status, processing_reason, admitted_at, queued_at, date_source)
             VALUES
                 (:doi, :title, :journal, :authors, :pub_date, :url,
-                 :abstract, :relevance, 0, :title_hash, :analysis, :topic)
+                 :abstract, :relevance, 0, :title_hash, :analysis, :topic,
+                 :processing_status, :processing_reason, :admitted_at, :queued_at, :date_source)
         """
 
         def _run(conn: sqlite3.Connection) -> list[Optional[int]]:
@@ -926,7 +1041,7 @@ class Database:
     # ── 分阶段状态更新（评分 / 全文 / 分析 / 阅读闭环）──────────
 
     _ARTICLE_FIELD_WHITELIST = {
-        "relevance", "relevance_reason", "score_status", "score_error",
+        "relevance", "relevance_reason", "score_status", "score_error", "processing_status", "processing_reason", "admitted_at", "queued_at", "date_source",
         "score_model", "score_basis",
         "fetch_status", "evidence_level", "fetch_source", "network_mode",
         "access_path", "fulltext_url", "fulltext_text", "content_hash",
@@ -934,6 +1049,7 @@ class Database:
         "analysis_prompt_version", "analysis_input_hash", "analyzed_at",
         "read_status", "relevance_feedback", "processed", "topic",
         "zotero_key", "discovered_via", "sim_prior", "cited_count", "title_zh",
+        "admitted_at", "queued_at", "date_source",
     }
 
     def update_article_fields(self, article_id: int, **fields: Any) -> bool:
@@ -1217,8 +1333,10 @@ class Database:
             "WHERE COALESCE(created_at, datetime('now')) >= datetime('now', ?) AND "
         )
         params = (f"-{int(days)} days",)
-        score_cond = "(score_status = 'failed' OR (COALESCE(score_status, '') = '' AND processed = 0))"
-        analysis_cond = ("((analysis_status = 'failed' OR COALESCE(analysis_status, '') = '') "
+        score_cond = ("(COALESCE(processing_status, 'eligible') = 'eligible' AND "
+                      "(score_status = 'failed' OR (COALESCE(score_status, '') = '' AND processed = 0)))")
+        analysis_cond = ("(COALESCE(processing_status, 'eligible') = 'eligible' AND "
+                         "(analysis_status = 'failed' OR COALESCE(analysis_status, '') = '') "
                          "AND processed = 0 AND COALESCE(relevance, 0) >= ?)")
         try:
             if self._memory_conn is not None:

@@ -53,6 +53,10 @@ digest:
 
 
 # ---------- 抓取设置 ----------
+processing:
+  max_score_articles_per_run: 100
+  trial_max_score_articles: 30
+
 fetcher:
   use_fulltext: false  # 不抓全文，直接用摘要分析
   use_browser: false

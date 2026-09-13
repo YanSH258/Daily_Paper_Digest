@@ -81,6 +81,9 @@ class TestStageStatusAndRetry(unittest.TestCase):
             {"doi": "10.1/a", "title": "AnalysisFailed", "journal": "J", "abstract": "y"},
             {"doi": "10.1/o", "title": "OK", "journal": "J", "abstract": "z"},
         ])
+        self.addCleanup(db.close)
+        for aid in ids:
+            db.update_article_fields(aid, processing_status="eligible")
         db.update_article_fields(ids[0], score_status="failed", score_error="timeout")
         db.update_article_fields(ids[1], score_status="ok", relevance=7.0, analysis_status="failed")
         db.update_article_fields(ids[2], score_status="ok", relevance=3.0, analysis_status="skipped")
