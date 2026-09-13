@@ -453,23 +453,29 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             for a in score_retry:
                 a["_retry_score"] = True
 
-        # ── Step 2.7: 缺摘要文章先补全，再评分（避免把缺信息误判为低相关）──
+        # ── Step 2.7: 缺摘要/摘要被 RSS 截断时先补全，再评分 ──
         if new_articles:
-            from fetchers.oa_fetcher import get_openalex_abstract
+            from fetchers.oa_fetcher import get_dedup_abstract, looks_truncated_abstract
             unpaywall_email = config.get("unpaywall_email", "your@email.com")
             for a in new_articles:
-                if a.get("abstract", "").strip() or not a.get("doi"):
+                if not a.get("doi"):
+                    continue
+                abs_txt = (a.get("abstract") or "").strip()
+                if abs_txt and not looks_truncated_abstract(abs_txt):
                     continue
                 try:
-                    completed = get_openalex_abstract(a["doi"])
+                    completed = get_dedup_abstract(a["doi"], email=unpaywall_email)
                 except Exception as e:
                     logger.debug(f"  摘要补全查询失败 ({a['doi']}): {e}")
                     completed = None
-                if completed:
+                if completed and len(completed) > len(abs_txt):
                     a["abstract"] = completed
                     db.update_article_fields(a["id"], abstract=completed)
                     stats["abstract_completed"] += 1
-                    logger.info(f"  评分前摘要补全: {a['title'][:50]}... ({len(completed)} 字)")
+                    logger.info(
+                        "  评分前摘要补全: %s... (%s → %s 字)",
+                        a["title"][:50], len(abs_txt), len(completed),
+                    )
         progress("abstract_backfill")
 
         # ── Step 2.75: 标题自动翻译（免费接口，粗筛阅读用）────

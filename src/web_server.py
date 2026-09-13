@@ -1721,8 +1721,8 @@ def _trends_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]
         journals = conn.execute(
             "SELECT journal, COUNT(*) AS total, "
             "SUM(CASE WHEN COALESCE(relevance, 0) >= ? THEN 1 ELSE 0 END) AS relevant "
-            "FROM articles WHERE journal IS NOT NULL AND journal != '' "
-            "GROUP BY journal ORDER BY relevant DESC LIMIT 12",
+            "FROM articles WHERE journal IS NOT NULL AND trim(journal) != '' "
+            "GROUP BY journal ORDER BY total DESC, relevant DESC",
             (threshold,)).fetchall()
         via = conn.execute(
             "SELECT COALESCE(discovered_via, 'rss') AS src, COUNT(*) FROM articles "

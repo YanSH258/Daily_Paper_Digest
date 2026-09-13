@@ -350,7 +350,6 @@ const Library = {
             ${badge}
             ${this.evidenceBadge(a)}
             <a class="ext-link" href="/article/${a.id}" target="_blank">阅读页</a>
-            ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener" class="ext-link" onclick="event.stopPropagation()">DOI ↗</a>` : ""}
             ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener" class="ext-link" onclick="event.stopPropagation()">原文 ↗</a>` : ""}
           </div>
         </div>

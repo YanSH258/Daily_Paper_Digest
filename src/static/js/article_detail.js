@@ -90,7 +90,6 @@ const Detail = {
         <a class="ext-link" onclick="Detail.reanalyze()" title="调用 LLM 重新生成 AI 解读（约 30-90 秒）">${a.analysis_status === 'failed' ? '⚠️ 重新解读' : '🔄 重新解读'}</a>
         <a class="ext-link" onclick="Detail.reanalyze(true)" title="先下载全文（arXiv/OA）再做 AI 解读，质量更高">📥 取全文并解读</a>
         ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
-        ${a.doi ? `<a href="https://doi.org/${API.esc(a.doi)}" target="_blank" rel="noopener">DOI ↗</a>` : ""}
       </div>
       <div class="meta-line"><strong>期刊：</strong>${API.esc(a.journal || "-")} · <strong>日期：</strong>${API.esc(a.pub_date || "-")}</div>
       <div class="meta-line"><strong>作者：</strong>${API.esc(a.authors || "-")}</div>

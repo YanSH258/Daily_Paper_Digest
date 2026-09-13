@@ -205,6 +205,45 @@ def _extract_arxiv_id(text: str) -> str:
     return ""
 
 
+def clean_feed_abstract(text: str) -> str:
+    """清洗 RSS description/summary 里的出版商包装噪音（尤其 APS）。
+
+    APS 常见形态：
+      Author(s): A. Name, B. Name, and C. NameWe report ...
+      ... [Phys. Rev. B 114, 175108] Published Fri Sep 04, 2026
+    """
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return ""
+    # 去掉 Author(s): 前缀，并从作者列表切到摘要正文
+    if re.match(r"(?i)^author\(s\)\s*:", t):
+        rest = re.sub(r"(?i)^author\(s\)\s*:\s*", "", t)
+        # 在作者名与正文粘连处切开（如 FinkeldeiWe report）
+        m = re.search(
+            r"(?<=[a-z])(?=[A-Z][a-z]+\s+"
+            r"(?:report|present|show|study|investigat|develop|demonstrat|"
+            r"propos|calculat|simulat|find|use|analyz|analys|measure|"
+            r"introduc|describ|perform|explore|discuss|review|apply))",
+            rest,
+        )
+        if m:
+            rest = rest[m.start():]
+        else:
+            # 兜底：作者名后粘一个大写词（无空格）
+            m2 = re.search(r"(?<=[a-z])(?=[A-Z][a-z]{2,})", rest)
+            if m2:
+                rest = rest[m2.start():]
+        t = rest.strip()
+    # 去掉文末期刊卷期与发布日期
+    t = re.sub(
+        r"\s*\[[^\]]*Phys\.?\s*Rev[^]]*\]\s*Published\s+.+$",
+        "", t, flags=re.I,
+    )
+    t = re.sub(r"\s*Published\s+\w{3}\s+\w{3}\s+\d{1,2},\s+\d{4}\s*$", "", t)
+    t = re.sub(r"\s*\[Phys\.?\s*Rev\.[^\]]*\]\s*$", "", t, flags=re.I)
+    return t.strip()
+
+
 def _get_publisher_from_doi(doi: str) -> str:
     """通过 DOI 前缀识别出版商，比 RSS 里的 publisher 字段更可靠"""
     if not doi:
@@ -883,6 +922,7 @@ class JournalFetcher:
             if text:
                 clean = re.sub(r'\s+', ' ', BeautifulSoup(
                     text, "html.parser").get_text()).strip()
+                clean = clean_feed_abstract(clean)
                 if len(clean) > 100 and not re.match(
                         r'^(Journal of|ACS |Nano |Angewandte|Chemical Science|Nature\s)', clean):
                     return clean[:MAX_ABSTRACT_CHARS]

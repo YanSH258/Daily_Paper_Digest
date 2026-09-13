@@ -216,6 +216,35 @@ class LLMAnalyzer:
             return ""
         return "\n【用户偏好参考（根据其历史反馈）】\n" + "\n".join(parts) + "\n"
 
+
+    @staticmethod
+    def _translation_quality_error(analysis: str, abstract_len: int = 0) -> str:
+        """摘要翻译质量检查；通过返回空串，否则返回失败原因。
+
+        科学摘要译文含大量英文术语/分子式/数字，中文占比不宜卡太死；
+        短摘要允许更短译文。
+        """
+        s = (analysis or "").strip()
+        if not s:
+            return "empty"
+        cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+        cjk_ratio = cjk / max(len(s), 1)
+        # 去掉 ASCII 字母数字与空白后的“叙述密度”
+        narrative = sum(1 for ch in s if not (ch.isascii() and (ch.isalnum() or ch.isspace() or ch in ".,;:()[]{}<>=+-*/%\"'`~@#$^&_|!?")))
+        narrative_ratio = narrative / max(len(s), 1)
+        min_len = 40 if abstract_len < 300 else 80
+        if len(s) < min_len:
+            return f"len={len(s)}<{min_len}"
+        if cjk < 15:
+            return f"cjk_chars={cjk}"
+        if cjk_ratio < 0.25 and narrative_ratio < 0.35:
+            return f"cjk_ratio={cjk_ratio:.2f},narrative={narrative_ratio:.2f}"
+        # 明显是英文原文回显
+        ascii_letters = sum(1 for ch in s if ch.isascii() and ch.isalpha())
+        if ascii_letters / max(len(s), 1) > 0.75 and cjk < 30:
+            return f"looks_english:ascii_letters={ascii_letters}"
+        return ""
+
     def analyze_article(self, article: dict) -> AnalysisResult:
         """对文章进行深度解读，返回结构化结果。
 
@@ -320,27 +349,31 @@ class LLMAnalyzer:
             )
 
         try:
-            analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
-            analysis = self._strip_model_deliberation(analysis, is_translation=not has_fulltext)
-            # 质量门槛：deepseek-flash 偶发把推理草稿/英文原文回显当输出。
-            # 翻译路径要求结果确为中文叙述；不达标按失败处理，下轮自动重试，
-            # 绝不让"翻译工作笔记"冒充译文入库。
-            if not has_fulltext:
-                def _cjk_ratio(s: str) -> float:
-                    cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
-                    return cjk / max(len(s), 1)
-                if len(analysis) < 120 or _cjk_ratio(analysis) < 0.6:
-                    logger.warning(
-                        "[LLM_QUALITY] 摘要翻译输出不达标（长度 %d, 中文占比 %.2f），"
-                        "按失败处理待重试 | title=%s | model=%s",
-                        len(analysis), _cjk_ratio(analysis), title[:50], self.model,
-                    )
-                    return AnalysisResult(
-                        success=False,
-                        analysis="",
-                        evidence_level="ABSTRACT_ONLY",
-                        error=f"translation_quality_failed:len={len(analysis)}",
-                    )
+            analysis = ""
+            last_quality = ""
+            # 质量门槛失败时重试一次（flash 偶发回显英文/草稿）
+            attempts = 1 if has_fulltext else 2
+            for attempt in range(attempts):
+                analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
+                analysis = self._strip_model_deliberation(
+                    analysis, is_translation=not has_fulltext)
+                if has_fulltext:
+                    break
+                last_quality = self._translation_quality_error(
+                    analysis, abstract_len=len(content))
+                if not last_quality:
+                    break
+                logger.warning(
+                    "[LLM_QUALITY] 摘要翻译不达标（%s），重试 %d/%d | title=%s | model=%s",
+                    last_quality, attempt + 1, attempts - 1, title[:50], self.model,
+                )
+            if not has_fulltext and last_quality:
+                return AnalysisResult(
+                    success=False,
+                    analysis="",
+                    evidence_level="ABSTRACT_ONLY",
+                    error=f"translation_quality_failed:{last_quality}",
+                )
             evidence_level = "FULLTEXT" if has_fulltext else "ABSTRACT_ONLY"
             return AnalysisResult(
                 success=True,

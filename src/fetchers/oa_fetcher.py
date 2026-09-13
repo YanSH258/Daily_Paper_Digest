@@ -155,6 +155,27 @@ def get_oa_url(
         session.close()
 
 
+def looks_truncated_abstract(text: str) -> bool:
+    """判断摘要是否像出版商 RSS 截断片段（APS 常见）。
+
+    - 以 ... / … 结尾
+    - 明显偏短且末尾不是句号
+    - 末词被截断（无空白的超长“词”尾巴，如 dynam…）
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.endswith(("...", "…", ". . .")):
+        return True
+    if len(t) < 280 and not t.endswith((".", "!", "?", "。", "！", "？")):
+        return True
+    last = t.split()[-1] if t.split() else ""
+    # 摘要正常结束应是完整英文词/句号；过短碎片更像截断
+    if last and len(last) > 40:
+        return True
+    return False
+
+
 def get_openalex_abstract(
     doi: str,
     email: Optional[str] = None,
@@ -227,3 +248,53 @@ def get_openalex_abstract(
         return ""
     finally:
         session.close()
+
+
+def _strip_jats(text: str) -> str:
+    """去掉 Crossref 摘要里的 JATS/XML 标签，压成纯文本。"""
+    t = re.sub(r"<jats:title[^>]*>.*?</jats:title>", " ", text, flags=re.I | re.S)
+    t = re.sub(r"</?jats:p[^>]*>", " ", t, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def get_crossref_abstract(
+    doi: str,
+    email: Optional[str] = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> str:
+    """Crossref 摘要（Wiley 等在 OpenAlex 尚未收录时的回退）。"""
+    if not doi:
+        return ""
+    resolved = (email or DEFAULT_EMAIL or "").strip()
+    mailto = resolved if resolved and not _PLACEHOLDER_PATTERN.search(resolved) else ""
+    ua = f"DailyPaperDigest/1.0 (mailto:{mailto})" if mailto else "DailyPaperDigest/1.0"
+    session = _create_session()
+    try:
+        resp = session.get(
+            f"https://api.crossref.org/works/{doi.strip()}",
+            headers={"User-Agent": ua},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logger.debug("Crossref 非200（DOI: %s）: %s", doi, resp.status_code)
+            return ""
+        abstract = ((resp.json().get("message") or {}).get("abstract") or "")
+        return _strip_jats(abstract)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Crossref 摘要失败（DOI: %s）: %s", doi, e)
+        return ""
+    finally:
+        session.close()
+
+
+def get_dedup_abstract(doi: str, email: Optional[str] = None) -> str:
+    """优先 OpenAlex，未命中再试 Crossref。"""
+    text = get_openalex_abstract(doi, email=email)
+    if text and not looks_truncated_abstract(text):
+        return text
+    cross = get_crossref_abstract(doi, email=email)
+    if len(cross) > len(text or ""):
+        return cross
+    return text or cross
