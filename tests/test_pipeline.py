@@ -105,9 +105,10 @@ class FakeNotifier:
         artifacts = []
         for fmt, name in (("markdown", "report.md"), ("html", "report.html")):
             p = base / name
-            p.write_text(md, encoding="utf-8")
+            md_bytes = md.encode("utf-8")
+            p.write_bytes(md_bytes)
             artifacts.append({"format": fmt, "path": str(p),
-                              "content_hash": hashlib.sha256(md.encode()).hexdigest(),
+                              "content_hash": hashlib.sha256(md_bytes).hexdigest(),
                               "status": "rendered"})
         return artifacts
 
@@ -192,10 +193,11 @@ class TestPipelineRetry(unittest.TestCase):
         self.assertEqual(FakeAnalyzer.analyze_calls.get("10.1/a"), 1, "A 不应重复分析")
         self.assertEqual(FakeAnalyzer.score_calls.get("10.1/c"), 1, "低分文章不应重复评分")
         rep = db.get_report("2026-09-08")
-        # 新语义：配置未启用任何渠道 → 不请求投递（push_results 为空），
-        # "未请求渠道不算失败"；report_path 指向版本化文件
+        # 配置未启用任何渠道 → 不请求投递；有评分/分析恢复时日报更新为新版本
         self.assertIsNone(rep["push_results"])
-        self.assertIn(os.path.join("daily", "2026-09-08", "v1"), rep["file_path"])
+        versions = db.list_digest_versions(date_from="2026-09-08", date_to="2026-09-08")
+        self.assertEqual([v["version"] for v in versions], [2, 1])
+        self.assertIn(os.path.join("daily", "2026-09-08", "v2"), rep["file_path"])
         db.close()
 
 

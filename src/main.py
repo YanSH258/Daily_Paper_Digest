@@ -743,7 +743,16 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         else:
             digest_result = None
             try:
-                digest_result = digest_service.publish_digest(date_str, channels=report_channels)
+                has_changes = bool(new_articles or score_retry or analysis_retry)
+                if has_changes and existing_version is not None:
+                    digest_result = digest_service.regenerate_digest(
+                        date_str,
+                        request_key=f"pipeline:{task_id or uuid.uuid4().hex}:{date_str}",
+                        channels=report_channels,
+                    )
+                else:
+                    digest_result = digest_service.publish_digest(
+                        date_str, channels=report_channels)
             except DigestError as e:
                 # 历史/配置/持久化失败：停止正式发布，不默认当成空历史
                 logger.error(f"  日报发布失败 [{e.code}]: {e}")

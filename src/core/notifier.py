@@ -236,7 +236,7 @@ class Notifier:
 
         # 2. 保存 Markdown
         if "markdown" in self.formats:
-            md_path.write_text(md_content, encoding="utf-8")
+            md_path.write_bytes(md_content.encode("utf-8"))
             logger.info(f"Markdown 报告已保存: {md_path}")
 
         # 3. 生成 HTML（无论 formats 是否包含 html，邮件发送时都需要）
@@ -245,7 +245,7 @@ class Notifier:
 
         if "html" in self.formats:
             html_path = self.output_dir / f"{date_str}.html"
-            html_path.write_text(html_content, encoding="utf-8")
+            html_path.write_bytes(html_content.encode("utf-8"))
             logger.info(f"HTML 报告已保存: {html_path}")
 
         # 推送状态汇总
@@ -392,9 +392,10 @@ class Notifier:
                 continue
             path = base / name
             tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(content, encoding="utf-8")
+            content_bytes = content.encode("utf-8")
+            tmp.write_bytes(content_bytes)
             os.replace(tmp, path)  # 原子替换：临时文件写完再落最终名
-            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            content_hash = hashlib.sha256(content_bytes).hexdigest()
             artifacts.append({"format": fmt, "path": str(path),
                               "content_hash": content_hash, "status": "rendered"})
         return artifacts

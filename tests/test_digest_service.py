@@ -44,10 +44,11 @@ class FakeNotifier:
         artifacts = []
         for fmt, name in (("markdown", "report.md"), ("html", "report.html")):
             p = out / name
-            p.write_text(content, encoding="utf-8")
+            content_bytes = content.encode("utf-8")
+            p.write_bytes(content_bytes)
             artifacts.append({
                 "format": fmt, "path": str(p),
-                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "content_hash": hashlib.sha256(content_bytes).hexdigest(),
                 "status": "rendered",
             })
         self.last_content = content
