@@ -43,11 +43,12 @@
 
 ## 验证方法
 
-使用项目可用的 Python 环境，不依赖特定机器的绝对路径。正常安装方式为 `python3 -m pip install -r requirement.txt`；没有安装依赖时先报告环境情况，不把缺依赖归为业务失败。
+使用项目可用的 Python 环境，不依赖特定机器的绝对路径。生产运行时安装方式为 `python3 -m pip install -r requirement.txt`；完整开发/测试环境（Python 3.10+）使用 `python3 -m pip install -r requirements-dev.txt`。没有安装依赖时先报告环境情况，不把缺依赖归为业务失败。
 
 从仓库根目录运行：
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost python3 -m pytest -q
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost python3 -m unittest discover -s tests -v
 for f in src/static/js/*.js; do node --check "$f" || exit; done
 git diff --check

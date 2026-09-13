@@ -22,6 +22,7 @@ import logging
 import argparse
 import concurrent.futures
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import Any, Optional
 
@@ -67,6 +68,29 @@ def setup_logging() -> None:
 
 
 logger = logging.getLogger("main")
+DEFAULT_SCHEDULER_TIMEZONE = "Asia/Shanghai"
+
+
+def validate_scheduler_time(value: Any) -> str:
+    """Validate and normalize a scheduler clock value."""
+    if not isinstance(value, str):
+        raise ValueError("scheduler.run_time 必须是 HH:MM 字符串")
+    try:
+        hour_str, minute_str = value.strip().split(":", 1)
+        hour, minute = int(hour_str), int(minute_str)
+    except (AttributeError, ValueError):
+        raise ValueError("scheduler.run_time 必须是 HH:MM") from None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("scheduler.run_time 必须在 00:00 到 23:59 之间")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def get_scheduler_timezone(config: dict) -> ZoneInfo:
+    name = str((config.get("scheduler") or {}).get("timezone") or DEFAULT_SCHEDULER_TIMEZONE).strip()
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"scheduler.timezone 无效: {name!r}") from exc
 
 
 # ── 核心流程 ──────────────────────────────────────────────────
@@ -150,6 +174,10 @@ def validate_config(config: dict) -> None:
     digest_errors = validate_digest_config(config)
     if digest_errors:
         raise ValueError("digest 配置无效: " + "; ".join(digest_errors))
+
+    scheduler = config.get("scheduler") or {}
+    validate_scheduler_time(scheduler.get("run_time", "08:00"))
+    get_scheduler_timezone(config)
 
 
 def _write_dry_run_report(config: dict, date_str: str, report: str) -> Optional[str]:
@@ -775,13 +803,16 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
 # ── 定时调度 ──────────────────────────────────────────────────
 
 def run_scheduler(config: dict):
-    run_time = config.get("scheduler", {}).get("run_time", "08:00")
+    run_time = validate_scheduler_time(
+        (config.get("scheduler") or {}).get("run_time", "08:00")
+    )
+    timezone = get_scheduler_timezone(config)
     hour, minute = map(int, run_time.split(":"))
-    logger.info(f"调度模式启动，每日 {run_time} 运行")
+    logger.info(f"调度模式启动，每日 {run_time} ({timezone.key}) 运行")
 
     last_run_date = None
     while True:
-        now   = datetime.now()
+        now   = datetime.now(timezone)
         today = now.strftime("%Y-%m-%d")
         if now.hour == hour and now.minute == minute and last_run_date != today:
             logger.info("触发定时任务")

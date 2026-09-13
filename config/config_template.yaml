@@ -116,5 +116,5 @@ unpaywall_email: "YOUR_EMAIL@163.com" # Unpaywall API 要求提供一个联系�
 # ---------- 网页端 ----------
 web:
   enable_scheduler: false   # 网页端是否启用每日定时调度（按 scheduler.run_time）
-  readonly: false           # 只读模式提示（建议在反向代理层禁用 POST /api/run）
+  readonly: false           # 只读模式：服务端拒绝所有写操作
   api_token: ""            # 可选：配置后，POST /api/run 需在请求头带 X-API-Token

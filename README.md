@@ -63,14 +63,26 @@ CLI/Web 共用的配置加载器将 `database.path`、`output.output_dir`、`fet
 ### 网页控制台
 
 ```bash
-PYTHONPATH="src:.deps" python src/web_server.py --config config/config.yaml --port 8080
+PYTHONPATH="src:.deps" python src/web_server.py --config config/config.yaml --host 127.0.0.1 --port 8080
 ```
 
-打开 http://127.0.0.1:8080/
+默认只监听本机；若显式监听非本机地址，必须配置 `web.api_token` 或 `WEB_API_TOKEN`。设置 `web.readonly: true` 后，服务端会拒绝所有写操作。打开 http://127.0.0.1:8080/
 
 主要页面：今日精选、文献库、阅读清单、研究专题、趋势、日报与周报、追踪、订阅、任务、设置。
 
-写操作默认不校验；可在「设置」启用 API Token（保存后浏览器会记住）。详见 `AGENTS.md`。
+本机默认可直接使用；API Token 可在「设置」中启用（保存后浏览器会记住）。调度设置支持严格的 `HH:MM` 和 IANA 时区（如 `Asia/Shanghai`）。详见 `AGENTS.md`。
+
+### 开发环境
+
+完整测试环境（Python 3.10+）使用独立锁定文件，不会改变生产运行时依赖：
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m unittest discover -s tests -v
+```
+
+MCP SDK 和需要运行中 Web 服务的验收脚本仍按 `.[mcp]` 与 `tests/mcp_*.py` 单独执行。
 
 ## 配置要点
 

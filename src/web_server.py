@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 import uuid
+import hmac
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,10 +26,49 @@ from core.db import Database
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import Notifier, classify_article
 from digest.service import DigestError, DigestService
-from main import load_config, load_config_from_obj, run_once, setup_logging, validate_config
+from main import (DEFAULT_SCHEDULER_TIMEZONE, get_scheduler_timezone, load_config,
+                  load_config_from_obj, run_once, setup_logging, validate_config,
+                  validate_scheduler_time)
 from utils.paths import resolve_against_root
 
 logger = logging.getLogger("web")
+
+MAX_JSON_BODY_BYTES = 1024 * 1024
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class RequestBodyError(ValueError):
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def parse_json_bool(data: dict[str, Any], key: str, *, default: Optional[bool] = None) -> bool:
+    """Read a JSON boolean without Python's truthiness coercion."""
+    if key not in data:
+        if default is None:
+            raise RequestBodyError(f"{key} 必须是 true 或 false")
+        return default
+    value = data[key]
+    if type(value) is not bool:
+        raise RequestBodyError(f"{key} 必须是 JSON 布尔值 true/false")
+    return value
+
+
+def _is_loopback_host(host: str) -> bool:
+    value = (host or "").strip().lower()
+    if value in _LOCAL_HOSTS:
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_bind_host(host: str, api_token: Optional[str]) -> None:
+    if not _is_loopback_host(host) and not (api_token or "").strip():
+        raise ValueError("非本机监听必须配置 web.api_token 或 WEB_API_TOKEN")
 
 
 class TaskRunner:
@@ -62,10 +102,15 @@ class TaskRunner:
     def _make_run_cfg(self, mode: str) -> dict[str, Any]:
         cfg = copy.deepcopy(self._base_config)
         fetcher_cfg = cfg.setdefault("fetcher", {})
-        if mode == "abstract":
-            fetcher_cfg["use_fulltext"] = False
-        elif mode == "fulltext":
+        analyzer_cfg = cfg.setdefault("analyzer", {})
+        if mode == "deep":
+            # 深度模式：抓全文 + 对有全文的文章做 AI 解读
             fetcher_cfg["use_fulltext"] = True
+            analyzer_cfg["analyze_abstract_only"] = True
+        else:
+            # 粗筛模式（默认）：评分 + 标题翻译，不抓全文、不做解读
+            fetcher_cfg["use_fulltext"] = False
+            analyzer_cfg["analyze_abstract_only"] = False
         return cfg
 
     def start_run(self, trigger: str, mode: str = "default", date_str: Optional[str] = None) -> tuple[bool, str]:
@@ -150,14 +195,16 @@ class TaskRunner:
 
     def start_scheduler(self, run_time: Optional[str] = None) -> None:
         if run_time is None:
-            run_time = self._base_config.get("scheduler", {}).get("run_time", "08:00")
+            run_time = (self._base_config.get("scheduler") or {}).get("run_time", "08:00")
+        run_time = validate_scheduler_time(run_time)
+        timezone = get_scheduler_timezone(self._base_config)
         # 停掉旧调度线程（若有），保证改时间后重启不会双线程重复触发
         self._scheduler_stop.set()
         self._scheduler_stop = threading.Event()
         self._last_scheduler_date = None
         thread = threading.Thread(
             target=self._scheduler_loop,
-            args=(run_time, self._scheduler_stop),
+            args=(run_time, timezone, self._scheduler_stop),
             daemon=True,
             name="web-scheduler",
         )
@@ -165,15 +212,11 @@ class TaskRunner:
         thread.start()
         logger.info("已启动网页端调度线程: run_time=%s", run_time)
 
-    def _scheduler_loop(self, run_time: str, stop_event: threading.Event) -> None:
-        try:
-            hour, minute = map(int, run_time.split(":"))
-        except ValueError:
-            logger.error("scheduler.run_time 格式错误，应为 HH:MM，当前=%s", run_time)
-            return
+    def _scheduler_loop(self, run_time: str, timezone, stop_event: threading.Event) -> None:
+        hour, minute = map(int, validate_scheduler_time(run_time).split(":"))
 
         while not stop_event.is_set():
-            now = datetime.now()
+            now = datetime.now(timezone)
             today = now.strftime("%Y-%m-%d")
             if now.hour == hour and now.minute == minute and self._last_scheduler_date != today:
                 ok, msg = self.start_run(trigger="schedule", mode="default")
@@ -197,6 +240,10 @@ class WebContext:
         interrupted = self.db.mark_interrupted_tasks()
         if interrupted:
             logger.info("已将 %d 个遗留运行中的任务标记为 interrupted", interrupted)
+        orphan_counts = self.db.integrity_report()
+        orphan_total = sum(orphan_counts.values())
+        if orphan_total:
+            logger.warning("数据库存在 %d 条历史孤儿关联，请备份后人工处理: %s", orphan_total, orphan_counts)
         self.fetcher = JournalFetcher(self.config)
 
         output_cfg = self.config.get("output", {})
@@ -504,7 +551,10 @@ def _cleanup_low_relevance(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[
         return {"ok": False, "error": "min_score 无效"}, 400
     if not (0 <= min_score <= 10):
         return {"ok": False, "error": "min_score 需在 0–10"}, 400
-    preview = bool(data.get("preview", True))
+    try:
+        preview = parse_json_bool(data, "preview", default=True)
+    except RequestBodyError as exc:
+        return {"ok": False, "error": str(exc)}, exc.status
     count = ctx.db.count_low_relevance(min_score)
     sample = ctx.db.sample_low_relevance(min_score, limit=8)
     if preview:
@@ -821,7 +871,7 @@ _SETTINGS_FIELDS = [
     "relevance_threshold", "research_topics",
     "fetcher.use_fulltext", "fetcher.use_browser",
     "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
-    "scheduler.run_time", "web.api_token", "web.api_token_clear", "web.protect_read",
+    "scheduler.run_time", "scheduler.timezone", "web.api_token", "web.api_token_clear", "web.protect_read",
     "output.email_enabled", "output.email_recipients",
     "output.feishu_enabled", "output.feishu_webhook",
     "zotero.enabled", "zotero.user_id", "zotero.api_key", "zotero.collection",
@@ -872,7 +922,10 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
             "max_articles_per_journal": fetcher.get("max_articles_per_journal"),
             "date_filter_days": fetcher.get("date_filter_days"),
         },
-        "scheduler": c.get("scheduler", {}),
+        "scheduler": {
+            **(c.get("scheduler", {}) or {}),
+            "timezone": (c.get("scheduler", {}) or {}).get("timezone", DEFAULT_SCHEDULER_TIMEZONE),
+        },
         "web": {
             "api_token_set": bool(web.get("api_token")),
             "enable_scheduler": web.get("enable_scheduler", False),
@@ -977,26 +1030,34 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                         cfg["research_topics"] = topics
                         changed.append(key)
                 elif key == "scheduler.run_time":
-                    s = str(value).strip()
-                    if re.match(r"^\d{1,2}:\d{2}$", s):
-                        ensure(["scheduler"])["run_time"] = s
-                        changed.append(key)
+                    ensure(["scheduler"])["run_time"] = validate_scheduler_time(value)
+                    changed.append(key)
+                elif key == "scheduler.timezone":
+                    candidate = str(value).strip()
+                    trial_cfg = copy.deepcopy(cfg)
+                    trial_cfg.setdefault("scheduler", {})["timezone"] = candidate
+                    get_scheduler_timezone(trial_cfg)
+                    ensure(["scheduler"])["timezone"] = candidate
+                    changed.append(key)
                 elif key == "web.api_token":
                     if value:  # 留空 = 保持不变
                         ensure(["web"])["api_token"] = str(value)
                         changed.append(key)
                 elif key == "web.api_token_clear":
+                    if type(value) is not bool:
+                        raise RequestBodyError("web.api_token_clear 必须是 JSON 布尔值 true/false")
                     if value:
                         ensure(["web"])["api_token"] = ""
                         changed.append("web.api_token")
+
                 elif key == "web.protect_read":
-                    ensure(["web"])["protect_read"] = bool(value)
+                    ensure(["web"])["protect_read"] = parse_json_bool({key: value}, key)
                     changed.append(key)
                 elif key.startswith("zotero."):
                     sub = key.split(".", 1)[1]
                     node = ensure(["zotero"])
                     if sub in ("enabled", "include_note", "attach_oa_pdf"):
-                        node[sub] = bool(value)
+                        node[sub] = parse_json_bool({key: value}, key)
                     elif sub == "api_key":
                         if value:  # 留空 = 保持不变
                             node[sub] = str(value)
@@ -1007,19 +1068,19 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     sub = key.split(".", 1)[1]
                     node = ensure(["tracking"])
                     if sub == "enabled":
-                        node[sub] = bool(value)
+                        node[sub] = parse_json_bool({key: value}, key)
                     else:
                         node[sub] = max(1, int(value))
                     changed.append(key)
                 elif key == "output.email_enabled":
-                    ensure(["output", "email"])["enabled"] = bool(value)
+                    ensure(["output", "email"])["enabled"] = parse_json_bool({key: value}, key)
                     changed.append(key)
                 elif key == "output.email_recipients":
                     recips = [str(r).strip() for r in (value or []) if str(r).strip()]
                     ensure(["output", "email"])["recipients"] = recips
                     changed.append(key)
                 elif key == "output.feishu_enabled":
-                    ensure(["output", "feishu"])["enabled"] = bool(value)
+                    ensure(["output", "feishu"])["enabled"] = parse_json_bool({key: value}, key)
                     changed.append(key)
                 elif key == "output.feishu_webhook":
                     if value:
@@ -1033,9 +1094,9 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     elif sub == "date_filter_days":
                         node[sub] = max(0, int(value))
                     else:
-                        node[sub] = bool(value)
+                        node[sub] = parse_json_bool({key: value}, key)
                     changed.append(key)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, RequestBodyError) as e:
             return {"ok": False, "error": f"字段值格式无效: {e}"}, 400
 
         if not changed:
@@ -1063,10 +1124,10 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
     # 热更新：任务基线配置与 API Token 立即生效；调度时间变更则重启调度线程
     ctx.runner.update_base_config(ctx.config)
     ctx.api_token = os.environ.get("WEB_API_TOKEN") or ctx.config.get("web", {}).get("api_token")
-    if "scheduler.run_time" in changed and ctx.enable_scheduler:
-        new_run_time = str(ctx.config.get("scheduler", {}).get("run_time", "08:00"))
+    if ("scheduler.run_time" in changed or "scheduler.timezone" in changed) and ctx.enable_scheduler:
+        new_run_time = str((ctx.config.get("scheduler") or {}).get("run_time", "08:00"))
         ctx.runner.start_scheduler(run_time=new_run_time)
-        logger.info("scheduler.run_time 已变更，调度线程已按 %s 重启", new_run_time)
+        logger.info("scheduler 配置已变更，调度线程已按 %s 重启", new_run_time)
 
     return {"ok": True, "changed": changed}, 200
 
@@ -1091,11 +1152,22 @@ def _db_summary(ctx: WebContext) -> dict[str, Any]:
 # ── 期刊订阅管理 ──────────────────────────────────────────────
 
 def _read_json_body(handler: "Handler") -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0"))
+    raw_length = handler.headers.get("Content-Length", "0")
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        raise RequestBodyError("Content-Length 无效") from None
+    if length < 0:
+        raise RequestBodyError("Content-Length 无效")
+    if length > MAX_JSON_BODY_BYTES:
+        raise RequestBodyError("请求体过大", status=413)
     body = handler.rfile.read(length) if length > 0 else b"{}"
     if not body.strip():
         return {}
-    return json.loads(body.decode("utf-8"))
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RequestBodyError("JSON 请求体必须是对象")
+    return payload
 
 
 def _list_journals(ctx: WebContext) -> dict[str, Any]:
@@ -1269,7 +1341,10 @@ def _article_action_result(
 
 
 def _set_article_star(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    starred = bool(data.get("starred"))
+    try:
+        starred = parse_json_bool(data, "starred", default=False)
+    except RequestBodyError as exc:
+        return {"ok": False, "error": str(exc)}, exc.status
     ctx.db.set_article_star(article_id, starred)
     return _article_action_result(ctx, article_id)
 
@@ -1580,7 +1655,10 @@ def _zotero_test(ctx: WebContext, data: Optional[dict[str, Any]] = None) -> tupl
 
 
 def _set_watch(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    active = bool(data.get("active"))
+    try:
+        active = parse_json_bool(data, "active", default=False)
+    except RequestBodyError as exc:
+        return {"ok": False, "error": str(exc)}, exc.status
     ctx.db.set_watch_seed(article_id, active)
     return {"ok": True, "id": article_id, "active": active}, 200
 
@@ -1799,12 +1877,17 @@ class Handler(BaseHTTPRequestHandler):
         """
         try:
             data = _read_json_body(self)
-        except json.JSONDecodeError:
-            self._json_response({"error": "invalid json"}, code=400)
+        except (json.JSONDecodeError, UnicodeDecodeError, RequestBodyError) as exc:
+            status = exc.status if isinstance(exc, RequestBodyError) else 400
+            self._json_response({"error": str(exc) if isinstance(exc, RequestBodyError) else "invalid json"}, code=status)
             return
 
         question = str(data.get("question") or "").strip()
-        regenerate = bool(data.get("regenerate"))
+        try:
+            regenerate = parse_json_bool(data, "regenerate", default=False)
+        except RequestBodyError as exc:
+            self._json_response({"error": str(exc)}, code=exc.status)
+            return
         if not question:
             self._json_response({"error": "question 不能为空"}, code=400)
             return
@@ -1858,10 +1941,16 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         req_token = self.headers.get("X-API-Token", "")
-        if req_token == token:
+        if hmac.compare_digest(req_token, token):
             return True
         self._json_response({"error": "unauthorized"}, code=401)
         return False
+
+    def _require_writable(self) -> bool:
+        if (self.ctx.config.get("web") or {}).get("readonly", False):
+            self._json_response({"error": "web 服务处于只读模式"}, code=403)
+            return False
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -2142,6 +2231,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
+            if path != "/api/auth/token" and not self._require_writable():
+                return
             # 公开：新浏览器连接已有 Token（校验 body 中的 token 是否匹配服务端）
             if path == "/api/auth/token":
                 data = _read_json_body(self) or {}
@@ -2162,8 +2253,15 @@ class Handler(BaseHTTPRequestHandler):
                 data = _read_json_body(self)
                 mode = str(data.get("mode", "default"))
                 date_str = data.get("date")
-                if mode not in {"default", "abstract", "fulltext", "weekly"}:
-                    self._json_response({"error": "mode must be one of default/abstract/fulltext/weekly"}, code=400)
+                # 兼容旧模式名：default/abstract → light；fulltext → deep
+                if mode == "abstract":
+                    mode = "light"
+                elif mode == "fulltext":
+                    mode = "deep"
+                elif mode == "default":
+                    mode = "light"
+                if mode not in {"light", "deep", "weekly"}:
+                    self._json_response({"error": "mode must be one of light/deep/weekly"}, code=400)
                     return
 
                 ok, msg = self.ctx.runner.start_run(trigger="manual", mode=mode, date_str=date_str)
@@ -2630,8 +2728,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._json_response({"error": "not found"}, code=404)
-        except json.JSONDecodeError:
-            self._json_response({"error": "invalid json"}, code=400)
+        except (json.JSONDecodeError, UnicodeDecodeError, RequestBodyError) as exc:
+            status = exc.status if isinstance(exc, RequestBodyError) else 400
+            message = str(exc) if isinstance(exc, RequestBodyError) else "invalid json"
+            self._json_response({"error": message}, code=status)
         except Exception as e:  # pragma: no cover - 运行期保护
             logger.error("POST 处理失败: %s", e, exc_info=True)
             self._json_response({"error": str(e)}, code=500)
@@ -2641,6 +2741,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
+            if not self._require_writable():
+                return
             if path.startswith("/api/articles/") and path.endswith("/chat"):
                 if not self._require_token():
                     return
@@ -2724,9 +2826,10 @@ class Handler(BaseHTTPRequestHandler):
         logger.info("%s - %s", self.address_string(), fmt % args)
 
 
-def run_web_server(config_path: str = "config/config.yaml", host: str = "0.0.0.0", port: int = 8080) -> None:
+def run_web_server(config_path: str = "config/config.yaml", host: str = "127.0.0.1", port: int = 8080) -> None:
     setup_logging()
     ctx = WebContext(config_path=config_path)
+    validate_bind_host(host, ctx.api_token)
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.context = ctx  # type: ignore[attr-defined]
@@ -2742,7 +2845,7 @@ def run_web_server(config_path: str = "config/config.yaml", host: str = "0.0.0.0
     if ctx.api_token:
         logger.info("POST /api/run 已启用 Token 校验（X-API-Token）")
     if web_cfg.get("readonly", False):
-        logger.info("readonly=true: 请在反向代理层禁用 POST /api/run")
+        logger.info("readonly=true: 服务端已拒绝所有写操作")
 
     try:
         server.serve_forever()
@@ -2757,7 +2860,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Daily Paper Digest 网页控制台")
     parser.add_argument("--config", default="config/config.yaml", help="配置文件路径")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址")
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
     args = parser.parse_args()
 

@@ -47,6 +47,7 @@ class Database:
                 check_same_thread=False,
             )
             self._memory_conn.execute("PRAGMA busy_timeout=5000")
+            self._memory_conn.execute("PRAGMA foreign_keys=ON")
 
         try:
             self._init_db()
@@ -69,6 +70,7 @@ class Database:
                 check_same_thread=False,
             )
             conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
             self._local.conn = conn
         return conn
 
@@ -489,6 +491,63 @@ class Database:
             except sqlite3.OperationalError as e:
                 logger.warning("无法创建 %s: %s", desc, e)
 
+        integrity_triggers = (
+            "CREATE TRIGGER IF NOT EXISTS trg_watch_seed_article_exists "
+            "BEFORE INSERT ON watched_seeds WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.article_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_topic_paper_topic_exists "
+            "BEFORE INSERT ON topic_papers WHEN NOT EXISTS "
+            "(SELECT 1 FROM topics WHERE id = NEW.topic_id) "
+            "BEGIN SELECT RAISE(ABORT, 'topic does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_topic_paper_article_exists "
+            "BEFORE INSERT ON topic_papers WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.article_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_highlight_article_exists "
+            "BEFORE INSERT ON highlights WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.article_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_chat_article_exists "
+            "BEFORE INSERT ON chat_messages WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.article_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_citation_seed_exists "
+            "BEFORE INSERT ON citation_edges WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.seed_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_citation_citing_exists "
+            "BEFORE INSERT ON citation_edges WHEN NOT EXISTS "
+            "(SELECT 1 FROM articles WHERE id = NEW.citing_id) "
+            "BEGIN SELECT RAISE(ABORT, 'article does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_digest_item_version_exists "
+            "BEFORE INSERT ON digest_items WHEN NOT EXISTS "
+            "(SELECT 1 FROM digest_versions WHERE id = NEW.version_id) "
+            "BEGIN SELECT RAISE(ABORT, 'digest version does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_digest_artifact_version_exists "
+            "BEFORE INSERT ON digest_artifacts WHEN NOT EXISTS "
+            "(SELECT 1 FROM digest_versions WHERE id = NEW.version_id) "
+            "BEGIN SELECT RAISE(ABORT, 'digest version does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_digest_send_version_exists "
+            "BEFORE INSERT ON digest_sends WHEN NOT EXISTS "
+            "(SELECT 1 FROM digest_versions WHERE id = NEW.version_id) "
+            "BEGIN SELECT RAISE(ABORT, 'digest version does not exist'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_article_delete_dependents "
+            "AFTER DELETE ON articles BEGIN "
+            "DELETE FROM watched_seeds WHERE article_id = OLD.id; "
+            "DELETE FROM chat_messages WHERE article_id = OLD.id; "
+            "DELETE FROM highlights WHERE article_id = OLD.id; "
+            "DELETE FROM topic_papers WHERE article_id = OLD.id; "
+            "DELETE FROM citation_edges WHERE seed_id = OLD.id OR citing_id = OLD.id; "
+            "END",
+            "CREATE TRIGGER IF NOT EXISTS trg_topic_delete_papers "
+            "AFTER DELETE ON topics BEGIN DELETE FROM topic_papers WHERE topic_id = OLD.id; END",
+        )
+        for trigger in integrity_triggers:
+            try:
+                conn.execute(trigger)
+            except sqlite3.OperationalError as e:
+                logger.warning("无法创建完整性触发器: %s", e)
         conn.commit()
         logger.info("数据库初始化完成: %s", self.db_path)
 
@@ -1515,10 +1574,34 @@ class Database:
             conn = self._conn()
             cur = conn.execute("DELETE FROM journals WHERE id = ?", (journal_id,))
             conn.commit()
+            if cur.rowcount > 0:
+                self.renumber_journals()
             return cur.rowcount > 0
         except sqlite3.Error as e:
             logger.error("delete_journal 失败: %s", e)
             return False
+
+    def renumber_journals(self) -> None:
+        """把订阅 id 压缩重排为 1..N（按当前顺序），并同步自增计数器。"""
+        conn = self._conn()
+        try:
+            (max_id,) = conn.execute("SELECT COALESCE(MAX(id), 0) FROM journals").fetchone()
+            offset = max_id + 1
+            conn.execute("UPDATE journals SET id = id + ?", (offset,))
+            for new_id, (old_id,) in enumerate(
+                conn.execute("SELECT id FROM journals ORDER BY id").fetchall(), start=1
+            ):
+                conn.execute("UPDATE journals SET id = ? WHERE id = ?", (new_id, old_id))
+            (count,) = conn.execute("SELECT COUNT(*) FROM journals").fetchone()
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'"
+            ).fetchone():
+                conn.execute(
+                    "UPDATE sqlite_sequence SET seq = ? WHERE name = 'journals'", (count,))
+            conn.commit()
+        except sqlite3.Error as e:
+            conn.rollback()
+            logger.error("renumber_journals 失败: %s", e)
 
     # ── 个人文献库：星标 / 笔记 / 标签 ────────────────────────
 
@@ -1589,6 +1672,8 @@ class Database:
 
     def add_chat_message(self, article_id: int, role: str, content: str) -> Optional[int]:
         try:
+            if not self._exists("articles", "id", article_id):
+                return None
             if self._memory_conn is not None:
                 with self._memory_lock:
                     cur = self._memory_conn.execute(
@@ -1807,8 +1892,30 @@ class Database:
 
     # ── 引文追踪 ────────────────────────────────────────────────
 
+    def _exists(self, table: str, key: str, value: Any) -> bool:
+        if table not in {"articles", "topics"} or key != "id":
+            raise ValueError("unsupported existence check")
+        conn = self._memory_conn if self._memory_conn is not None else self._conn()
+        return conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (value,)).fetchone() is not None
+
+    def integrity_report(self) -> dict[str, int]:
+        """Report legacy orphan rows without mutating user data."""
+        conn = self._memory_conn if self._memory_conn is not None else self._conn()
+        checks = {
+            "watched_seeds": "SELECT COUNT(*) FROM watched_seeds s LEFT JOIN articles a ON a.id=s.article_id WHERE a.id IS NULL",
+            "topic_papers_topic": "SELECT COUNT(*) FROM topic_papers p LEFT JOIN topics t ON t.id=p.topic_id WHERE t.id IS NULL",
+            "topic_papers_article": "SELECT COUNT(*) FROM topic_papers p LEFT JOIN articles a ON a.id=p.article_id WHERE a.id IS NULL",
+            "highlights": "SELECT COUNT(*) FROM highlights h LEFT JOIN articles a ON a.id=h.article_id WHERE a.id IS NULL",
+            "chat_messages": "SELECT COUNT(*) FROM chat_messages m LEFT JOIN articles a ON a.id=m.article_id WHERE a.id IS NULL",
+            "citation_seed": "SELECT COUNT(*) FROM citation_edges e LEFT JOIN articles a ON a.id=e.seed_id WHERE a.id IS NULL",
+            "citation_citing": "SELECT COUNT(*) FROM citation_edges e LEFT JOIN articles a ON a.id=e.citing_id WHERE a.id IS NULL",
+        }
+        return {name: int(conn.execute(sql).fetchone()[0]) for name, sql in checks.items()}
+
     def set_watch_seed(self, article_id: int, active: bool) -> bool:
         try:
+            if not self._exists("articles", "id", article_id):
+                return False
             sql = ("INSERT INTO watched_seeds (article_id, active) VALUES (?, ?) "
                    "ON CONFLICT(article_id) DO UPDATE SET active = excluded.active")
             if self._memory_conn is not None:
@@ -1872,6 +1979,8 @@ class Database:
 
     def add_citation_edge(self, seed_id: int, citing_id: int) -> bool:
         try:
+            if not self._exists("articles", "id", seed_id) or not self._exists("articles", "id", citing_id):
+                return False
             sql = "INSERT OR IGNORE INTO citation_edges (seed_id, citing_id) VALUES (?, ?)"
             if self._memory_conn is not None:
                 with self._memory_lock:
@@ -2082,6 +2191,9 @@ class Database:
     def add_topic_papers(self, topic_id: int, article_ids: list[int]) -> int:
         added = 0
         try:
+            if not self._exists("topics", "id", topic_id):
+                return 0
+            article_ids = [aid for aid in article_ids if self._exists("articles", "id", aid)]
             if self._memory_conn is not None:
                 with self._memory_lock:
                     for aid in article_ids:
@@ -2125,6 +2237,8 @@ class Database:
 
     def add_highlight(self, article_id: int, text: str, note: str = "") -> Optional[int]:
         try:
+            if not self._exists("articles", "id", article_id):
+                return None
             if self._memory_conn is not None:
                 with self._memory_lock:
                     cur = self._memory_conn.execute(

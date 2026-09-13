@@ -31,7 +31,7 @@ class TestDataRoot(unittest.TestCase):
                 [sys.executable, "-c", "from utils.paths import DATA_ROOT; print(DATA_ROOT)"],
                 cwd=tmp, env=env, capture_output=True, text=True, check=True,
             )
-            self.assertEqual(Path(result.stdout.strip()), Path(tmp) / "chosen")
+            self.assertEqual(Path(result.stdout.strip()).resolve(), (Path(tmp) / "chosen").resolve())
 
     def test_user_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

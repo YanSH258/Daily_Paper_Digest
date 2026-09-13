@@ -35,7 +35,8 @@ setup(
     install_requires=requirements,
     extras_require={
         # MCP 服务器（供 AI agent 调用文献工作台）；SDK 2.x 改了 API，锁定 1.x
-        "mcp": ["mcp>=1.2,<2"],
+        # 当前 MCP SDK 测试/运行基线为 Python 3.10+；核心包仍支持 Python 3.9。
+        "mcp": ["mcp>=1.2,<2; python_version >= '3.10'"],
     },
     entry_points={
         "console_scripts": [

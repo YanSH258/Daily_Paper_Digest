@@ -48,7 +48,6 @@ const Settings = {
         ${this.fieldRow("研究方向（每行一个）", `<textarea id="s_topics" rows="4">${API.esc((c.research_topics || []).join("\n"))}</textarea>`)}
       </div>
       <div class="card"><h3>抓取</h3>
-        ${this.fieldRow("全文抓取", `<label class="small"><input id="s_fulltext" type="checkbox" ${f.use_fulltext ? "checked" : ""} /> 启用</label>`)}
         ${this.fieldRow("浏览器渲染", `<label class="small"><input id="s_browser" type="checkbox" ${f.use_browser ? "checked" : ""} /> 启用</label>`)}
         ${this.fieldRow("每刊上限（篇）", `<input id="s_maxart" type="number" min="1" value="${API.esc(f.max_articles_per_journal ?? 100)}" />`)}
         ${this.fieldRow("日期过滤（天）", `<input id="s_datedays" type="number" min="0" value="${API.esc(f.date_filter_days ?? 3)}" />`)}
@@ -88,6 +87,7 @@ const Settings = {
       </div>
       <div class="card"><h3>调度</h3>
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
+        ${this.fieldRow("调度时区", `<input id="s_timezone" value="${API.esc(sched.timezone || "UTC")}" placeholder="例如 Asia/Shanghai" />`)}
         ${this.fieldRow("启用 API Token（可选）", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "本机自用可留空；需要时填写并保存"}" />
           ${c.web.api_token_set ? '<button type="button" class="secondary small-btn" onclick="Settings.clearToken()">清除 Token</button>' : ""}`)}
         ${this.fieldRow("保护读取", `<label class="small"><input id="s_protect" type="checkbox" ${c.web.protect_read ? "checked" : ""} /> 开启后 GET 接口也需 Token（默认关闭，仅本机使用无需打开）</label>`)}
@@ -384,7 +384,6 @@ const Settings = {
       "llm.api_key": val("s_apikey").trim(),
       "relevance_threshold": parseFloat(val("s_threshold")) || 0,
       "research_topics": val("s_topics").split("\n").map((s) => s.trim()).filter(Boolean),
-      "fetcher.use_fulltext": chk("s_fulltext"),
       "fetcher.use_browser": chk("s_browser"),
       "fetcher.max_articles_per_journal": parseInt(val("s_maxart")) || 100,
       "fetcher.date_filter_days": parseInt(val("s_datedays")) || 0,
@@ -393,6 +392,7 @@ const Settings = {
       "output.feishu_enabled": chk("s_feishu"),
       "output.feishu_webhook": val("s_webhook").trim(),
       "scheduler.run_time": val("s_runtime").trim(),
+      "scheduler.timezone": val("s_timezone").trim(),
     };
     // Token 留空 = 不修改；输入新值则提交，并同步写入浏览器，之后写操作自动带上
     const newToken = val("s_token").trim();
