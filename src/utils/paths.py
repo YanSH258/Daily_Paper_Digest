@@ -40,6 +40,38 @@ DATA_ROOT = (Path(_override).expanduser().resolve() if _override
 PROJECT_ROOT = DATA_ROOT
 
 
+def configure_data_root(root) -> Path:
+    """Set the process data root unless DPD_DATA_ROOT explicitly overrides it."""
+    global DATA_ROOT, PROJECT_ROOT
+    if os.environ.get("DPD_DATA_ROOT"):
+        DATA_ROOT = Path(os.environ["DPD_DATA_ROOT"]).expanduser().resolve()
+    else:
+        DATA_ROOT = Path(root).expanduser().resolve()
+    PROJECT_ROOT = DATA_ROOT
+    return DATA_ROOT
+
+
+def resolve_config_file(path="config/config.yaml") -> Path:
+    """Resolve a config file and infer its data root for absolute paths.
+
+    A path under ``<root>/config/`` uses ``<root>`` as the data root. Other
+    absolute config paths use their containing directory. DPD_DATA_ROOT always
+    wins, which preserves cron, Docker, and existing deployments.
+    """
+    raw = Path(path).expanduser()
+    if not raw.is_absolute():
+        return resolve_against_root(raw)
+
+    resolved = raw.resolve()
+    if os.environ.get("DPD_DATA_ROOT"):
+        configure_data_root(DATA_ROOT)
+    elif resolved.parent.name == "config":
+        configure_data_root(resolved.parent.parent)
+    else:
+        configure_data_root(resolved.parent)
+    return resolved
+
+
 def resolve_against_root(p) -> Path:
     """展开 ~；绝对路径保留，相对路径锚定到有效数据根。"""
     path = Path(p).expanduser()
@@ -65,7 +97,7 @@ def config_template_text() -> str:
 
 def init_config(path="config/config.yaml") -> Path:
     """显式初始化用户配置；独占创建，已有文件绝不覆盖。"""
-    destination = resolve_against_root(path)
+    destination = resolve_config_file(path)
     template = config_template_text()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("x", encoding="utf-8") as handle:

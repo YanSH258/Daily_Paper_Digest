@@ -29,7 +29,7 @@ from digest.service import DigestError, DigestService
 from main import (DEFAULT_SCHEDULER_TIMEZONE, get_scheduler_timezone, load_config,
                   load_config_from_obj, run_once, setup_logging, validate_config,
                   validate_scheduler_time)
-from utils.paths import resolve_against_root
+from utils.paths import resolve_against_root, resolve_config_file
 
 logger = logging.getLogger("web")
 
@@ -230,7 +230,7 @@ class TaskRunner:
 
 class WebContext:
     def __init__(self, config_path: str) -> None:
-        self.config_path = str(resolve_against_root(config_path))
+        self.config_path = str(resolve_config_file(config_path))
         self.config = load_config(self.config_path)
         validate_config(self.config)
         self.runner = TaskRunner(self.config)
@@ -2827,7 +2827,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_web_server(config_path: str = "config/config.yaml", host: str = "127.0.0.1", port: int = 8080) -> None:
-    setup_logging()
+    setup_logging(config_path)
     ctx = WebContext(config_path=config_path)
     validate_bind_host(host, ctx.api_token)
 

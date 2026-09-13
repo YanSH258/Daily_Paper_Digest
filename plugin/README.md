@@ -28,16 +28,17 @@ wheel 安装时：`python -m pip install <wheel 文件> "mcp>=1.2,<2"`。
 
 ## 2. 初始化配置与数据目录
 
-所有个人数据（配置、SQLite 数据库、日志、日报）统一放在**数据根目录**，
-由环境变量 `DPD_DATA_ROOT` 指定（启动进程前设置，CLI 与 Web 用同一值；
-路径含空格或中文没有问题，建议绝对路径）：
+所有个人数据（配置、SQLite 数据库、日志、日报）统一放在**数据根目录**。
+推荐直接使用绝对配置路径：当路径是 `<root>/config/config.yaml` 时，程序会自动把
+`<root>` 作为数据根目录，CLI 与 Web 后续只需传同一个配置路径；环境变量
+`DPD_DATA_ROOT` 仍可用于 cron、Docker 或强制覆盖（优先级最高）：
 
 ```bash
-export DPD_DATA_ROOT="$HOME/dpd-data"     # 任意你喜欢的目录
-daily-paper-digest --init-config          # 已有配置不会被覆盖（重复执行报错并保留原文件）
+mkdir -p "$HOME/dpd-data/config"
+daily-paper-digest --init-config --config "$HOME/dpd-data/config/config.yaml"
 ```
 
-然后编辑 `$DPD_DATA_ROOT/config/config.yaml`，最少填：
+然后编辑 `$HOME/dpd-data/config/config.yaml`，最少填：
 
 - `llm.<provider>.api_key` / `base_url` / `model`（OpenAI 兼容接口；也支持
   `DEEPSEEK_API_KEY` 等环境变量）
@@ -53,7 +54,7 @@ daily-paper-digest --init-config          # 已有配置不会被覆盖（重复
 ## 3. 启动工作台并认证
 
 ```bash
-daily-paper-web --config "$DPD_DATA_ROOT/config/config.yaml" --host 127.0.0.1 --port 8080
+daily-paper-web --config "$HOME/dpd-data/config/config.yaml" --host 127.0.0.1 --port 8080
 ```
 
 健康检查：`curl http://127.0.0.1:8080/healthz` 返回 `{"ok": true}`。

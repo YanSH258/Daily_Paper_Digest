@@ -68,7 +68,7 @@ def _call(method: str, path: str, body: Optional[dict] = None,
     except requests.exceptions.ConnectionError as e:
         raise ApiError(
             f"无法连接文献工作台 {_api()}（{e.__class__.__name__}）。"
-            "请先启动服务：daily-paper-web --config <你的配置文件> --port <端口>；"
+            "请先启动服务：daily-paper-web --config <绝对路径>/config/config.yaml --port <端口>；"
             f"可用 curl {_api()}/healthz 检查。若地址或端口与实际不符，"
             "请修正 MCP 配置中的 DPD_API"
         ) from e
@@ -427,7 +427,7 @@ def _call_chat(path: str, body: dict) -> str:
     except requests.exceptions.ConnectionError as e:
         raise ApiError(
             f"无法连接文献工作台 {_api()}。"
-            "请先启动服务：daily-paper-web --config <你的配置文件> --port <端口>"
+            "请先启动服务：daily-paper-web --config <绝对路径>/config/config.yaml --port <端口>"
         ) from e
     except requests.exceptions.Timeout as e:
         raise ApiError(f"工作台请求超时: {path}（上限 {_timeout()} 秒）") from e

@@ -33,20 +33,20 @@ python src/main.py --weekly        # 生成周报
 
 ```bash
 python -m pip install .             # 或 pip install /path/to/daily_paper_digest-*.whl
-# 可选；必须在启动进程前设置，CLI 与 Web 使用相同值
-export DPD_DATA_ROOT="$HOME/.local/share/daily-paper-digest"
-daily-paper-digest --init-config    # 从内置模板创建配置，已有文件不会覆盖
-# 编辑 $DPD_DATA_ROOT/config/config.yaml，填入自己的配置后再运行
-daily-paper-digest
-# Web 的设置保存使用传入路径，请使用绝对 --config 路径
-daily-paper-web --config "$DPD_DATA_ROOT/config/config.yaml" --host 127.0.0.1 --port 8080
+# 推荐：直接使用绝对配置路径，程序自动把其所在数据目录作为根目录
+mkdir -p "$HOME/dpd-data/config"
+daily-paper-digest --init-config --config "$HOME/dpd-data/config/config.yaml"
+# 编辑配置后，CLI 与 Web 都只需传同一个绝对配置路径
+daily-paper-digest --config "$HOME/dpd-data/config/config.yaml"
+daily-paper-web --config "$HOME/dpd-data/config/config.yaml" --host 127.0.0.1 --port 8080
+# cron / Docker 等需要强制覆盖时，仍可设置 DPD_DATA_ROOT
 ```
 
 数据根目录按以下优先级选择（启动进程时确定）：
 
-1. 环境变量 `DPD_DATA_ROOT`，支持 `~`；相对值在启动时转为绝对路径，建议始终使用绝对值。
-2. 源码或 editable 安装：仓库根目录，兼容现有 `config/`、`data/` 布局。
-3. wheel 安装：Linux 使用 `${XDG_DATA_HOME:-$HOME/.local/share}/daily-paper-digest`（相对 `XDG_DATA_HOME` 无效）；macOS 使用 `~/Library/Application Support/daily-paper-digest`；Windows 使用 `%LOCALAPPDATA%/daily-paper-digest`。
+1. 环境变量 `DPD_DATA_ROOT`，支持 `~`；显式设置时优先级最高。
+2. 未设置环境变量且传入绝对 `--config` 时：`<root>/config/config.yaml` 自动推断 `<root>` 为数据根；其他绝对配置文件使用其所在目录。
+3. 未设置环境变量且使用相对 `--config` 时，源码/editable 安装使用仓库根；wheel 安装按平台使用默认用户数据目录。
 
 | 内容 | 相对于数据根的默认位置 |
 |------|------------------------|

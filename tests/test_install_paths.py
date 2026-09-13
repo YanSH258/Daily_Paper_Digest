@@ -33,6 +33,100 @@ class TestDataRoot(unittest.TestCase):
             )
             self.assertEqual(Path(result.stdout.strip()).resolve(), (Path(tmp) / "chosen").resolve())
 
+    def test_absolute_config_path_infers_data_root(self):
+        import yaml
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "config.yaml"
+            config_path.parent.mkdir()
+            config_path.write_text(yaml.safe_dump({
+                "database": {"path": "data/db/articles.db"},
+                "output": {"output_dir": "data/output"},
+                "llm": {"provider": "fake", "fake": {"api_key": "fake"}},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                loaded = main.load_config(str(config_path))
+            self.assertEqual(Path(loaded["database"]["path"]).resolve(), (root / "data/db/articles.db").resolve())
+            self.assertEqual(Path(loaded["output"]["output_dir"]).resolve(), (root / "data/output").resolve())
+
+    def test_data_root_env_overrides_absolute_config_inference(self):
+        import yaml
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as override:
+            config_path = Path(tmp) / "config" / "config.yaml"
+            config_path.parent.mkdir()
+            config_path.write_text(yaml.safe_dump({
+                "database": {"path": "data/db/articles.db"},
+                "llm": {"provider": "fake", "fake": {"api_key": "fake"}},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"DPD_DATA_ROOT": override}, clear=True):
+                loaded = main.load_config(str(config_path))
+            self.assertEqual(Path(loaded["database"]["path"]).resolve(), (Path(override) / "data/db/articles.db").resolve())
+
+    def test_nonstandard_absolute_config_uses_parent_as_root(self):
+        import yaml
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "settings.yaml"
+            config_path.write_text(yaml.safe_dump({
+                "database": {"path": "db/articles.db"},
+                "llm": {"provider": "fake", "fake": {"api_key": "fake"}},
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                loaded = main.load_config(str(config_path))
+            self.assertEqual(Path(loaded["database"]["path"]).resolve(), (Path(tmp) / "db/articles.db").resolve())
+
+    def test_absolute_init_config_binds_followup_paths(self):
+        import yaml
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "config.yaml"
+            with patch.dict(os.environ, {}, clear=True):
+                destination = paths.init_config(config_path)
+                self.assertEqual(destination.resolve(), config_path.resolve())
+                loaded = main.load_config(config_path)
+            self.assertEqual(Path(loaded["database"]["path"]).resolve(), (root / "data/db/chem_daily.db").resolve())
+            self.assertEqual(Path(loaded["output"]["output_dir"]).resolve(), (root / "data/output").resolve())
+
+    def test_web_context_uses_absolute_config_root(self):
+        import yaml
+        import web_server
+        from core.db import Database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "config.yaml"
+            config_path.parent.mkdir()
+            config = {
+                "database": {"path": "data/db/articles.db"},
+                "output": {"output_dir": "data/output"},
+                "llm": {"provider": "fake", "fake": {
+                    "api_key": "fake", "base_url": "https://example.invalid", "model": "fake"
+                }},
+            }
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                db_path = root / "data/db/articles.db"
+                db_path.parent.mkdir(parents=True)
+                db = Database(str(db_path))
+                try:
+                    db.save_manual_article({"title": "kept", "doi": "10.1234/kept"})
+                finally:
+                    db.close()
+                ctx = web_server.WebContext(str(config_path))
+                try:
+                    self.assertEqual(ctx.db_path, db_path.resolve())
+                    self.assertEqual(ctx.db._conn().execute("SELECT COUNT(*) FROM articles").fetchone()[0], 1)
+                    self.assertEqual(ctx.output_dir, (root / "data/output").resolve())
+                finally:
+                    ctx.db.close()
+
     def test_user_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

@@ -14,8 +14,10 @@ description: 使用当用户提到文献、论文、日报、周报、今天读�
 `DPD_API` 指定）：
 
 ```bash
-daily-paper-web --config <用户的配置文件> --port 8080
+daily-paper-web --config <绝对路径>/config/config.yaml --port 8080
 ```
+
+绝对配置路径会自动推断数据根目录；如果显式设置 `DPD_DATA_ROOT`，则以环境变量为准。
 
 未启动时，工具会返回"无法连接文献工作台 …"并附启动提示——把它转述给用户即可。
 若报 `HTTP 401 认证失败`，提示用户检查工作台 `web.api_token` 与 MCP 端

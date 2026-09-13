@@ -39,7 +39,7 @@ from core.tracking import (collect_tracking_articles, mark_tracking_cursor,
 from digest.config import validate_digest_config
 from digest.service import DigestError, DigestService
 from fetchers.models import FetchResult
-from utils.paths   import init_config, resolve_against_root, resolve_config_paths
+from utils.paths   import init_config, resolve_against_root, resolve_config_file, resolve_config_paths
 
 # ── 日志配置 ──────────────────────────────────────────────────
 LOG_DIR = resolve_against_root("data/logs")
@@ -47,11 +47,14 @@ LOG_DIR = resolve_against_root("data/logs")
 _logger_ready = False
 
 
-def setup_logging() -> None:
-    """初始化日志（幂等）。在 CLI 入口与 Web 服务入口调用。"""
-    global _logger_ready
+def setup_logging(config_path: Optional[str] = None) -> None:
+    """初始化日志（幂等）。在 CLI 与 Web 配置路径确定后调用。"""
+    global _logger_ready, LOG_DIR
     if _logger_ready:
         return
+    if config_path:
+        resolve_config_file(config_path)
+    LOG_DIR = resolve_against_root("data/logs")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -131,7 +134,8 @@ def _apply_env_overrides(cfg: dict) -> dict:
 
 
 def load_config(path: str = "config/config.yaml") -> dict:
-    with resolve_against_root(path).open("r", encoding="utf-8") as f:
+    config_path = resolve_config_file(path)
+    with config_path.open("r", encoding="utf-8") as f:
         cfg: dict = yaml.safe_load(f)
     cfg = resolve_config_paths(_apply_env_overrides(cfg))
     db_path = cfg.get("database", {}).get("path")
@@ -913,7 +917,6 @@ def backup_database(config: dict, keep: int = 7) -> str:
 
 
 def main():
-    setup_logging()
     parser = argparse.ArgumentParser(description="化学文献日报工具")
     parser.add_argument("--config",   default="config/config.yaml", help="配置路径（相对数据根）")
     parser.add_argument("--init-config", action="store_true", help="从内置模板创建配置，不覆盖已有文件")
@@ -934,6 +937,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="与 --import-sources 同用：只显示将导入的清单")
     args = parser.parse_args()
+    setup_logging(args.config)
 
     if args.init_config:
         try:

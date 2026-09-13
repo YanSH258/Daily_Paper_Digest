@@ -45,17 +45,17 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirement.txt
 
-# 2) 数据根目录（配置/数据库/日志都在这里，建议写入 ~/.zshrc 持久化）
-export DPD_DATA_ROOT="$HOME/dpd-data"
+# 2) 一次性配置：绝对配置路径会自动推断数据根目录
+mkdir -p "$HOME/dpd-data/config"
 
 # 3) 生成初始配置（已有配置不会被覆盖）
-python src/main.py --init-config
+python src/main.py --init-config --config "$HOME/dpd-data/config/config.yaml"
 
 # 4) 编辑配置（见第 4 章），最少填 LLM 的 api_key / model
-nano "$DPD_DATA_ROOT/config/config.yaml"
+nano "$HOME/dpd-data/config/config.yaml"
 
 # 5) 启动网页控制台（http://127.0.0.1:8080）
-python src/web_server.py --config "$DPD_DATA_ROOT/config/config.yaml" --host 127.0.0.1 --port 8080
+python src/web_server.py --config "$HOME/dpd-data/config/config.yaml" --host 127.0.0.1 --port 8080
 ```
 
 健康检查：`curl http://127.0.0.1:8080/healthz` → `{"ok": true}`。
