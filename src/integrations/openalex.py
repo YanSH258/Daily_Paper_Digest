@@ -88,6 +88,18 @@ def _normalize_work(work: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_from_date(value: str) -> str:
+    """OpenAlex from_publication_date 仅接受 yyyy-mm-dd。
+
+    last_run 等水位线常带时间（2026-09-13T13:02:38），必须截断，
+    否则 API 返回 400 Invalid date，整刊抓取失败。
+    """
+    s = (value or "").strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return ""
+
+
 def get_work_by_doi(doi: str) -> Optional[dict[str, Any]]:
     if not doi:
         return None
@@ -104,8 +116,9 @@ def get_citing_works(doi: str, from_date: str = "", limit: int = 50) -> list[dic
     if not seed or not seed.get("openalex_id"):
         return []
     work_id = seed["openalex_id"]
+    from_day = _normalize_from_date(from_date)
     params: dict[str, Any] = {
-        "filter": f"cites:{work_id}" + (f",from_publication_date:{from_date}" if from_date else ""),
+        "filter": f"cites:{work_id}" + (f",from_publication_date:{from_day}" if from_day else ""),
         "sort": "publication_date:desc",
         "per-page": min(limit, 200),
     }
@@ -135,8 +148,9 @@ def search_authors(name: str, limit: int = 5) -> list[dict[str, Any]]:
 
 
 def get_author_recent_works(openalex_id: str, from_date: str, limit: int = 25) -> list[dict[str, Any]]:
+    from_day = _normalize_from_date(from_date)
     params: dict[str, Any] = {
-        "filter": f"author.id:{openalex_id}" + (f",from_publication_date:{from_date}" if from_date else ""),
+        "filter": f"author.id:{openalex_id}" + (f",from_publication_date:{from_day}" if from_day else ""),
         "sort": "publication_date:desc",
         "per-page": min(limit, 200),
     }
@@ -159,8 +173,9 @@ def search_works(query: str, from_date: str = "", limit: int = 50) -> list[dict[
         filt = query.removeprefix("filter:")
     else:
         filt = f"default.search:{query}"
-    if from_date:
-        filt += f",from_publication_date:{from_date}"
+    from_day = _normalize_from_date(from_date)
+    if from_day:
+        filt += f",from_publication_date:{from_day}"
     data = _get("/works", {"filter": filt, "sort": "publication_date:desc",
                            "per-page": min(limit, 200)})
     if not data:
