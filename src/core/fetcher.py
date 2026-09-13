@@ -21,8 +21,9 @@ import requests
 import urllib.request
 from urllib.parse import urlparse, quote
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from fetchers import fetch_html, FetchResult, FetchStatus, BestFormat
@@ -445,6 +446,33 @@ class JournalFetcher:
         from integrations import openalex
         openalex.configure(config)
         self._browser_lock = threading.Lock()
+        self.source_results: list[dict[str, Any]] = []
+        self._status_local = threading.local()
+        self._window_date = self._configured_run_date()
+
+    def _configured_run_date(self) -> date:
+        value = self.config.get("_run_date") or (self.config.get("processing", {}) or {}).get("run_date") or self.config.get("run_date")
+        if value:
+            try:
+                return date.fromisoformat(str(value)[:10])
+            except ValueError:
+                pass
+        scheduler = self.config.get("scheduler", {}) or {}
+        try:
+            return datetime.now(ZoneInfo(str(scheduler.get("timezone") or "UTC"))).date()
+        except Exception:
+            return datetime.now().date()
+
+    def set_window(self, run_date) -> None:
+        """Set the fixed report date used by all source windows."""
+        self._window_date = run_date if isinstance(run_date, date) else date.fromisoformat(str(run_date)[:10])
+
+    def _source_status(self) -> dict[str, Any]:
+        status = getattr(self._status_local, "value", None)
+        if status is None:
+            status = {"started_at": datetime.now().isoformat(), "raw_count": 0}
+            self._status_local.value = status
+        return status
 
     def fetch_all(self, health_callback=None) -> list[dict]:
         """并发抓取所有订阅源（RSS / arXiv / OpenAlex 检索式）。
@@ -452,6 +480,7 @@ class JournalFetcher:
         health_callback(journal_id, ok, error="") 用于更新源健康度。
         """
         journals = self.config.get("journals", [])
+        self.source_results = []
         concurrency = max(1, int((self.config.get("performance", {}) or {})
                                  .get("rss_concurrency", 4)))
         results: list[list[dict]] = [[] for _ in journals]
@@ -461,6 +490,7 @@ class JournalFetcher:
             name = journal.get("name", "Unknown")
             source_type = journal.get("source_type", "rss")
             try:
+                self._status_local.value = {"started_at": datetime.now().isoformat(), "raw_count": 0}
                 if source_type == "arxiv":
                     arts = self._fetch_arxiv_source(journal)
                 elif source_type == "openalex":
@@ -472,12 +502,29 @@ class JournalFetcher:
                     if not rss_url:
                         return
                     arts = self._fetch_journal(journal)
+                for article in arts:
+                    article["_sources"] = ["journal:" + str(journal.get("id") or name)]
                 results[idx] = arts
+                status = getattr(self._status_local, "value", None) or {}
+                result = {"source_id": journal.get("id"), "id": journal.get("id"), "success": True,
+                          "complete": not bool(status.get("truncated", False)),
+                          "truncated": bool(status.get("truncated", False)),
+                          "next_cursor": status.get("next_cursor"),
+                          "window_start": status.get("window_start"), "window_end": status.get("window_end"),
+                          "started_at": status.get("started_at"),
+                          "raw_count": status.get("raw_count", len(arts)), "returned_count": len(arts),
+                          "error": None}
+                self.source_results.append(result)
                 logger.info(f"正在抓取: {name} → {len(arts)} 篇")
                 if health_callback and journal.get("id"):
                     health_callback(journal["id"], True)
             except Exception as e:  # noqa: BLE001 - 单源失败不阻断其他源
                 logger.error(f"  {name} 抓取失败: {e}")
+                self.source_results.append({"source_id": journal.get("id"), "id": journal.get("id"),
+                                            "success": False, "complete": False, "truncated": False,
+                                            "next_cursor": None, "window_start": None, "window_end": None,
+                                            "started_at": None, "raw_count": 0, "returned_count": 0,
+                                            "error": str(e)})
                 if health_callback and journal.get("id"):
                     health_callback(journal["id"], False, str(e))
 
@@ -498,16 +545,29 @@ class JournalFetcher:
         """arXiv API 分类订阅（query 如 cat:cond-mat.mtrl-sci）。"""
         query = journal.get("query") or journal.get("rss") or ""
         per_max = int(journal.get("max_articles", self.max_per_journal))
-        url = (f"http://export.arxiv.org/api/query?search_query={quote(query)}"
+        url = (f"https://export.arxiv.org/api/query?search_query={quote(query + chr(32) + 'AND submittedDate:[' + (self._window_date - timedelta(days=max(0, self.date_filter_days - 1))).strftime('%Y%m%d') + '0000 TO ' + self._window_date.strftime('%Y%m%d') + '2359]')}"
                f"&sortBy=submittedDate&sortOrder=descending&max_results={per_max}")
-        feed = feedparser.parse(url)
-        if not feed or not feed.entries:
+        with requests.get(url, timeout=self.timeout) as response:
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+        if feed is None:
+            raise RuntimeError("arXiv feed unavailable")
+        if not feed.entries:
+            self._source_status().update({"raw_count": 0, "truncated": False, "complete": True,
+                                             "window_start": None, "window_end": self._window_date.isoformat()})
             return []
+        raw_count = len(feed.entries)
+        total = getattr(feed, "feed", {}).get("opensearch_totalresults")
+        complete = int(total) <= raw_count if total is not None else raw_count < per_max
+        self._source_status().update({"raw_count": raw_count, "truncated": not complete,
+                                         "complete": complete,
+                                         "window_end": self._window_date.isoformat()})
         articles = []
         for entry in feed.entries[:per_max]:
             art = self._parse_entry(entry, journal.get("name", "arXiv"), "arXiv")
             if art:
                 art["url"] = entry.get("link", art.get("url", ""))
+                art["date_source"] = "arxiv_first_submitted"
                 articles.append(art)
         return self._apply_date_filter(articles)
 
@@ -516,10 +576,18 @@ class JournalFetcher:
         from integrations import openalex as oa
         oa.set_polite_email(self.unpaywall_email)
         query = journal.get("query") or journal.get("rss") or ""
-        from_date = journal.get("last_run") or ""
-        works = oa.search_works(query, from_date=from_date,
+        from_date = journal.get("last_run") or (
+            self._window_date - timedelta(days=max(0, self.date_filter_days - 1))
+        ).isoformat()
+        works, page_meta = oa.search_works_page(query, from_date=from_date,
+                                to_date=self._window_date.isoformat(),
                                 limit=int(journal.get("max_articles", self.max_per_journal)))
         articles = []
+        self._source_status().update({"window_start": from_date, "window_end": self._window_date.isoformat(),
+                                         "raw_count": page_meta.get("raw_count", len(works)),
+                                         "truncated": bool(page_meta.get("truncated")),
+                                         "complete": bool(page_meta.get("complete")),
+                                         "next_cursor": page_meta.get("next_cursor")})
         for w in works:
             articles.append({
                 "title": w["title"],
@@ -529,7 +597,9 @@ class JournalFetcher:
                 "doi": w["doi"],
                 "abstract": w["abstract"],
                 "authors": w["authors"],
-                "pub_date": w["pub_date"] or datetime.now().strftime("%Y-%m-%d"),
+                "pub_date": w.get("pub_date") or "",
+                "date_source": "openalex_publication_date",
+                "quarantine": not bool(w.get("pub_date")),
                 "has_fulltext": False,
                 "cited_count": w.get("cited_count"),
                 "discovered_via": "openalex_query",
@@ -537,27 +607,25 @@ class JournalFetcher:
         return articles
 
     def _fetch_crossref_source(self, journal: dict) -> list[dict]:
-        from integrations.crossref import journal_works
-        articles = journal_works(
+        from integrations.crossref import journal_works_page
+        articles, total = journal_works_page(
             (journal.get("query") or "").strip(),
             limit=int(journal.get("max_articles", self.max_per_journal)),
-            days=self.date_filter_days, timeout=self.timeout,
+            days=self.date_filter_days, timeout=self.timeout, today=self._window_date,
         )
+        self._source_status().update({"raw_count": len(articles),
+                                         "truncated": total is None or total > len(articles),
+                                         "window_start": (self._window_date - timedelta(days=max(0, self.date_filter_days - 1))).isoformat(),
+                                         "window_end": self._window_date.isoformat()})
         for article in articles:
-            article["journal"] = journal.get("name") or article["journal"]
-            article["publisher"] = DOI_PUBLISHER_MAP.get(article["doi"].split("/")[0], "DEFAULT")
+            article["journal"] = journal.get("name") or article.get("journal", "")
+            article["publisher"] = DOI_PUBLISHER_MAP.get(article.get("doi", "").split("/")[0], "DEFAULT")
         return articles
 
     def _apply_date_filter(self, articles: list[dict]) -> list[dict]:
-        if self.date_filter_days > 0:
-            cutoff = (datetime.now() - timedelta(days=self.date_filter_days)).strftime("%Y-%m-%d")
-            # pub_date 可能为空（RSS 无 published）；用 created 兜底，避免误杀
-            out = []
-            for a in articles:
-                d = a.get("pub_date") or ""
-                if not d or d >= cutoff:
-                    out.append(a)
-            return out
+        # Admission is decided after persistence preparation, never by dropping undated records.
+        for article in articles:
+            article["quarantine"] = not bool(article.get("pub_date"))
         return articles
 
     def test_feed(self, rss_url: str, publisher: str = "DEFAULT") -> dict:
@@ -733,9 +801,15 @@ class JournalFetcher:
         per_max = journal.get("max_articles", self.max_per_journal)
 
         feed = self._fetch_rss(rss_url, publisher)
-        if not feed or not feed.entries:
+        if feed is None:
+            raise RuntimeError("RSS feed unavailable")
+        if not feed.entries:
+            self._source_status().update({"raw_count": 0, "truncated": False,
+                                             "window_start": None, "window_end": self._window_date.isoformat()})
             return []
 
+        self._source_status().update({"raw_count": len(feed.entries), "truncated": len(feed.entries) > per_max,
+                                         "window_start": None, "window_end": self._window_date.isoformat()})
         articles = []
         for entry in feed.entries[:per_max]:
             art = self._parse_entry(entry, journal_name, publisher)
@@ -912,12 +986,12 @@ class JournalFetcher:
             url = entry.get("link", "")
             doi = self._extract_doi(entry, url)
             detected_publisher = _get_publisher_from_doi(doi) or publisher
-            # 日期语义：published 优先；updated 不是发表日，不用；缺省留空由入库用 created_at
+            # feedparser converts published_parsed to UTC; retain timezone until admission.
             pub_date = ""
             pub_date_source = "missing"
             parsed = entry.get("published_parsed")
             if parsed:
-                pub_date = datetime(*parsed[:6]).strftime("%Y-%m-%d")
+                pub_date = datetime(*parsed[:6]).isoformat() + "Z"
                 pub_date_source = "rss_published"
             return {
                 "title":        title,

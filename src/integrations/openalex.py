@@ -158,6 +158,25 @@ def get_work_by_doi(doi: str) -> Optional[dict[str, Any]]:
     return _normalize_work(data) if data else None
 
 
+class WorkList(list):
+    """List-compatible work results with a conservative completeness marker."""
+    def __init__(self, rows, *, complete=True, next_cursor=None):
+        super().__init__(rows)
+        self.complete = complete
+        self.next_cursor = next_cursor
+
+
+def _work_list(data, limit):
+    raw = data.get("results") or []
+    meta = data.get("meta") or {}
+    count = meta.get("count")
+    complete = len(raw) < min(limit, 200) and not meta.get("next_cursor")
+    if isinstance(count, int):
+        complete = count <= len(raw)
+    return WorkList([w for w in (_normalize_work(r) for r in raw) if w["title"]],
+                    complete=complete, next_cursor=meta.get("next_cursor"))
+
+
 def get_citing_works(doi: str, from_date: str = "", limit: int = 50) -> list[dict[str, Any]]:
     """获取引用了 doi 的文献列表（按发表日期倒序）。
 
@@ -176,8 +195,7 @@ def get_citing_works(doi: str, from_date: str = "", limit: int = 50) -> list[dic
     data = _get("/works", params)
     if not data:
         return []
-    works = [_normalize_work(w) for w in (data.get("results") or [])]
-    return [w for w in works if w["title"]]
+    return _work_list(data, limit)
 
 
 def search_authors(name: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -208,8 +226,24 @@ def get_author_recent_works(openalex_id: str, from_date: str, limit: int = 25) -
     data = _get("/works", params)
     if not data:
         return []
+    return _work_list(data, limit)
+
+
+def search_works_page(query: str, from_date: str = "", limit: int = 50, *, to_date: str = "", cursor: str = "*") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return one OpenAlex page and its completeness metadata."""
+    if not query:
+        return [], {"complete": True, "truncated": False, "next_cursor": None, "raw_count": 0}
+    filt = query.removeprefix("filter:") if query.startswith("filter:") else f"default.search:{query}"
+    from_day = _normalize_from_date(from_date)
+    to_day = _normalize_from_date(to_date)
+    if from_day: filt += f",from_publication_date:{from_day}"
+    if to_day: filt += f",to_publication_date:{to_day}"
+    data = _get("/works", {"filter": filt, "sort": "publication_date:desc", "per-page": min(limit, 200), "cursor": cursor}) or {}
     works = [_normalize_work(w) for w in (data.get("results") or [])]
-    return [w for w in works if w["title"]]
+    meta = data.get("meta") or {}
+    nxt = meta.get("next_cursor")
+    raw = len(data.get("results") or [])
+    return [w for w in works if w["title"]], {"complete": not bool(nxt) and raw < min(limit, 200), "truncated": bool(nxt) or raw >= min(limit, 200), "next_cursor": nxt, "raw_count": raw}
 
 
 def search_works(query: str, from_date: str = "", limit: int = 50) -> list[dict[str, Any]]:
@@ -231,5 +265,4 @@ def search_works(query: str, from_date: str = "", limit: int = 50) -> list[dict[
                            "per-page": min(limit, 200)})
     if not data:
         return []
-    works = [_normalize_work(w) for w in (data.get("results") or [])]
-    return [w for w in works if w["title"]]
+    return _work_list(data, limit)

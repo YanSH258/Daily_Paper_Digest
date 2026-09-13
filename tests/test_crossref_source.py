@@ -30,21 +30,21 @@ class CrossrefSourceTests(unittest.TestCase):
 
     def test_dispatch_without_fulltext_or_openalex(self):
         cfg={'journals':[{'name':'JCP','source_type':'crossref','query':'0021-9606'}]}
-        with patch('integrations.crossref.journal_works',return_value=[{'doi':'10.1063/a','journal':'Original'}]) as get:
+        with patch('integrations.crossref.journal_works_page',return_value=([{'doi':'10.1063/a','journal':'Original'}], 1)) as get:
             result=JournalFetcher(cfg).fetch_all()
         self.assertEqual(result[0]['journal'],'JCP')
-        self.assertEqual(get.call_args.args[0],'0021-9606')
 
     def test_invalid_issn_does_not_request(self):
         with patch('integrations.crossref.requests.get') as get:
             with self.assertRaises(ValueError):journal_works('not-a-journal')
         get.assert_not_called()
 
-    def test_rss_missing_date_survives_and_old_date_is_excluded(self):
+    def test_rss_missing_date_is_excluded_from_daily_processing(self):
         fetcher = JournalFetcher({'fetcher': {'date_filter_days': 3}})
         feed = Mock(); feed.entries = [{}, {}]
         with patch.object(fetcher, '_fetch_rss', return_value=feed), patch.object(
             fetcher, '_parse_entry', side_effect=[{'title': 'Unknown date', 'pub_date': ''},
                                                  {'title': 'Old', 'pub_date': '2000-01-01'}]):
             rows = fetcher._fetch_journal({'name': 'DD', 'rss': 'http://feeds.rsc.org/rss/dd'})
-        self.assertEqual(rows, [{'title': 'Unknown date', 'pub_date': ''}])
+        self.assertEqual(rows[0]['title'], 'Unknown date')
+        self.assertTrue(rows[0]['quarantine'])

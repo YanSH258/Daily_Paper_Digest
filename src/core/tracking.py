@@ -40,6 +40,12 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
         since = seed.get("last_checked_at") or _default_since(seed.get("created_at"), check_days)
         try:
             citing = openalex.get_citing_works(doi, from_date=since)
+            complete = getattr(citing, "complete", True)
+            if isinstance(citing, tuple):
+                citing, complete = citing
+            elif isinstance(citing, dict):
+                complete = bool(citing.get("complete", False))
+                citing = citing.get("results", [])
         except Exception as e:  # noqa: BLE001 - 单篇失败不阻断，且不推进游标
             logger.warning("引文追踪失败 (%s): %s", doi, e)
             continue
@@ -60,14 +66,15 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
             work["discovered_via"] = "citation_watch"
             work["publisher"] = "DEFAULT"
             articles.append(work)
-        meta.setdefault("seed_windows", {})[seed["id"]] = since
+        if complete:
+            meta.setdefault("seed_windows", {})[seed["id"]] = since
         if citing:
             logger.info("引文追踪: %s 新增 %d 篇引用", seed["title"][:50], len(citing))
 
     # ── 作者追踪：关注作者有新文章 ──────────────────────────────
-    from_date = (datetime.now() - timedelta(days=int(tracking_cfg.get("author_check_days", 3))
-                                            )).strftime("%Y-%m-%d")
     for author in db.list_watch_authors(enabled_only=True):
+        run_date = datetime.fromisoformat(config.get("_run_date") or datetime.now().date().isoformat())
+        from_date = author.get("last_run") or (run_date - timedelta(days=max(0, int(tracking_cfg.get("author_check_days", 3)) - 1))).strftime("%Y-%m-%d")
         oid = author.get("openalex_id")
         if not oid:
             continue
@@ -78,7 +85,8 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
             continue
         # 同引文追踪：游标推迟到入库成功后推进（见 mark_tracking_cursor）
         meta.setdefault("seed_windows", {})
-        meta.setdefault("author_windows", {})[author["id"]] = True
+        if getattr(works, "complete", True):
+            meta.setdefault("author_windows", {})[author["id"]] = True
         count = 0
         for work in works:
             w_doi = (work.get("doi") or "").strip()
