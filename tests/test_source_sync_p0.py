@@ -87,6 +87,69 @@ class SourceSyncP0Tests(TestCase):
         finally:
             oa._cooldown_until = old
 
+    def test_arxiv_batch_fast_fail_skips_remaining_during_cooldown(self):
+        from integrations import arxiv
+        old = arxiv._cooldown_until
+        arxiv._cooldown_until = __import__('time').monotonic() + 120
+        try:
+            f = JournalFetcher({'journals': [
+                {'id': 3, 'name': 'AX1', 'source_type': 'arxiv', 'query': 'cat:x'},
+                {'id': 4, 'name': 'AX2', 'source_type': 'arxiv', 'query': 'cat:y'}]})
+            with patch.object(JournalFetcher, '_fetch_arxiv_source', side_effect=AssertionError('must not fetch')):
+                f.fetch_all()
+            self.assertEqual(len(f.source_results), 2)
+            self.assertFalse(any(r['success'] for r in f.source_results))
+            self.assertIn('cooldown', f.source_results[1]['error'])
+        finally:
+            arxiv._cooldown_until = old
+
+    @patch('integrations.arxiv.time.sleep')
+    @patch('integrations.arxiv.requests.get')
+    def test_arxiv_429_capped_backoff_then_success(self, get, sleep):
+        from integrations import arxiv
+        old = arxiv._cooldown_until
+        arxiv._cooldown_until = 0.0
+        try:
+            ok = Mock(status_code=200, headers={})
+            ok.__enter__ = Mock(return_value=ok)
+            ok.__exit__ = Mock(return_value=False)
+            ok.content = b'<feed/>'
+            throttled = Mock(status_code=429, headers={'Retry-After': '9000'})
+            throttled.__enter__ = Mock(return_value=throttled)
+            throttled.__exit__ = Mock(return_value=False)
+            get.side_effect = [throttled, ok]
+            feed = arxiv.fetch_feed('https://export.arxiv.org/api/query?x', timeout=5)
+            self.assertEqual(len(feed.entries), 0)
+            waited = [c.args[0] for c in sleep.call_args_list if c.args]
+            self.assertTrue(waited)
+            self.assertLessEqual(max(waited), arxiv.MAX_COOLDOWN_SECONDS + 1)
+        finally:
+            arxiv._cooldown_until = old
+
+    def test_source_groups_run_concurrently(self):
+        import threading
+        from time import sleep as real_sleep
+        finished = {}
+        started = threading.Event()
+        f = JournalFetcher({'journals': [
+            {'id': 1, 'name': 'AX', 'source_type': 'arxiv', 'query': 'cat:x'},
+            {'id': 2, 'name': 'OA', 'source_type': 'openalex', 'query': 'chem'}]})
+        def slow_arxiv(journal):
+            started.set()
+            real_sleep(1.0)
+            finished['arxiv'] = real_sleep and __import__('time').monotonic()
+            return []
+        def fast_openalex(journal):
+            if not started.wait(timeout=5):
+                raise AssertionError('openalex group blocked behind arxiv group')
+            finished['openalex'] = __import__('time').monotonic()
+            return []
+        with patch.object(JournalFetcher, '_fetch_arxiv_source', side_effect=slow_arxiv), \
+             patch.object(JournalFetcher, '_fetch_openalex_source', side_effect=fast_openalex):
+            f.fetch_all()
+        # OpenAlex completes while arXiv is still sleeping: groups overlap.
+        self.assertLess(finished['openalex'], finished['arxiv'])
+
     def test_tracking_failure_and_truncation_do_not_advance(self):
         db = Mock()
         db.get_watched_seeds.return_value = [{'id': 1, 'doi': '10/x', 'title': 'seed'}]

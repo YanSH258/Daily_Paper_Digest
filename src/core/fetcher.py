@@ -31,7 +31,7 @@ from fetchers.models import (MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS,
                              MIN_FULLTEXT_LEN)  # 统一使用 fetchers.models 中的常量
 from fetchers.network import get_proxies
 from fetchers.oa_fetcher import get_oa_url, get_openalex_abstract
-from integrations import openalex
+from integrations import arxiv, openalex
 from core.request_manager import RequestManager
 
 logger = logging.getLogger(__name__)
@@ -444,7 +444,7 @@ class JournalFetcher:
         perf_cfg = config.get("performance", {})
         self.concurrency = perf_cfg.get("concurrency", 5)
         self._request_manager = RequestManager(config=config)
-        from integrations import openalex
+        from integrations import arxiv, openalex
         openalex.configure(config)
         self._browser_lock = threading.Lock()
         self.source_results: list[dict[str, Any]] = []
@@ -490,9 +490,10 @@ class JournalFetcher:
             idx, journal = idx_journal
             name = journal.get("name", "Unknown")
             source_type = journal.get("source_type", "rss")
-            # Batch fast-fail: skip remaining OpenAlex sources while a sibling
+            # Batch fast-fail: skip remaining throttled sources while a sibling
             # 429 cooldown is active; cursors stay and next run re-collects.
-            if source_type == "openalex" and openalex.is_cooling_down():
+            throttled = {"openalex": openalex, "arxiv": arxiv}.get(source_type)
+            if throttled is not None and throttled.is_cooling_down():
                 error = "skipped: OpenAlex rate-limit cooldown active"
                 logger.warning(f"  {name} {error}")
                 self.source_results.append({"source_id": journal.get("id"), "id": journal.get("id"),
@@ -542,17 +543,35 @@ class JournalFetcher:
                 if health_callback and journal.get("id"):
                     health_callback(journal["id"], False, str(e))
 
+        # Throttled API families stay serial inside their group, while the
+        # groups themselves run concurrently so one slow API never blocks RSS.
         openalex_jobs = [(idx, journal) for idx, journal in enumerate(journals)
                          if journal.get("source_type", "rss") == "openalex"]
+        arxiv_jobs = [(idx, journal) for idx, journal in enumerate(journals)
+                      if journal.get("source_type", "rss") == "arxiv"]
         other_jobs = [(idx, journal) for idx, journal in enumerate(journals)
-                      if journal.get("source_type", "rss") != "openalex"]
-        if other_jobs:
+                      if journal.get("source_type", "rss") not in ("openalex", "arxiv")]
+
+        def _run_group(jobs: list[tuple[int, dict]], workers: int) -> None:
+            if not jobs:
+                return
+            if workers <= 1 or len(jobs) == 1:
+                for job in jobs:
+                    _one(job)
+                return
             with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(concurrency, len(other_jobs))) as executor:
-                list(executor.map(_one, other_jobs))
-        if openalex_jobs:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                list(executor.map(_one, openalex_jobs))
+                    max_workers=min(workers, len(jobs))) as executor:
+                list(executor.map(_one, jobs))
+
+        group_threads = [
+            threading.Thread(target=_run_group, args=(jobs, workers))
+            for jobs, workers in ((other_jobs, concurrency),
+                                  (openalex_jobs, 1), (arxiv_jobs, 1)) if jobs
+        ]
+        for thread in group_threads:
+            thread.start()
+        for thread in group_threads:
+            thread.join()
         return [a for r in results for a in r]
 
     def _fetch_arxiv_source(self, journal: dict) -> list[dict]:
@@ -561,9 +580,7 @@ class JournalFetcher:
         per_max = int(journal.get("max_articles", self.max_per_journal))
         url = (f"https://export.arxiv.org/api/query?search_query={quote(query + chr(32) + 'AND submittedDate:[' + (self._window_date - timedelta(days=max(0, self.date_filter_days - 1))).strftime('%Y%m%d') + '0000 TO ' + self._window_date.strftime('%Y%m%d') + '2359]')}"
                f"&sortBy=submittedDate&sortOrder=descending&max_results={per_max}")
-        with requests.get(url, timeout=self.timeout) as response:
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
+        feed = arxiv.fetch_feed(url, timeout=max(self.timeout, 30))
         if feed is None:
             raise RuntimeError("arXiv feed unavailable")
         if not feed.entries:
@@ -587,7 +604,7 @@ class JournalFetcher:
 
     def _fetch_openalex_source(self, journal: dict) -> list[dict]:
         """OpenAlex 检索式订阅，按 last_run 水位线增量拉取。"""
-        from integrations import openalex as oa
+        from integrations import arxiv, openalex as oa
         oa.set_polite_email(self.unpaywall_email)
         query = journal.get("query") or journal.get("rss") or ""
         from_date = journal.get("last_run") or (
