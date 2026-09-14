@@ -31,6 +31,7 @@ from fetchers.models import (MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS,
                              MIN_FULLTEXT_LEN)  # 统一使用 fetchers.models 中的常量
 from fetchers.network import get_proxies
 from fetchers.oa_fetcher import get_oa_url, get_openalex_abstract
+from integrations import openalex
 from core.request_manager import RequestManager
 
 logger = logging.getLogger(__name__)
@@ -489,6 +490,19 @@ class JournalFetcher:
             idx, journal = idx_journal
             name = journal.get("name", "Unknown")
             source_type = journal.get("source_type", "rss")
+            # Batch fast-fail: skip remaining OpenAlex sources while a sibling
+            # 429 cooldown is active; cursors stay and next run re-collects.
+            if source_type == "openalex" and openalex.is_cooling_down():
+                error = "skipped: OpenAlex rate-limit cooldown active"
+                logger.warning(f"  {name} {error}")
+                self.source_results.append({"source_id": journal.get("id"), "id": journal.get("id"),
+                                            "success": False, "complete": False, "truncated": False,
+                                            "next_cursor": None, "window_start": None, "window_end": None,
+                                            "started_at": None, "raw_count": 0, "returned_count": 0,
+                                            "error": error})
+                if health_callback and journal.get("id"):
+                    health_callback(journal["id"], False, error)
+                return
             try:
                 self._status_local.value = {"started_at": datetime.now().isoformat(), "raw_count": 0}
                 if source_type == "arxiv":

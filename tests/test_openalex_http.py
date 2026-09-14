@@ -23,7 +23,10 @@ class OpenAlexHttpTests(unittest.TestCase):
         get.side_effect = [self.response(429, {"Retry-After": "7"}), self.response(200)]
         self.assertEqual(openalex._get("/works", {}), {"results": []})
         self.assertEqual(get.call_count, 2)
-        self.assertTrue(any(call.args and call.args[0] == 7 for call in sleep.call_args_list))
+        # Retry-After is respected but capped and jittered, never raw.
+        waited = [call.args[0] for call in sleep.call_args_list if call.args]
+        self.assertTrue(any(7 <= w <= 7 + openalex._MAX_COOLDOWN_SECONDS + 1 for w in waited)
+                        and max(waited) <= openalex._MAX_COOLDOWN_SECONDS + 1, waited)
 
     @patch("integrations.openalex.time.sleep")
     @patch("integrations.openalex._session.get")

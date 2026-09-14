@@ -55,6 +55,38 @@ class SourceSyncP0Tests(TestCase):
         self.assertFalse(meta['complete'])
         self.assertEqual(meta['next_cursor'], 'abc')
 
+    @patch('integrations.openalex.time.sleep')
+    @patch('integrations.openalex._session.get')
+    def test_retry_after_sleep_is_capped(self, get, sleep):
+        from integrations import openalex as oa
+        old = oa._cooldown_until
+        oa._cooldown_until = 0.0
+        try:
+            get.side_effect = [Mock(status_code=429, headers={'Retry-After': '7200'}),
+                               Mock(status_code=200, json=lambda: {})]
+            oa._get('/works', {})
+            waited = [c.args[0] for c in sleep.call_args_list]
+            self.assertTrue(waited, 'expected capped backoff sleeps')
+            self.assertLessEqual(max(waited), oa._MAX_COOLDOWN_SECONDS + 1)
+        finally:
+            oa._cooldown_until = old
+
+    def test_batch_fast_fail_skips_remaining_openalex_during_cooldown(self):
+        from integrations import openalex as oa
+        old = oa._cooldown_until
+        oa._cooldown_until = __import__('time').monotonic() + 120
+        try:
+            f = JournalFetcher({'journals': [
+                {'id': 1, 'name': 'OA1', 'source_type': 'openalex', 'query': 'x'},
+                {'id': 2, 'name': 'OA2', 'source_type': 'openalex', 'query': 'y'}]})
+            with patch.object(JournalFetcher, '_fetch_openalex_source', side_effect=AssertionError('must not fetch')):
+                f.fetch_all()
+            self.assertEqual(len(f.source_results), 2)
+            self.assertFalse(any(r['success'] for r in f.source_results))
+            self.assertIn('cooldown', f.source_results[1]['error'])
+        finally:
+            oa._cooldown_until = old
+
     def test_tracking_failure_and_truncation_do_not_advance(self):
         db = Mock()
         db.get_watched_seeds.return_value = [{'id': 1, 'doi': '10/x', 'title': 'seed'}]

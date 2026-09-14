@@ -30,6 +30,9 @@ _request_config: dict[str, Any] = {}
 _openalex_lock = threading.Lock()
 _cooldown_lock = threading.Lock()
 _cooldown_until = 0.0
+# A throttled client may receive hours-long Retry-After values; sleeping the raw
+# value serializes the whole pipeline. Shared cooldown caps are always applied.
+_MAX_COOLDOWN_SECONDS = 300.0
 
 
 def set_polite_email(email: str) -> None:
@@ -61,9 +64,10 @@ def _retry_after(value: Optional[str]) -> Optional[float]:
 
 
 def _set_cooldown(seconds: float) -> None:
+    """Record the earliest next-allowed request, capped to stay responsive."""
     global _cooldown_until
     with _cooldown_lock:
-        _cooldown_until = max(_cooldown_until, time.monotonic() + min(seconds, 300.0))
+        _cooldown_until = max(_cooldown_until, time.monotonic() + min(seconds, _MAX_COOLDOWN_SECONDS))
 
 
 def _wait_cooldown() -> None:
@@ -73,8 +77,19 @@ def _wait_cooldown() -> None:
         time.sleep(wait)
 
 
+def retry_wait_seconds(seconds: float) -> float:
+    """The wait any caller may sleep for, always capped like the cooldown."""
+    return max(0.0, min(float(seconds), _MAX_COOLDOWN_SECONDS))
+
+
+def is_cooling_down() -> bool:
+    """True while another caller's 429 cooldown still applies (batch fast-fail)."""
+    with _cooldown_lock:
+        return time.monotonic() < _cooldown_until
+
+
 def _get(path: str, params: dict[str, Any], *, timeout: int = 20) -> Optional[dict[str, Any]]:
-    """请求 OpenAlex；共享限速、串行门控并尊重 429 Retry-After。"""
+    """请求 OpenAlex；共享限速、串行门控并尊重 429 Retry-After（封顶等待）。"""
     params = {**params, "mailto": _MAILTO}
     last_error: Exception | None = None
     limiter = get_domain_limiter(_request_config)
@@ -101,7 +116,7 @@ def _get(path: str, params: dict[str, Any], *, timeout: int = 20) -> Optional[di
                     logger.warning("OpenAlex 请求失败 (%s/%s): %s", attempt + 1, 3, exc)
                     retry_wait = 1.5 * (attempt + 1)
         if attempt < 2 and retry_wait:
-            time.sleep(retry_wait)
+            time.sleep(retry_wait_seconds(retry_wait) + random.uniform(0, 1))
     raise RuntimeError(f"OpenAlex 请求重试耗尽 ({path}, rate_limited={isinstance(last_error, RuntimeError) and '429' in str(last_error)})") from last_error
 
 
