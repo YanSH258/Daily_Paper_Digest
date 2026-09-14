@@ -17,12 +17,18 @@ const Journals = {
         const status = j.enabled
           ? '<span class="badge green">启用</span>'
           : '<span class="badge red">停用</span>';
+        const fetchInfo = (j.last_fetch_count !== undefined && j.last_fetch_count > 0)
+          ? `<span class="badge blue" title="最近抓取 ${j.last_fetch_count} 篇，累计入库 ${j.article_count || 0} 篇">${j.last_fetch_count} 篇</span>`
+          : (j.article_count > 0
+            ? `<span class="badge muted" title="累计入库 ${j.article_count} 篇">${j.article_count} 篇(库)</span>`
+            : '<span class="small muted">-</span>');
         tr.innerHTML = `
           <td class="mono">${API.esc(j.id)}</td>
           <td>${API.esc(j.name || "未命名")}</td>
           <td class="mono" style="max-width:320px; word-break:break-all;">${API.esc(j.rss)}</td>
           <td>${API.esc(j.publisher || "自动")}</td>
           <td>${j.source === "config" ? '<span class="badge muted">内置迁移</span>' : '<span class="badge blue">自建</span>'}</td>
+          <td>${fetchInfo}</td>
           <td>${status}</td>
           <td>
             <button class="secondary" onclick="Journals.toggle(${j.id})">${j.enabled ? "停用" : "启用"}</button>
@@ -32,7 +38,7 @@ const Journals = {
         tbody.appendChild(tr);
       }
       if (data.items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="small">暂无订阅，在上方添加或批量导入。</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="small">暂无订阅，在上方添加或批量导入。</td></tr>';
       }
     } catch (e) {
       this.msg("订阅列表获取失败: " + API.esc(e.message), false);
@@ -48,7 +54,10 @@ const Journals = {
       const data = await API.post("/api/journals/test", { rss, publisher });
       if (data.ok) {
         const samples = (data.sample || []).map((s) => `• ${API.esc(s)}`).join("<br>");
-        this.msg(`可用：${API.esc(data.feed_title || "RSS 源")}，共 ${data.count} 条<br>${samples}`, true);
+        const countDesc = (data.window_count !== undefined && data.window_count !== data.count)
+          ? `共 ${data.count} 条（近窗口预计 ${data.window_count} 篇）`
+          : `共 ${data.count} 条`;
+        this.msg(`可用：${API.esc(data.feed_title || "RSS 源")}，${countDesc}<br>${samples}`, true);
       } else {
         this.msg(API.esc(data.error || "测试失败"), false);
       }

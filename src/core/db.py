@@ -1552,7 +1552,41 @@ class Database:
         sql += " ORDER BY id"
         cursor = conn.execute(sql)
         cols = [d[0] for d in cursor.description]
-        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        journals = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+        # 聚合每个期刊的入库文章总数和最近一次抓取数
+        for j in journals:
+            jid = j["id"]
+            jname = j.get("name") or ""
+            try:
+                # 统计入库文章数（优先通过 article_sources 关联，兼容 journal 字段名称）
+                row = conn.execute(
+                    "SELECT COUNT(DISTINCT a.id) FROM articles a "
+                    "LEFT JOIN article_sources s ON a.id = s.article_id "
+                    "WHERE s.source_key IN (?, ?) OR a.journal = ?",
+                    (f"journal:{jid}", f"journal:{jname}", jname)
+                ).fetchone()
+                j["article_count"] = row[0] if row else 0
+            except Exception:
+                j["article_count"] = 0
+
+            try:
+                # 查询 source_sync 最新抓取记录中的篇数
+                sync_row = conn.execute(
+                    "SELECT metadata_json FROM source_sync "
+                    "WHERE source_id IN (?, ?) ORDER BY id DESC LIMIT 1",
+                    (str(jid), jname)
+                ).fetchone()
+                if sync_row and sync_row[0]:
+                    meta = json.loads(sync_row[0])
+                    j["last_fetch_count"] = meta.get("returned_count", meta.get("raw_count", 0))
+                else:
+                    j["last_fetch_count"] = 0
+            except Exception:
+                j["last_fetch_count"] = 0
+
+        return journals
+
 
     def get_journal_by_rss(self, rss: str) -> Optional[dict[str, Any]]:
         try:
