@@ -32,7 +32,10 @@ _cooldown_lock = threading.Lock()
 _cooldown_until = 0.0
 # A throttled client may receive hours-long Retry-After values; sleeping the raw
 # value serializes the whole pipeline. Shared cooldown caps are always applied.
-_MAX_COOLDOWN_SECONDS = 300.0
+MAX_COOLDOWN_SECONDS = 60.0
+# Actual sleeps stay short: if the server demands more, fail fast instead of
+# stalling the serial source group (cooldown still gates sibling sources).
+_SLEEP_CAP_SECONDS = 60.0
 
 
 def set_polite_email(email: str) -> None:
@@ -67,7 +70,7 @@ def _set_cooldown(seconds: float) -> None:
     """Record the earliest next-allowed request, capped to stay responsive."""
     global _cooldown_until
     with _cooldown_lock:
-        _cooldown_until = max(_cooldown_until, time.monotonic() + min(seconds, _MAX_COOLDOWN_SECONDS))
+        _cooldown_until = max(_cooldown_until, time.monotonic() + min(seconds, MAX_COOLDOWN_SECONDS))
 
 
 def _wait_cooldown() -> None:
@@ -79,7 +82,7 @@ def _wait_cooldown() -> None:
 
 def retry_wait_seconds(seconds: float) -> float:
     """The wait any caller may sleep for, always capped like the cooldown."""
-    return max(0.0, min(float(seconds), _MAX_COOLDOWN_SECONDS))
+    return max(0.0, min(float(seconds), _SLEEP_CAP_SECONDS))
 
 
 def is_cooling_down() -> bool:

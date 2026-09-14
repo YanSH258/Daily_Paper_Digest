@@ -10,6 +10,12 @@ from integrations import openalex
 
 
 class SourceSyncP0Tests(TestCase):
+    def setUp(self):
+        # Module-level cooldowns are process state; never leak between tests.
+        from integrations import arxiv, openalex
+        for module in (arxiv, openalex):
+            module._cooldown_until = 0.0
+
     def test_rss_empty_feed_success_but_network_failure_fails(self):
         f = JournalFetcher({'journals': [{'id': 1, 'name': 'X', 'rss': 'http://x'}]})
         empty = Mock(entries=[])
@@ -67,7 +73,7 @@ class SourceSyncP0Tests(TestCase):
             oa._get('/works', {})
             waited = [c.args[0] for c in sleep.call_args_list]
             self.assertTrue(waited, 'expected capped backoff sleeps')
-            self.assertLessEqual(max(waited), oa._MAX_COOLDOWN_SECONDS + 1)
+            self.assertLessEqual(max(waited), oa.MAX_COOLDOWN_SECONDS + 1)
         finally:
             oa._cooldown_until = old
 

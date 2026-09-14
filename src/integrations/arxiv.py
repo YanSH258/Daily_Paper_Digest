@@ -23,7 +23,10 @@ _cooldown_lock = threading.Lock()
 _cooldown_until = 0.0
 # Raw Retry-After values can be enormous; waiting the raw value would serialize
 # the whole pipeline, so every sleep and the shared cooldown share this cap.
-MAX_COOLDOWN_SECONDS = 300.0
+MAX_COOLDOWN_SECONDS = 60.0
+# Actual sleeps stay short: if the server demands more, fail fast instead of
+# stalling the serial source group (cooldown still gates sibling sources).
+_SLEEP_CAP_SECONDS = 60.0
 
 
 def _retry_after(value: Optional[str]) -> Optional[float]:
@@ -56,7 +59,7 @@ def _wait_cooldown() -> None:
 
 def retry_wait_seconds(seconds: float) -> float:
     """Any caller sleeps this capped value, never the raw Retry-After."""
-    return max(0.0, min(float(seconds), MAX_COOLDOWN_SECONDS))
+    return max(0.0, min(float(seconds), _SLEEP_CAP_SECONDS))
 
 
 def is_cooling_down() -> bool:

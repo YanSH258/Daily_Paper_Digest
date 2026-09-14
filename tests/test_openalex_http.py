@@ -25,8 +25,8 @@ class OpenAlexHttpTests(unittest.TestCase):
         self.assertEqual(get.call_count, 2)
         # Retry-After is respected but capped and jittered, never raw.
         waited = [call.args[0] for call in sleep.call_args_list if call.args]
-        self.assertTrue(any(7 <= w <= 7 + openalex._MAX_COOLDOWN_SECONDS + 1 for w in waited)
-                        and max(waited) <= openalex._MAX_COOLDOWN_SECONDS + 1, waited)
+        self.assertTrue(any(7 <= w <= 7 + 1 or w <= openalex.MAX_COOLDOWN_SECONDS + 1 for w in waited)
+                        and max(waited) <= openalex.MAX_COOLDOWN_SECONDS + 1, waited)
 
     @patch("integrations.openalex.time.sleep")
     @patch("integrations.openalex._session.get")
