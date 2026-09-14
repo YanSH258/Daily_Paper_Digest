@@ -874,12 +874,27 @@ class JournalFetcher:
             re.sub(r"\s+", " ", BeautifulSoup(entry.get("title", ""), "html.parser").get_text()).strip()[:80]
             for entry in feed.entries[:5]
         ]
+        # 统计在日期窗口内的文献篇数（如有 pub_date）
+        cutoff = datetime.now() - timedelta(days=self.date_filter_days)
+        window_count = 0
+        for entry in feed.entries:
+            parsed = entry.get("published_parsed")
+            if parsed:
+                try:
+                    dt = datetime(*parsed[:6])
+                    if dt >= cutoff:
+                        window_count += 1
+                except Exception:
+                    pass
+
         return {
             "ok": True,
             "feed_title": feed_title,
             "count": len(feed.entries),
+            "window_count": window_count if window_count > 0 else len(feed.entries),
             "sample": samples,
         }
+
 
     def fetch_fulltext(self, article: dict) -> str:
         return self.fetch_fulltext_with_status(article).text
