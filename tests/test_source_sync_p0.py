@@ -32,6 +32,21 @@ class SourceSyncP0Tests(TestCase):
         self.assertTrue(rows[0].get('quarantine'))
 
     @patch('integrations.openalex._get')
+    def test_openalex_journal_name_prefers_work_metadata(self, get):
+        get.return_value = {'results': [{'title': 'Paper', 'doi': 'https://doi.org/10/x',
+                                        'publication_date': '2026-09-13',
+                                        'primary_location': {'source': {'display_name': 'Real Journal'},
+                                                            'landing_page_url': 'https://example.test'},
+                                        'authorships': []}], 'meta': {}}
+        f = JournalFetcher({'_run_date': '2026-09-13', 'journals': [{'id': 7, 'name': 'OpenAlex 检索: chem',
+                         'source_type': 'openalex', 'query': 'chem'}], 'fetcher': {'date_filter_days': 3}})
+        rows = f.fetch_all()
+        self.assertEqual(rows[0]['journal'], 'Real Journal')
+        get.return_value['results'][0]['primary_location']['source'] = None
+        rows = f.fetch_all()
+        self.assertEqual(rows[0]['journal'], 'OpenAlex 检索: chem')
+
+    @patch('integrations.openalex._get')
     def test_openalex_page_at_limit_is_truncated(self, get):
         get.return_value = {'results': [{'title': 'x'}] * 100, 'meta': {'next_cursor': 'abc'}}
         rows, meta = openalex.search_works_page('chem', limit=100)

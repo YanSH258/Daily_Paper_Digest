@@ -591,7 +591,7 @@ class JournalFetcher:
         for w in works:
             articles.append({
                 "title": w["title"],
-                "journal": journal.get("name", w.get("journal", "")),
+                "journal": w.get("journal") or journal.get("name", ""),
                 "publisher": "DEFAULT",
                 "url": w["url"],
                 "doi": w["doi"],
