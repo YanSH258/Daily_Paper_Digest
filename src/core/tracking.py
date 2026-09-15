@@ -21,6 +21,7 @@ def collect_tracking_articles(config: dict, db) -> tuple[list[dict], dict[str, i
     from integrations import openalex
 
     openalex.set_polite_email(config.get("unpaywall_email", "your@email.com"))
+    openalex.configure(config)
     tracking_cfg = config.get("tracking", {}) or {}
     if not tracking_cfg.get("enabled", True):
         return [], {}

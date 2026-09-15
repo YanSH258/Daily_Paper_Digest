@@ -474,6 +474,7 @@ def _manual_add_article(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str
     if doi and (not title or not journal or not abstract):
         from integrations import openalex
         openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+        openalex.configure(ctx.config)
         work = openalex.get_work_by_doi(doi)
         if work:
             fetched = True
@@ -1540,6 +1541,7 @@ def _reanalyze_article_unlocked(ctx: WebContext, article_id: int, data: Optional
         try:
             from integrations import openalex
             openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+            openalex.configure(ctx.config)
             work = openalex.get_work_by_doi(article["doi"])
             if work and work.get("abstract"):
                 ctx.db.update_article_fields(article_id, abstract=work["abstract"])
@@ -1691,6 +1693,7 @@ def _set_watch(ctx: WebContext, article_id: int, data: dict[str, Any]) -> tuple[
 def _author_search(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     from integrations import openalex
     openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+    openalex.configure(ctx.config)
     name = str(data.get("name") or "").strip()
     if len(name) < 2:
         return {"ok": False, "error": "name 过短"}, 400

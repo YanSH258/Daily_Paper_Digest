@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 OPENALEX_BASE = "https://api.openalex.org"
 OPENALEX_URL = f"{OPENALEX_BASE}/works"
 _MAILTO = "your@email.com"
+_API_KEY = ""
 _session = requests.Session()
 _request_config: dict[str, Any] = {}
 _openalex_lock = threading.Lock()
@@ -45,10 +46,17 @@ def set_polite_email(email: str) -> None:
         _MAILTO = email
 
 
+def set_api_key(api_key: str) -> None:
+    """OpenAlex 可选 API key：官方文档称非必需，但付费/更高额度账号需要。"""
+    global _API_KEY
+    _API_KEY = (api_key or "").strip()
+
+
 def configure(config: Optional[dict[str, Any]] = None) -> None:
-    """设置 OpenAlex 共享限速所需的运行时配置。"""
+    """设置 OpenAlex 共享限速与认证所需的运行时配置。"""
     global _request_config
     _request_config = config or {}
+    set_api_key((_request_config.get("openalex") or {}).get("api_key") or "")
 
 
 def _retry_after(value: Optional[str]) -> Optional[float]:
@@ -94,6 +102,8 @@ def is_cooling_down() -> bool:
 def _get(path: str, params: dict[str, Any], *, timeout: int = 20) -> Optional[dict[str, Any]]:
     """请求 OpenAlex；共享限速、串行门控并尊重 429 Retry-After（封顶等待）。"""
     params = {**params, "mailto": _MAILTO}
+    if _API_KEY:
+        params["api_key"] = _API_KEY
     last_error: Exception | None = None
     limiter = get_domain_limiter(_request_config)
     for attempt in range(3):

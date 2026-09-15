@@ -17,6 +17,35 @@ class OpenAlexHttpTests(unittest.TestCase):
         resp.raise_for_status.side_effect = None if status < 400 else RuntimeError(f"HTTP {status}")
         return resp
 
+    def test_configure_installs_api_key_and_env_override(self):
+        from integrations import openalex
+        old = openalex._API_KEY
+        try:
+            openalex.configure({"openalex": {"api_key": "test-key-123"}})
+            self.assertEqual(openalex._API_KEY, "test-key-123")
+            openalex.configure({"openalex": {"api_key": ""}})
+            self.assertEqual(openalex._API_KEY, "")
+        finally:
+            openalex.set_api_key(old)
+
+    @patch("integrations.openalex._session.get")
+    def test_api_key_param_sent_only_when_configured(self, get):
+        from integrations import openalex
+        resp = Mock(status_code=200, headers={})
+        resp.json.return_value = {"results": []}
+        resp.raise_for_status.side_effect = None
+        get.return_value = resp
+        old = openalex._API_KEY
+        try:
+            openalex.configure({"openalex": {"api_key": "k123"}})
+            openalex._get("/works", {})
+            self.assertEqual(get.call_args.kwargs["params"]["api_key"], "k123")
+            openalex.configure({"openalex": {"api_key": ""}})
+            openalex._get("/works", {})
+            self.assertNotIn("api_key", get.call_args.kwargs["params"])
+        finally:
+            openalex.set_api_key(old)
+
     @patch("integrations.openalex.time.sleep")
     @patch("integrations.openalex._session.get")
     def test_retry_after_then_success(self, get, sleep):

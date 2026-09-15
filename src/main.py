@@ -114,6 +114,12 @@ def _apply_env_overrides(cfg: dict) -> dict:
     if env_email_pwd:
         cfg.setdefault("output", {}).setdefault("email", {})["password"] = env_email_pwd
 
+    # OpenAlex API Key：优先读取环境变量 OPENALEX_API_KEY（配置位于 openalex 下）
+    env_openalex_key = os.environ.get("OPENALEX_API_KEY")
+    if env_openalex_key:
+        cfg.setdefault("openalex", {})["api_key"] = env_openalex_key
+        logger.info("已从环境变量 OPENALEX_API_KEY 读取 OpenAlex API Key")
+
     # Feishu Webhook：优先读取环境变量 FEISHU_WEBHOOK_URL（配置位于 output.feishu 下）
     env_feishu = os.environ.get("FEISHU_WEBHOOK_URL")
     if env_feishu:
