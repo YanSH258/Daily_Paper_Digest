@@ -93,23 +93,83 @@ class SourceSyncP0Tests(TestCase):
         finally:
             oa._cooldown_until = old
 
-    def test_arxiv_batch_fast_fail_skips_remaining_during_cooldown(self):
+    def test_arxiv_uses_rss_while_api_cools_down(self):
+        """Query-API cooldown must not disable the (static) RSS feed."""
+        import feedparser
+        from integrations import arxiv
+        old = arxiv._cooldown_until
+        arxiv._cooldown_until = __import__('time').monotonic() + 120
+        try:
+            f = JournalFetcher({'journals': [
+                {'id': 3, 'name': 'AX1', 'source_type': 'arxiv', 'query': 'cat:cond-mat.mtrl-sci'},
+                {'id': 4, 'name': 'AX2', 'source_type': 'arxiv', 'query': 'cat:cond-mat.mtrl-sci'}]})
+            empty = feedparser.parse(b'<rss version="2.0"><channel><title>t</title></channel></rss>')
+            with patch('integrations.arxiv.fetch_rss', return_value=empty) as rss, \
+                 patch('integrations.arxiv.fetch_feed',
+                       side_effect=AssertionError('query API must not be called')) as feed:
+                f.fetch_all()
+            self.assertTrue(rss.called)
+            feed.assert_not_called()
+            self.assertEqual(len(f.source_results), 2)
+            self.assertTrue(all(r['success'] for r in f.source_results))
+        finally:
+            arxiv._cooldown_until = old
+
+    def test_arxiv_api_fallback_skips_when_cooling_down(self):
         from integrations import arxiv
         old = arxiv._cooldown_until
         arxiv._cooldown_until = __import__('time').monotonic() + 120
         try:
             f = JournalFetcher({'journals': [
                 {'id': 3, 'name': 'AX1', 'source_type': 'arxiv', 'query': 'cat:x'},
-                {'id': 4, 'name': 'AX2', 'source_type': 'arxiv', 'query': 'cat:y'}]})
-            with patch('integrations.arxiv.fetch_feed',
+                {'id': 5, 'name': 'AX5', 'source_type': 'arxiv', 'query': 'cat:y'}]})
+            with patch('integrations.arxiv.fetch_rss', side_effect=RuntimeError('rss down')), \
+                 patch('integrations.arxiv.fetch_feed',
                        side_effect=AssertionError('must not fetch during cooldown')) as feed:
                 f.fetch_all()
             feed.assert_not_called()
             self.assertEqual(len(f.source_results), 2)
             self.assertFalse(any(r['success'] for r in f.source_results))
-            self.assertIn('arxiv rate-limit cooldown', f.source_results[1]['error'])
+            self.assertIn('rate-limit cooldown', f.source_results[1]['error'])
         finally:
             arxiv._cooldown_until = old
+
+    def test_arxiv_rss_single_request_per_category_and_replace_dropped(self):
+        import feedparser
+        xml = b"""<rss version="2.0" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <channel><title>cond-mat.mtrl-sci</title>
+        <item><title>Fresh MLIP paper</title><link>https://arxiv.org/abs/2609.00001</link>
+          <pubDate>Tue, 15 Sep 2026 00:00:00 -0400</pubDate><dc:creator>A. Author</dc:creator>
+          <arxiv:announce_type>new</arxiv:announce_type>
+          <description>arXiv:2609.00001v1 Announce Type: new Abstract: A machine learning potential study of interfaces.</description></item>
+        <item><title>Old paper replaced</title><link>https://arxiv.org/abs/2001.00002</link>
+          <pubDate>Tue, 15 Sep 2026 00:00:00 -0400</pubDate><dc:creator>B. Author</dc:creator>
+          <arxiv:announce_type>replace</arxiv:announce_type>
+          <description>arXiv:2001.00002v3 Announce Type: replace Abstract: Updated version of an old paper.</description></item>
+        <item><title>Unrelated catalysis work</title><link>https://arxiv.org/abs/2609.00003</link>
+          <pubDate>Tue, 15 Sep 2026 00:00:00 -0400</pubDate><dc:creator>C. Author</dc:creator>
+          <arxiv:announce_type>new</arxiv:announce_type>
+          <description>arXiv:2609.00003v1 Announce Type: new Abstract: A study of solid catalysts.</description></item>
+        </channel></rss>"""
+        f = JournalFetcher({'_run_date': '2026-09-15', 'fetcher': {'date_filter_days': 3}, 'journals': [
+            {'id': 35, 'name': 'AX-cat', 'source_type': 'arxiv', 'query': 'cat:cond-mat.mtrl-sci'},
+            {'id': 36, 'name': 'AX-kw', 'source_type': 'arxiv',
+             'query': 'cat:cond-mat.mtrl-sci AND (all:"machine learning potential")'}]})
+        with patch('integrations.arxiv.fetch_rss',
+                   return_value=feedparser.parse(xml)) as rss, \
+             patch('integrations.arxiv.fetch_feed',
+                   side_effect=AssertionError('RSS path must not call the query API')):
+            rows = f.fetch_all()
+        self.assertEqual(rss.call_count, 1, 'one RSS request must cover both subscriptions')
+        titles = sorted(r['title'] for r in rows)
+        self.assertIn('Fresh MLIP paper', titles)
+        self.assertIn('Unrelated catalysis work', titles)      # category subscription keeps it
+        self.assertNotIn('Old paper replaced', titles)          # replace announcements dropped
+        self.assertTrue(all(r['journal'] == 'cond-mat.mtrl-sci' for r in rows))
+        self.assertTrue(all(r.get('date_source') == 'arxiv_rss_announcement' for r in rows))
+        self.assertTrue(all(not (r.get('abstract') or '').startswith('arXiv:') for r in rows))
+        self.assertEqual({r['source_id'] for r in f.source_results}, {35, 36})
+        self.assertTrue(all(r['success'] for r in f.source_results))
 
     @patch('integrations.arxiv.time.sleep')
     @patch('integrations.arxiv._session.get')
@@ -159,8 +219,9 @@ class SourceSyncP0Tests(TestCase):
         # OpenAlex completes while arXiv is still sleeping: groups overlap.
         self.assertLess(finished['openalex'], finished['arxiv'])
 
+    @patch('integrations.arxiv.fetch_rss', side_effect=RuntimeError('rss down'))
     @patch('integrations.arxiv.fetch_feed')
-    def test_arxiv_sources_merged_into_one_request(self, fetch_feed):
+    def test_arxiv_sources_merged_into_one_request(self, fetch_feed, _rss):
         import feedparser
         fetch_feed.return_value = feedparser.parse(
             b'<feed xmlns="http://www.w3.org/2005/Atom"><title>t</title></feed>')

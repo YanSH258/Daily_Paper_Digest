@@ -578,7 +578,90 @@ class JournalFetcher:
             thread.join()
         return [a for r in results for a in r]
 
+    @staticmethod
+    def _split_arxiv_query(query: str) -> tuple[list[str], list[str]]:
+        """Split an arXiv query into its categories and quoted keyword phrases."""
+        categories = re.findall(r"cat:([A-Za-z0-9._-]+)", query or "")
+        phrases = re.findall(r'(?:all|abs|ti):"([^"]+)"', query or "")
+        return categories, [p for p in phrases if p.strip()]
+
     def _fetch_arxiv_group(self, entries: list[tuple[int, dict]], results: list[list[dict]]) -> None:
+        """Prefer the per-category RSS feed; fall back to the paced query API.
+
+        rss.arxiv.org keeps working while the query API is rate-limited, and one
+        request covers a whole category, so it is both cheaper and more robust.
+        """
+        categories: list[str] = []
+        for _idx, journal in entries:
+            cats, _phrases = self._split_arxiv_query(journal.get("query") or journal.get("rss") or "")
+            for cat in cats:
+                if cat not in categories:
+                    categories.append(cat)
+        if not categories:
+            self._fetch_arxiv_api(entries, results)
+            return
+        try:
+            self._fetch_arxiv_rss(entries, categories, results)
+        except Exception as exc:  # noqa: BLE001 - fall back to the query API
+            logger.warning("  arXiv RSS 不可用（%s），回退查询 API", exc)
+            self._fetch_arxiv_api(entries, results)
+
+    def _fetch_arxiv_rss(self, entries: list[tuple[int, dict]], categories: list[str],
+                         results: list[list[dict]]) -> None:
+        """Fetch each needed category once and filter locally per subscription."""
+        started_at = datetime.now().isoformat()
+        window_start = (self._window_date - timedelta(days=max(0, self.date_filter_days - 1))).isoformat()
+        names = [j.get("name") or "arXiv" for _, j in entries]
+        per_max = max((int(j.get("max_articles", self.max_per_journal)) for _, j in entries),
+                      default=self.max_per_journal)
+        parsed = [(self._split_arxiv_query(j.get("query") or j.get("rss") or "")) for _idx, j in entries]
+        articles: list[dict] = []
+        seen: set[str] = set()
+        for category in categories:
+            feed = arxiv.fetch_rss(category, timeout=max(self.timeout, 30))
+            keyword_groups = [phrases for cats, phrases in parsed if category in cats]
+            for entry in list(feed.entries)[:per_max]:
+                announce = str(entry.get("arxiv_announce_type") or "").strip().lower()
+                if announce == "replace":
+                    # Replacements revisit older papers; keep the new/cross listings only.
+                    continue
+                art = self._parse_entry(entry, names[0], "arXiv")
+                if not art:
+                    continue
+                art["url"] = entry.get("link", art.get("url", ""))
+                art["date_source"] = "arxiv_rss_announcement"
+                art["journal"] = category
+                abstract = re.sub(r"^arXiv:\S+\s*Announce Type:\s*\w+\.?\s*(?:Abstract:)?\s*",
+                                  "", art.get("abstract") or "").strip()
+                if abstract:
+                    art["abstract"] = abstract
+                text = ((art.get("title") or "") + " " + (art.get("abstract") or "")).lower()
+                # Union semantics: an unconstrained subscription (whole category) or
+                # any matching keyword phrase keeps the entry.
+                keep = any(
+                    (not phrases) or any(phrase.lower() in text for phrase in phrases)
+                    for phrases in keyword_groups)
+                if not keep:
+                    continue
+                key = art.get("url") or art.get("title") or ""
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                art["_sources"] = [f"journal:{j.get('id')}" for _i, j in entries if j.get("id")]
+                articles.append(art)
+        articles = self._apply_date_filter(articles)
+        if entries:
+            results[entries[0][0]] = articles
+        for _idx, journal in entries:
+            self._record_arxiv_result(journal, started_at, window_start,
+                                      self._window_date.isoformat(), success=True,
+                                      raw_count=len(articles), complete=True,
+                                      returned_count=len(articles))
+        logger.info("正在抓取: %s → %d 篇（RSS 分类 %s）",
+                    names[0], len(articles), ",".join(categories))
+
+    def _fetch_arxiv_api(self, entries: list[tuple[int, dict]], results: list[list[dict]]) -> None:
         """Fetch every arXiv subscription with ONE combined OR query.
 
         arXiv's ToU allow one request per three seconds, so the cheapest fix is

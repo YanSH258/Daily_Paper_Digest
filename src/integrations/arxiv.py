@@ -99,6 +99,29 @@ def is_cooling_down() -> bool:
         return time.monotonic() < _cooldown_until
 
 
+def fetch_rss(category: str, *, timeout: int = 30) -> Any:
+    """Fetch one category's RSS announcement feed.
+
+    rss.arxiv.org serves a static per-category file (new/replace/cross-listed
+    announcements), so it is not subject to the query API's 3-second rule and
+    keeps working while the query API returns 429.
+    """
+    url = f"https://rss.arxiv.org/rss/{category}"
+    last_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            with _lock:
+                with _session.get(url, timeout=timeout) as response:
+                    response.raise_for_status()
+                    return feedparser.parse(response.content)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.warning("arXiv RSS 请求失败 (%s/%s): %s", attempt + 1, 2, exc)
+            if attempt == 0:
+                time.sleep(1.0)
+    raise RuntimeError(f"arXiv RSS 请求失败 ({category})") from last_error
+
+
 def fetch_feed(url: str, *, timeout: int = 30) -> Any:
     """GET an arXiv API URL and return a parsed feed, honoring 429 backoff."""
     last_error: Optional[Exception] = None
