@@ -997,6 +997,19 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
             except json.JSONDecodeError:
                 pass
 
+        # 兜底：截断的 JSON 抢救。模型偶尔输出思考前缀或被 max_tokens 截断，
+        # 但 score/reason 字段往往已经完整输出，正则抢救优于整篇重试。
+        if re.search(r'"score"', text):
+            score_match = re.search(r'"score"\s*:\s*("?)(\d+(?:\.\d+)?)\1', text)
+            if score_match:
+                score = float(score_match.group(2))
+                if 0 <= score <= 10:
+                    reason_match = re.search(r'"reason"\s*:\s*"([^"]{2,300})', text)
+                    reason = reason_match.group(1).strip() if reason_match else "（模型输出被截断，按评分抢救）"
+                    logger.warning("[LLM_PARSE_SALVAGE] JSON 截断，已抢救 score=%s", score)
+                    return {"score": score, "reason": reason,
+                            "matched_topics": [], "model": self.model, "basis": "abstract"}
+
         # 解析失败，记录错误并抛出
         logger.error(
             "[LLM_PARSE_ERROR] 无法从 LLM 返回文本中提取 JSON | 原始文本前500字: %s",

@@ -78,3 +78,28 @@ class FixDatesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JsonSalvageTests(unittest.TestCase):
+    def _analyzer(self):
+        from core.analyzer import LLMAnalyzer
+        return LLMAnalyzer({"llm": {"provider": "deepseek",
+                                    "deepseek": {"api_key": "k", "model": "m",
+                                                 "base_url": "https://x"}},
+                            "relevance_threshold": 5})
+
+    def test_salvages_truncated_json(self):
+        a = self._analyzer()
+        result = a._parse_json('{"score": 7, "reason": "论文采用DFT研究界面输运，与研究方向')
+        self.assertEqual(result["score"], 7.0)
+        self.assertIn("DFT", result["reason"])
+
+    def test_salvages_prefixed_cot_output(self):
+        a = self._analyzer()
+        result = a._parse_json('We need answer JSON only. {"score": 3, "reason": "无关课题，理由如下：材料')
+        self.assertEqual(result["score"], 3.0)
+
+    def test_still_raises_when_no_score(self):
+        a = self._analyzer()
+        with self.assertRaises(Exception):
+            a._parse_json("完全没有 JSON 的输出")
