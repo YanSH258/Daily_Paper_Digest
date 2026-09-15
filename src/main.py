@@ -325,17 +325,21 @@ def dedupe_batch(articles: list[dict]) -> list[dict]:
         doi = (a.get("doi") or "").strip()
         url = (a.get("url") or "").strip()
         title = (a.get("title") or "").strip()
+        # Register and check *every* key: the same paper often arrives twice with
+        # different DOIs (article DOI plus a figshare supplemental DOI), so
+        # keying on DOI alone lets identical titles through twice.
+        keys = []
         if doi:
-            key = f"doi:{doi.lower()}"
-        elif url:
-            key = f"url:{url}"
-        elif title:
-            key = "title:" + " ".join(title.lower().split())
-        else:
+            keys.append(f"doi:{doi.lower()}")
+        if url:
+            keys.append(f"url:{url}")
+        if title:
+            keys.append("title:" + " ".join(title.lower().split()))
+        if not keys:
             continue
-        if key in seen:
+        if any(key in seen for key in keys):
             continue
-        seen.add(key)
+        seen.update(keys)
         unique.append(a)
     return unique
 

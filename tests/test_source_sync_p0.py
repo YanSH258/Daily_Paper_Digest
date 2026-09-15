@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from core.fetcher import JournalFetcher
+from main import dedupe_batch
 from core.tracking import collect_tracking_articles
 from integrations import openalex
 
@@ -277,3 +278,24 @@ class SourceSyncP0Tests(TestCase):
         with patch('integrations.openalex.get_author_recent_works', return_value=[]) as get:
             collect_tracking_articles({'tracking': {'enabled': True, 'author_check_days': 3}}, db)
         self.assertEqual(get.call_args.kwargs['from_date'], '2026-09-10')
+
+    def test_test_feed_window_count_reports_zero_when_undated(self):
+        import feedparser
+        f = JournalFetcher({'fetcher': {'date_filter_days': 3}})
+        undated = feedparser.parse(b'<rss version="2.0"><channel><title>x</title>'
+                                   b'<item><title>a</title></item>'
+                                   b'<item><title>b</title></item></channel></rss>')
+        with patch.object(f, '_fetch_rss', return_value=undated):
+            result = f.test_feed('http://x', 'DEFAULT')
+        self.assertEqual(result['count'], 2)
+        self.assertEqual(result['window_count'], 0)   # never fall back to the total
+
+    def test_dedupe_catches_same_title_with_different_dois(self):
+        from main import dedupe_batch
+        first = {'doi': '10.1063/5.0329286', 'title': 'Same paper', 'url': 'https://doi.org/10.1063/5.0329286'}
+        figshare = {'doi': '10.60893/figshare.apl.c.1', 'title': 'Same paper',
+                    'url': 'https://doi.org/10.60893/figshare.apl.c.1'}
+        self.assertEqual(len(dedupe_batch([first, figshare])), 1)
+        self.assertEqual(len(dedupe_batch([figshare, first])), 1)
+        unrelated = {'doi': '10.t/other', 'title': 'Different work', 'url': 'https://x/other'}
+        self.assertEqual(len(dedupe_batch([first, unrelated])), 2)

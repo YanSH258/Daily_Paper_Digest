@@ -891,7 +891,9 @@ class JournalFetcher:
             "ok": True,
             "feed_title": feed_title,
             "count": len(feed.entries),
-            "window_count": window_count if window_count > 0 else len(feed.entries),
+            # Honest count: 0 means "no dated entries in the window", which is
+            # exactly when the user needs a warning, never a total-count fallback.
+            "window_count": window_count,
             "sample": samples,
         }
 
