@@ -494,7 +494,7 @@ class JournalFetcher:
             # 429 cooldown is active; cursors stay and next run re-collects.
             throttled = {"openalex": openalex, "arxiv": arxiv}.get(source_type)
             if throttled is not None and throttled.is_cooling_down():
-                error = "skipped: OpenAlex rate-limit cooldown active"
+                error = f"skipped: {source_type} rate-limit cooldown active"
                 logger.warning(f"  {name} {error}")
                 self.source_results.append({"source_id": journal.get("id"), "id": journal.get("id"),
                                             "success": False, "complete": False, "truncated": False,

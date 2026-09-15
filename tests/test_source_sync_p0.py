@@ -89,7 +89,7 @@ class SourceSyncP0Tests(TestCase):
                 f.fetch_all()
             self.assertEqual(len(f.source_results), 2)
             self.assertFalse(any(r['success'] for r in f.source_results))
-            self.assertIn('cooldown', f.source_results[1]['error'])
+            self.assertIn('openalex rate-limit cooldown', f.source_results[1]['error'])
         finally:
             oa._cooldown_until = old
 
@@ -105,7 +105,7 @@ class SourceSyncP0Tests(TestCase):
                 f.fetch_all()
             self.assertEqual(len(f.source_results), 2)
             self.assertFalse(any(r['success'] for r in f.source_results))
-            self.assertIn('cooldown', f.source_results[1]['error'])
+            self.assertIn('arxiv rate-limit cooldown', f.source_results[1]['error'])
         finally:
             arxiv._cooldown_until = old
 
