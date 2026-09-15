@@ -300,12 +300,17 @@ const Settings = {
         box.innerHTML = '<span class="muted">暂无屏蔽记录。</span>';
         return;
       }
-      box.innerHTML = items.slice(0, 50).map((b) => `
+      const shown = items.slice(0, 50).map((b) => `
         <div class="row" style="justify-content:space-between; margin:2px 0;">
           <span class="mono small">${API.esc((b.title || b.doi || b.url || "?").slice(0, 60))}</span>
           <button class="secondary small-btn" onclick="Settings.unblock(${b.id})">解除</button>
-        </div>`).join("") +
-        (items.length > 50 ? `<div class="small muted">…其余 ${items.length - 50} 条略</div>` : "");
+        </div>`).join("");
+      // Collapsed by default: the list regularly grows to hundreds of entries.
+      box.innerHTML = `
+        <details>
+          <summary class="small" style="cursor:pointer;">展开查看前 ${Math.min(50, items.length)} 条${items.length > 50 ? `（其余 ${items.length - 50} 条略）` : ""}</summary>
+          <div style="max-height:320px; overflow:auto; margin-top:6px;">${shown}</div>
+        </details>`;
     } catch (e) {
       box.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
     }
