@@ -83,9 +83,13 @@ const Today = {
       <div class="today-stat top"><b>${c.top || 0}</b><span>优先阅读</span></div>
       <div class="today-stat"><b>${c.notable || 0}</b><span>值得关注</span></div>
       <div class="today-stat"><b>${c.browse || 0}</b><span>快速浏览</span></div>
-      <div class="today-stat"><b>${c.processing || 0}</b><span>处理中/待重试</span></div>
+      <div class="today-stat"><b>${(c.queued || 0) + (c.failed || 0)}</b><span>待评分/失败重试</span></div>
       <div class="today-stat muted"><b>${task.running ? "运行中" : "空闲"}</b><span>任务状态</span></div>
     `;
+    if (c.quarantined) {
+      document.getElementById("todayOverview").innerHTML +=
+        `<p class="small muted" style="margin:-6px 0 0;">另有 ${c.quarantined} 篇已隔离（日期待核验 / 超出窗口），按设计不参与评分。</p>`;
+    }
 
     this.renderBucket("todayTop", d.buckets.top, "card");
     this.renderBucket("todayNotable", d.buckets.notable, "card");
@@ -136,11 +140,14 @@ const Today = {
       } else {
         const row = document.createElement("div");
         row.className = "today-row";
+        const holdChip = a.hold_reason
+          ? `<span class="ev-badge ev-unknown">${API.esc(a.hold_reason)}</span>`
+          : this.evidenceBadge(a);
         row.innerHTML = `
           <span class="small muted">${score ? score.toFixed(1) : "—"}</span>
           <a class="today-row-title" href="/article/${a.id}" target="_blank">${API.esc(API.cleanTitle(a.title || ""))}</a>
           <span class="journal-tag">${API.esc(a.journal || "")}</span>
-          ${a.score_status === "failed" ? '<span class="ev-badge ev-unknown">评分失败·将重试</span>' : this.evidenceBadge(a)}
+          ${a.score_status === "failed" ? '<span class="ev-badge ev-unknown">评分失败·将重试</span>' : holdChip}
         `;
         el.appendChild(row);
       }

@@ -399,6 +399,7 @@ def _today_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {"top": [], "notable": [], "browse": []}
     processing: list[dict[str, Any]] = []
 
+    holds = {"queued": 0, "failed": 0, "quarantined": 0}
     for r in rows:
         if not r.get("topic"):
             r["topic"] = classify_article(r)
@@ -406,6 +407,22 @@ def _today_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
         r["has_fulltext"] = r.get("evidence_level") == "FULLTEXT"
         r.pop("fulltext_text", None)
         if r.get("score_status") != "ok" or r.get("relevance") is None:
+            status = r.get("processing_status") or ""
+            if r.get("score_status") == "failed":
+                r["hold_reason"] = "评分失败"
+                holds["failed"] += 1
+            elif status == "needs_date":
+                r["hold_reason"] = "日期待核验"
+                holds["quarantined"] += 1
+            elif status in ("outside_window", "historical"):
+                r["hold_reason"] = "超出采集窗口"
+                holds["quarantined"] += 1
+            elif status == "invalid_date":
+                r["hold_reason"] = "日期无效"
+                holds["quarantined"] += 1
+            else:
+                r["hold_reason"] = "排队等评分预算"
+                holds["queued"] += 1
             processing.append(r)
             continue
         score = float(r["relevance"])
@@ -424,6 +441,9 @@ def _today_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
             "notable": len(buckets["notable"]),
             "browse": len(buckets["browse"]),
             "processing": len(processing),
+            "queued": holds["queued"],
+            "failed": holds["failed"],
+            "quarantined": holds["quarantined"],
         },
         "buckets": buckets,
         "processing": processing[:50],
