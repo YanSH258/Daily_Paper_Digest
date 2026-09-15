@@ -101,8 +101,10 @@ class SourceSyncP0Tests(TestCase):
             f = JournalFetcher({'journals': [
                 {'id': 3, 'name': 'AX1', 'source_type': 'arxiv', 'query': 'cat:x'},
                 {'id': 4, 'name': 'AX2', 'source_type': 'arxiv', 'query': 'cat:y'}]})
-            with patch.object(JournalFetcher, '_fetch_arxiv_source', side_effect=AssertionError('must not fetch')):
+            with patch('integrations.arxiv.fetch_feed',
+                       side_effect=AssertionError('must not fetch during cooldown')) as feed:
                 f.fetch_all()
+            feed.assert_not_called()
             self.assertEqual(len(f.source_results), 2)
             self.assertFalse(any(r['success'] for r in f.source_results))
             self.assertIn('arxiv rate-limit cooldown', f.source_results[1]['error'])
@@ -110,11 +112,12 @@ class SourceSyncP0Tests(TestCase):
             arxiv._cooldown_until = old
 
     @patch('integrations.arxiv.time.sleep')
-    @patch('integrations.arxiv.requests.get')
+    @patch('integrations.arxiv._session.get')
     def test_arxiv_429_capped_backoff_then_success(self, get, sleep):
         from integrations import arxiv
         old = arxiv._cooldown_until
-        arxiv._cooldown_until = 0.0
+        old_interval, old_last = arxiv.MIN_INTERVAL_SECONDS, arxiv._last_request_at
+        arxiv._cooldown_until, arxiv.MIN_INTERVAL_SECONDS, arxiv._last_request_at = 0.0, 0.0, None
         try:
             ok = Mock(status_code=200, headers={})
             ok.__enter__ = Mock(return_value=ok)
@@ -131,6 +134,7 @@ class SourceSyncP0Tests(TestCase):
             self.assertLessEqual(max(waited), arxiv.MAX_COOLDOWN_SECONDS + 1)
         finally:
             arxiv._cooldown_until = old
+            arxiv.MIN_INTERVAL_SECONDS, arxiv._last_request_at = old_interval, old_last
 
     def test_source_groups_run_concurrently(self):
         import threading
@@ -140,21 +144,59 @@ class SourceSyncP0Tests(TestCase):
         f = JournalFetcher({'journals': [
             {'id': 1, 'name': 'AX', 'source_type': 'arxiv', 'query': 'cat:x'},
             {'id': 2, 'name': 'OA', 'source_type': 'openalex', 'query': 'chem'}]})
-        def slow_arxiv(journal):
+        def slow_arxiv(entries, results):
             started.set()
             real_sleep(1.0)
-            finished['arxiv'] = real_sleep and __import__('time').monotonic()
-            return []
+            finished['arxiv'] = __import__('time').monotonic()
         def fast_openalex(journal):
             if not started.wait(timeout=5):
                 raise AssertionError('openalex group blocked behind arxiv group')
             finished['openalex'] = __import__('time').monotonic()
             return []
-        with patch.object(JournalFetcher, '_fetch_arxiv_source', side_effect=slow_arxiv), \
+        with patch.object(JournalFetcher, '_fetch_arxiv_group', side_effect=slow_arxiv), \
              patch.object(JournalFetcher, '_fetch_openalex_source', side_effect=fast_openalex):
             f.fetch_all()
         # OpenAlex completes while arXiv is still sleeping: groups overlap.
         self.assertLess(finished['openalex'], finished['arxiv'])
+
+    @patch('integrations.arxiv.fetch_feed')
+    def test_arxiv_sources_merged_into_one_request(self, fetch_feed):
+        import feedparser
+        fetch_feed.return_value = feedparser.parse(
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><title>t</title></feed>')
+        f = JournalFetcher({'_run_date': '2026-09-15', 'fetcher': {'date_filter_days': 3}, 'journals': [
+            {'id': 35, 'name': 'AX1', 'source_type': 'arxiv', 'query': 'cat:cond-mat.mtrl-sci'},
+            {'id': 36, 'name': 'AX2', 'source_type': 'arxiv',
+             'query': 'cat:cond-mat.mtrl-sci AND all:"machine learning potential"'}]})
+        f.fetch_all()
+        self.assertEqual(fetch_feed.call_count, 1, 'merged arXiv sources must issue one request')
+        url = fetch_feed.call_args.args[0]
+        self.assertIn('%28cat%3Acond-mat.mtrl-sci%29', url)          # first query, parenthesised
+        self.assertIn('%20OR%20', url)                                # OR-joined
+        self.assertIn('submittedDate', url)
+        self.assertEqual({r['source_id'] for r in f.source_results}, {35, 36})
+        self.assertTrue(all(r['success'] for r in f.source_results))
+
+    @patch('integrations.arxiv.time.sleep')
+    @patch('integrations.arxiv._session.get')
+    def test_arxiv_request_pacing_respects_min_interval(self, get, sleep):
+        from integrations import arxiv
+        old_interval = arxiv.MIN_INTERVAL_SECONDS
+        old_last = arxiv._last_request_at
+        old_cd = arxiv._cooldown_until
+        arxiv.MIN_INTERVAL_SECONDS, arxiv._cooldown_until = 3.0, 0.0
+        try:
+            ok = Mock(status_code=200, headers={}, content=b'<feed/>')
+            ok.__enter__ = Mock(return_value=ok)
+            ok.__exit__ = Mock(return_value=False)
+            get.return_value = ok
+            arxiv.fetch_feed('https://export.arxiv.org/api/query?x', timeout=5)
+            arxiv._last_request_at = __import__('time').monotonic()   # pretend just fetched
+            arxiv.fetch_feed('https://export.arxiv.org/api/query?y', timeout=5)
+            paced = [c.args[0] for c in sleep.call_args_list if c.args]
+            self.assertTrue(any(2 < w <= 3.1 for w in paced), paced)
+        finally:
+            arxiv.MIN_INTERVAL_SECONDS, arxiv._last_request_at, arxiv._cooldown_until = old_interval, old_last, old_cd
 
     def test_tracking_failure_and_truncation_do_not_advance(self):
         db = Mock()

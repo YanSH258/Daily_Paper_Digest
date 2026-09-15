@@ -446,6 +446,7 @@ class JournalFetcher:
         self._request_manager = RequestManager(config=config)
         from integrations import arxiv, openalex
         openalex.configure(config)
+        arxiv.configure(config)
         self._browser_lock = threading.Lock()
         self.source_results: list[dict[str, Any]] = []
         self._status_local = threading.local()
@@ -565,14 +566,99 @@ class JournalFetcher:
 
         group_threads = [
             threading.Thread(target=_run_group, args=(jobs, workers))
-            for jobs, workers in ((other_jobs, concurrency),
-                                  (openalex_jobs, 1), (arxiv_jobs, 1)) if jobs
+            for jobs, workers in ((other_jobs, concurrency), (openalex_jobs, 1)) if jobs
         ]
+        if arxiv_jobs:
+            # One combined arXiv query per run: few requests is what keeps arXiv happy.
+            group_threads.append(threading.Thread(
+                target=self._fetch_arxiv_group, args=(arxiv_jobs, results)))
         for thread in group_threads:
             thread.start()
         for thread in group_threads:
             thread.join()
         return [a for r in results for a in r]
+
+    def _fetch_arxiv_group(self, entries: list[tuple[int, dict]], results: list[list[dict]]) -> None:
+        """Fetch every arXiv subscription with ONE combined OR query.
+
+        arXiv's ToU allow one request per three seconds, so the cheapest fix is
+        to make fewer requests: all category/keyword queries are OR-ed together
+        and share the same submittedDate window. Per-journal results still get
+        their own source_result record so their cursors advance, but the
+        articles are attributed once to the first journal to avoid N-fold
+        duplication; provenance carries every merged journal id.
+        """
+        journals = [journal for _, journal in entries]
+        queries = [str(j.get("query") or j.get("rss") or "").strip() for j in journals]
+        queries = [q for q in dict.fromkeys(queries) if q]
+        names = [j.get("name") or "arXiv" for j in journals]
+        ids = [j.get("id") for j in journals]
+        started_at = datetime.now().isoformat()
+        window_start = (self._window_date - timedelta(days=max(0, self.date_filter_days - 1))).strftime("%Y%m%d")
+        window_end = self._window_date.strftime("%Y%m%d")
+        per_max = min(2000, max((int(j.get("max_articles", self.max_per_journal)) for j in journals), default=self.max_per_journal))
+
+        if not queries:
+            for _idx, journal in entries:
+                self._record_arxiv_result(journal, started_at, window_start, window_end,
+                                          success=True, complete=True)
+            return
+        if arxiv.is_cooling_down():
+            error = "skipped: arxiv rate-limit cooldown active"
+            logger.warning("  %s", error)
+            for _idx, journal in entries:
+                self._record_arxiv_result(journal, started_at, window_start, window_end,
+                                          success=False, error=error)
+            return
+
+        combined = " OR ".join(f"({q})" for q in queries)
+        query = f"({combined}) AND submittedDate:[{window_start}0000 TO {window_end}2359]"
+        url = (f"https://export.arxiv.org/api/query?search_query={quote(query)}"
+               f"&sortBy=submittedDate&sortOrder=descending&max_results={per_max}")
+        try:
+            feed = arxiv.fetch_feed(url, timeout=max(self.timeout, 30))
+            raw_count = len(feed.entries)
+            complete = raw_count < per_max
+            articles = []
+            for entry in feed.entries[:per_max]:
+                art = self._parse_entry(entry, names[0], "arXiv")
+                if not art:
+                    continue
+                art["url"] = entry.get("link", art.get("url", ""))
+                art["date_source"] = "arxiv_first_submitted"
+                primary = ((entry.get("arxiv_primary_category") or {}).get("term") or "").strip()
+                art["journal"] = primary or art.get("journal") or names[0]
+                art["_sources"] = [f"journal:{jid}" for jid in ids if jid]
+                articles.append(art)
+            articles = self._apply_date_filter(articles)
+            if entries:
+                # Attribute the merged result once; other journals keep their cursor record.
+                results[entries[0][0]] = articles
+            for _idx, journal in entries:
+                self._record_arxiv_result(journal, started_at, window_start, window_end,
+                                          success=True, raw_count=raw_count, complete=complete,
+                                          returned_count=len(articles))
+            logger.info("正在抓取: %s → %d 篇（合并 %d 个 arXiv 订阅）",
+                        names[0], len(articles), len(entries))
+        except Exception as exc:  # noqa: BLE001 - 单组失败不阻断其他来源
+            logger.error("  arXiv 合并抓取失败: %s", exc)
+            for _idx, journal in entries:
+                self._record_arxiv_result(journal, started_at, window_start, window_end,
+                                          success=False, error=str(exc))
+
+    def _record_arxiv_result(self, journal: dict, started_at: str, window_start: str,
+                             window_end: str, *, success: bool, raw_count: int = 0,
+                             complete: bool = False, returned_count: int = 0,
+                             error: Optional[str] = None) -> None:
+        """Append one source_result so each merged journal's cursor can advance."""
+        self.source_results.append({
+            "source_id": journal.get("id"), "id": journal.get("id"),
+            "success": success, "complete": bool(success and complete),
+            "truncated": bool(success and not complete),
+            "next_cursor": None,
+            "window_start": window_start, "window_end": window_end,
+            "started_at": started_at, "raw_count": raw_count,
+            "returned_count": returned_count, "error": error})
 
     def _fetch_arxiv_source(self, journal: dict) -> list[dict]:
         """arXiv API 分类订阅（query 如 cat:cond-mat.mtrl-sci）。"""

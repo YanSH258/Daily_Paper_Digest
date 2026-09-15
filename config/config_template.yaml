@@ -70,6 +70,7 @@ fetcher:
   request_timeout: 15            # 请求超时秒数
   retry_times: 3                 # 失败重试次数
   delay_between_requests: 2      # 请求间隔秒数（避免频繁访问）
+  arxiv_min_interval_seconds: 3  # arXiv ToU：每次请求间隔不少于 3 秒（多个 arXiv 订阅会合并为一次查询）
 
 # ---------- 输出与邮件推送设置 ----------
 output:

@@ -1,9 +1,11 @@
-"""arXiv API access with a process-wide throttle and capped backoff.
+"""arXiv API access: proactive pacing, shared cooldown, capped backoff.
 
-arXiv asks clients to serialize requests and slams sustained callers with 429.
-Like the OpenAlex path, every wait is capped so one slow source can never
-stall the whole collection stage, and sibling sources fast-fail while a
-cooldown is active.
+arXiv's Terms of Use ask clients to "make no more than one request every three
+seconds, and limit requests to a single connection at a time"; exceeding that
+gets the client throttled or blocked rather than handed a usable Retry-After.
+So this module paces requests *before* they are sent (like lukasschwab/arxiv.py
+does with delay_seconds) instead of only reacting to 429, reuses one Session,
+and still caps every wait so a throttled source cannot stall collection.
 """
 import email.utils
 import logging
@@ -21,6 +23,10 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 _cooldown_lock = threading.Lock()
 _cooldown_until = 0.0
+_last_request_at: Optional[float] = None
+_session = requests.Session()
+# arXiv ToU: no more than one request every three seconds, one connection.
+MIN_INTERVAL_SECONDS = 3.0
 # Raw Retry-After values can be enormous; waiting the raw value would serialize
 # the whole pipeline, so every sleep and the shared cooldown share this cap.
 MAX_COOLDOWN_SECONDS = 60.0
@@ -42,6 +48,31 @@ def _retry_after(value: Optional[str]) -> Optional[float]:
             return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
         except (TypeError, ValueError, OverflowError):
             return None
+
+
+def configure(config: Optional[dict[str, Any]] = None) -> None:
+    """Read the optional pacing override (`fetcher.arxiv_min_interval_seconds`)."""
+    global MIN_INTERVAL_SECONDS
+    value = ((config or {}).get("fetcher") or {}).get("arxiv_min_interval_seconds")
+    try:
+        MIN_INTERVAL_SECONDS = max(0.0, float(value)) if value is not None else 3.0
+    except (TypeError, ValueError):
+        MIN_INTERVAL_SECONDS = 3.0
+
+
+def _wait_pacing() -> None:
+    """Keep at least MIN_INTERVAL_SECONDS between requests (arXiv ToU)."""
+    global _last_request_at
+    with _cooldown_lock:
+        now = time.monotonic()
+        wait = 0.0
+        if _last_request_at is not None and MIN_INTERVAL_SECONDS > 0:
+            wait = max(0.0, MIN_INTERVAL_SECONDS - (now - _last_request_at))
+    if wait:
+        logger.debug("arXiv 节流等待 %.2fs（ToU 最小间隔）", wait)
+        time.sleep(wait)
+    with _cooldown_lock:
+        _last_request_at = time.monotonic()
 
 
 def _set_cooldown(seconds: float) -> None:
@@ -75,8 +106,9 @@ def fetch_feed(url: str, *, timeout: int = 30) -> Any:
         retry_wait = 0.0
         with _lock:
             _wait_cooldown()
+            _wait_pacing()
             try:
-                with requests.get(url, timeout=timeout) as response:
+                with _session.get(url, timeout=timeout) as response:
                     if response.status_code == 429:
                         retry_wait = (_retry_after(response.headers.get("Retry-After"))
                                       or 2 ** (attempt + 1) + random.uniform(0, 1))
