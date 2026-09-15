@@ -4,10 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import time
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+
+import requests
 
 from processing import admission_decision
 
@@ -149,6 +152,84 @@ def restore(db, batch_id):
         conn.close()
 
 
+def _crossref_date(doi, mailto, timeout=15):
+    """Fallback date lookup via Crossref (polite pool via UA mailto)."""
+    try:
+        response = requests.get(f"https://api.crossref.org/works/{doi}",
+                                headers={"User-Agent": f"Daily-Paper-Digest/0.1 (mailto:{mailto})"},
+                                timeout=timeout)
+        if response.status_code != 200:
+            return None, None
+        message = response.json().get("message", {})
+        for field in ("published-online", "published-print", "issued"):
+            parts = (message.get(field) or {}).get("date-parts") or []
+            if parts and parts[0] and len(parts[0]) == 3:
+                y, m, d = parts[0]
+                return f"{y:04d}-{m:02d}-{d:02d}", "crossref_" + field
+        return None, None
+    except Exception:
+        return None, None
+
+
+def fix_dates(db, run_date, timezone_name="Asia/Shanghai", days=3, limit=100,
+              email="", api_key="", crossref=True):
+    """Verify quarantined (needs_date) articles by DOI metadata lookup.
+
+    OpenAlex singleton first (1 credit each), Crossref as fallback. Resolved
+    dates are written back and the article is re-admitted under the same
+    window rules; unresolved ones stay quarantined.
+    """
+    from integrations import openalex as oa
+    oa.set_polite_email(email or "your@email.com")
+    oa.set_api_key(api_key)
+    config = {"scheduler": {"timezone": timezone_name}, "fetcher": {"date_filter_days": days}}
+    conn = _connect(db, writable=True)
+    stats = {"checked": 0, "resolved": 0, "eligible": 0, "outside_window": 0,
+             "invalid_date": 0, "unresolved": 0, "skipped_user_or_scored": 0}
+    try:
+        rows = conn.execute(
+            "SELECT id, doi FROM articles WHERE processing_status='needs_date' "
+            "AND doi IS NOT NULL AND trim(doi) != '' "
+            "AND COALESCE(score_status,'') NOT IN ('ok','success') AND COALESCE(processed,0)=0 "
+            "ORDER BY id LIMIT ?", (int(limit),)).fetchall()
+        for row in rows:
+            doi = row["doi"].strip()
+            stats["checked"] += 1
+            if oa.is_cooling_down():
+                oa._wait_cooldown()
+            source = "openalex_doi_lookup"
+            work = oa.get_work_by_doi(doi)
+            pub = (work or {}).get("pub_date") or ""
+            if not pub:
+                if crossref:
+                    time.sleep(1.0)  # Crossref polite interval
+                    pub, source = _crossref_date(doi, email or "your@email.com")
+            if not pub:
+                stats["unresolved"] += 1
+                continue
+            current = conn.execute(
+                "SELECT processing_status, score_status, processed FROM articles WHERE id=?",
+                (row["id"],)).fetchone()
+            if not current or current["processing_status"] != "needs_date" \
+                    or current["score_status"] in ("ok", "success") or current["processed"]:
+                stats["skipped_user_or_scored"] += 1
+                continue
+            decision = admission_decision({"pub_date": pub, "date_source": source}, run_date, config)
+            new_status = decision["decision"]
+            conn.execute(
+                "UPDATE articles SET pub_date=?, processing_status=?, processing_reason=?, "
+                "date_source=?, admitted_at=COALESCE(admitted_at, ?) WHERE id=?",
+                (decision.get("publication_date") or pub, new_status,
+                 f"date verified: {decision['reason']} ({source})",
+                 source, datetime.now(timezone.utc).isoformat(timespec="seconds"), row["id"]))
+            stats["resolved"] += 1
+            stats[new_status] = stats.get(new_status, 0) + 1
+        conn.commit()
+        return stats
+    finally:
+        conn.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', required=True)
@@ -158,11 +239,20 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--restore')
+    mode.add_argument('--fix-dates', action='store_true',
+                      help='按 DOI 补查待核验文章的发表日期并重新准入')
+    parser.add_argument('--limit', type=int, default=100)
+    parser.add_argument('--email', default='')
+    parser.add_argument('--api-key', default='')
+    parser.add_argument('--no-crossref', action='store_true')
     args = parser.parse_args(argv)
-    if not args.restore and not args.date:
+    if (not args.restore and not args.date) and not args.fix_dates:
         parser.error('--date is required for preview/apply')
     if args.restore:
         result = {'restored': restore(args.db, args.restore)}
+    elif args.fix_dates:
+        result = fix_dates(args.db, args.date, args.timezone, args.days, args.limit,
+                           args.email, args.api_key, crossref=not args.no_crossref)
     elif args.apply:
         result = apply(args.db, args.date, args.timezone, args.days)
     else:
