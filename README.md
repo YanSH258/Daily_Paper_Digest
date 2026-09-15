@@ -70,7 +70,9 @@ PYTHONPATH="src:.deps" python src/web_server.py --config config/config.yaml --ho
 
 主要页面：今日精选、文献库、阅读清单、研究专题、趋势、日报与周报、追踪、订阅、任务、设置。
 
-本机默认可直接使用；API Token 可在「设置」中启用（保存后浏览器会记住）。调度设置支持严格的 `HH:MM` 和 IANA 时区（如 `Asia/Shanghai`）。详见 `AGENTS.md`。
+本机默认可直接使用；API Token 可在「设置」中启用。调度设置支持严格的 `HH:MM` 和 IANA 时区（如 `Asia/Shanghai`）。详见 `AGENTS.md`。
+
+**Token 与访问地址**：Token 只在需要时配置。只监听本机（`--host 127.0.0.1`）时无需 Token；显式监听非本机地址时**必须**配置 `web.api_token` 或 `WEB_API_TOKEN`，否则拒绝启动。浏览器把 Token 存在 localStorage，而 localStorage 按**源**隔离——`http://localhost:8080` 与 `http://127.0.0.1:8080` 属于不同源，所以请固定用一个地址打开控制台，否则需要重新连接。Token 不匹配时页面会明确提示去「设置 → 输入服务端 Token」重新连接。
 
 ### 开发环境
 

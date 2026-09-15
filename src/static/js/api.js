@@ -38,6 +38,9 @@ const API = {
       err.status = res.status;
       if (res.status === 401) {
         err.needToken = true;
+        err.message = this.token()
+          ? "服务端 Token 未通过：可能已在服务端变更，请到「设置 → 输入服务端 Token」重新连接"
+          : "服务端已启用 Token：请到「设置 → 输入服务端 Token」填入后连接（本机使用可留空服务端 Token）";
       }
       throw err;
     }
