@@ -32,8 +32,11 @@ class FakeFetcher:
     def __init__(self, config):
         pass
 
-    def fetch_all(self, health_callback=None):
+    def fetch_all(self, health_callback=None, deadline=None):
         return [dict(a) for a in ARTICLES]
+
+    def close(self):
+        pass
 
     def fetch_fulltext_batch(self, arts):
         return [

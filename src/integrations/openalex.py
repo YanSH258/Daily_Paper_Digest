@@ -257,7 +257,8 @@ def get_author_recent_works(openalex_id: str, from_date: str, limit: int = 25) -
     return _work_list(data, limit)
 
 
-def search_works_page(query: str, from_date: str = "", limit: int = 50, *, to_date: str = "", cursor: str = "*") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def search_works_page(query: str, from_date: str = "", limit: int = 50, *, to_date: str = "",
+                      cursor: str = "*", timeout: int = 20) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Return one OpenAlex page and its completeness metadata."""
     if not query:
         return [], {"complete": True, "truncated": False, "next_cursor": None, "raw_count": 0}
@@ -266,7 +267,8 @@ def search_works_page(query: str, from_date: str = "", limit: int = 50, *, to_da
     to_day = _normalize_from_date(to_date)
     if from_day: filt += f",from_publication_date:{from_day}"
     if to_day: filt += f",to_publication_date:{to_day}"
-    data = _get("/works", {"filter": filt, "sort": "publication_date:desc", "per-page": min(limit, 200), "cursor": cursor}) or {}
+    data = _get("/works", {"filter": filt, "sort": "publication_date:desc",
+                           "per-page": min(limit, 200), "cursor": cursor}, timeout=timeout) or {}
     works = [_normalize_work(w) for w in (data.get("results") or [])]
     meta = data.get("meta") or {}
     nxt = meta.get("next_cursor")

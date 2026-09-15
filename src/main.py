@@ -15,8 +15,10 @@ main.py - 主入口
 import os
 import sys
 import copy
+import json
 import uuid
 import time
+import threading
 import hashlib
 import logging
 import argparse
@@ -338,10 +340,34 @@ def dedupe_batch(articles: list[dict]) -> list[dict]:
     return unique
 
 
-def preview_collection(config: dict, date_str: str) -> dict:
-    """采集预检只读文章库，不构造 Database 或模型，也不推进游标。"""
+def _preview_cache_path(config: dict, date_str: str) -> Path:
+    """Cache location for preview reuse; overridable to keep tests off real data."""
+    configured = (config.get("fetcher") or {}).get("preview_cache_dir")
+    if configured:
+        cache_dir = Path(configured).expanduser()
+    else:
+        from utils.paths import resolve_against_root
+        cache_dir = resolve_against_root("data/cache")
+    return cache_dir / f"preview-{date_str}.json"
+
+
+def preview_collection(config: dict, date_str: str, *, refresh: bool = False) -> dict:
+    """采集预检只读文章库，不构造 Database 或模型，也不推进游标。
+
+    同一天的成功结果会缓存复用，避免重复预览时反复请求外部来源；
+    refresh=True 强制重新采集。
+    """
     import sqlite3
     from processing import admission_decision, build_queue, validate_budget
+    cache_path = _preview_cache_path(config, date_str)
+    if not refresh:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("date") == date_str and isinstance(cached.get("result"), dict):
+                return {**cached["result"], "cached": True,
+                        "cached_at": cached.get("created_at")}
+        except (OSError, ValueError):
+            pass
     config = copy.deepcopy(config)
     config["_run_date"] = date_str
     path = Path(config["database"]["path"]).resolve()
@@ -390,11 +416,22 @@ def preview_collection(config: dict, date_str: str) -> dict:
     selected = build_queue(pending, config, validate_budget(config))
     result.update(score_queue_total=len(pending), score_planned=len(selected),
                   score_deferred=len(pending) - len(selected))
+    # Only cache fully successful collections; partial runs should be re-tried.
+    failed = sum(1 for s in sources if not s.get("success"))
+    incomplete = sum(1 for s in sources if s.get("success") and not s.get("complete"))
+    if not failed and not incomplete:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(
+                {"date": date_str, "created_at": datetime.now().isoformat(timespec="seconds"),
+                 "result": result}, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            logger.debug("写入预览缓存失败: %s", exc)
     return result
 
 
 def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str] = None,
-             *, trial: bool = False, preview: bool = False) -> dict:
+             *, trial: bool = False, preview: bool = False, refresh: bool = False) -> dict:
     """执行一次完整流水线，返回结构化运行结果。
 
     分阶段状态实时落库（score_status / evidence_level / analysis_status），
@@ -406,7 +443,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     date_str = date_str or datetime.now(get_scheduler_timezone(config)).strftime("%Y-%m-%d")
     config["_run_date"] = date_str
     if preview:
-        return preview_collection(config, date_str)
+        return preview_collection(config, date_str, refresh=refresh)
     threshold = config.get("relevance_threshold", 5)
     retry_window_days = int(config.get("fetcher", {}).get("retry_window_days", 7))
     processing_cfg = config.get("processing", {}) or {}
@@ -469,24 +506,51 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             db.task_finish(task_id, status="running", stats=stats, stage=stage)
 
     try:
-        # ── Step 1: 抓取 RSS ──────────────────────────────────
+        # ── Step 1: 抓取订阅源（与追踪并行，受总预算约束）──────
         logger.info("Step 1: 抓取期刊 RSS")
-        source_health = {}
+        budget_seconds = int((config.get("fetcher") or {}).get("collection_budget_seconds", 300) or 0)
+        deadline = time.monotonic() + budget_seconds if budget_seconds > 0 else None
+        stats["collection_budget_seconds"] = budget_seconds
+        source_health: dict[Any, Any] = {}
+        tracking_box: dict[str, Any] = {}
+        tracking_thread: Optional[threading.Thread] = None
+
+        def _collect_tracking() -> None:
+            try:
+                tracking_box["articles"], tracking_box["meta"] = collect_tracking_articles(config, db)
+            except Exception as exc:  # noqa: BLE001 - 追踪失败不阻断日常流水线
+                tracking_box["error"] = str(exc)
+
+        # Tracking hits the same throttled APIs, so run it alongside collection
+        # instead of serializing it after; a stuck tracker must not block Step 1.
+        if config.get("tracking", {}).get("enabled", True):
+            tracking_thread = threading.Thread(target=_collect_tracking, daemon=True)
+            tracking_thread.start()
+
         raw_articles = fetcher.fetch_all(
-            health_callback=lambda jid, ok, err="": source_health.update({jid: (ok, err)})
+            health_callback=lambda jid, ok, err="": source_health.update({jid: (ok, err)}),
+            deadline=deadline,
         )
         stats["fetched_rss"] = len(raw_articles)
         stats["fetched_raw"] = len(raw_articles)
         logger.info(f"  来源共抓取: {len(raw_articles)} 篇原始文章")
+
         # ── Step 1.2: 引文/作者追踪采集 ───────────────────────
         tracking_articles, tracking_meta = [], {}
-        if config.get("tracking", {}).get("enabled", True):
-            try:
-                tracking_articles, tracking_meta = collect_tracking_articles(config, db)
-            except Exception as e:  # noqa: BLE001 - 追踪失败不阻断日常流水线
-                logger.error(f"追踪采集失败: {e}")
-            if tracking_articles:
-                logger.info(f"  追踪采集: 引文/作者新文章 {len(tracking_articles)} 篇")
+        if tracking_thread is not None:
+            remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
+            tracking_thread.join(timeout=remaining)
+            if tracking_thread.is_alive():
+                # No cursors advance: the window stays queued for the next run.
+                logger.warning("追踪采集超出 Step 1 预算，本次跳过（游标不推进，下次重试）")
+                stats["tracking_skipped"] = "collection budget exceeded"
+            elif tracking_box.get("error"):
+                logger.error(f"追踪采集失败: {tracking_box['error']}")
+            else:
+                tracking_articles = tracking_box.get("articles") or []
+                tracking_meta = tracking_box.get("meta") or {}
+                if tracking_articles:
+                    logger.info(f"  追踪采集: 引文/作者新文章 {len(tracking_articles)} 篇")
         raw_articles = list(raw_articles) + list(tracking_articles)
         stats["fetched"] = len(raw_articles)
         stats["fetched_raw"] = sum(r.get("raw_count", 0) for r in getattr(fetcher, "source_results", [])) + len(tracking_articles) if getattr(fetcher, "source_results", []) else len(raw_articles)
@@ -1113,6 +1177,8 @@ def main():
     process_mode = parser.add_mutually_exclusive_group()
     process_mode.add_argument("--trial", action="store_true", help="小批量评分试运行，不生成正式日报或推送")
     process_mode.add_argument("--collect-preview", action="store_true", help="只读采集预览，不调用模型或写入业务库")
+    parser.add_argument("--refresh", action="store_true",
+                        help="忽略当日预览缓存，强制重新采集（与 --collect-preview 同用）")
     args = parser.parse_args()
     if args.dry_run and not args.import_sources:
         parser.error("--dry-run 必须与 --import-sources 配合；采集预览使用 --collect-preview")
@@ -1161,7 +1227,8 @@ def main():
     config = load_config(args.config)
     if args.collect_preview:
         import json
-        print(json.dumps(run_once(config, args.date, preview=True), ensure_ascii=False, indent=2))
+        print(json.dumps(run_once(config, args.date, preview=True, refresh=args.refresh),
+                         ensure_ascii=False, indent=2))
         return
     validate_config(config)
 

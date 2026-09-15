@@ -450,7 +450,15 @@ class JournalFetcher:
         self._browser_lock = threading.Lock()
         self.source_results: list[dict[str, Any]] = []
         self._status_local = threading.local()
+        self._deadline: Optional[float] = None
         self._window_date = self._configured_run_date()
+
+    def _request_timeout(self, floor: int = 5) -> int:
+        """Clamp a request timeout to whatever is left of the collection budget."""
+        if self._deadline is None:
+            return self.timeout
+        remaining = self._deadline - time.monotonic()
+        return max(floor, min(self.timeout, int(remaining)))
 
     def _configured_run_date(self) -> date:
         value = self.config.get("_run_date") or (self.config.get("processing", {}) or {}).get("run_date") or self.config.get("run_date")
@@ -476,12 +484,15 @@ class JournalFetcher:
             self._status_local.value = status
         return status
 
-    def fetch_all(self, health_callback=None) -> list[dict]:
+    def fetch_all(self, health_callback=None, deadline: Optional[float] = None) -> list[dict]:
         """并发抓取所有订阅源（RSS / arXiv / OpenAlex 检索式）。
 
         health_callback(journal_id, ok, error="") 用于更新源健康度。
+        deadline（time.monotonic 基准）用于限制整个采集阶段的时长：超时后
+        剩余来源标记为 skipped 并保留游标待下次补采，而不是让任务无限等待。
         """
         journals = self.config.get("journals", [])
+        self._deadline = deadline
         self.source_results = []
         concurrency = max(1, int((self.config.get("performance", {}) or {})
                                  .get("rss_concurrency", 4)))
@@ -493,6 +504,17 @@ class JournalFetcher:
             source_type = journal.get("source_type", "rss")
             # Batch fast-fail: skip remaining throttled sources while a sibling
             # 429 cooldown is active; cursors stay and next run re-collects.
+            if self._deadline is not None and time.monotonic() > self._deadline:
+                error = "skipped: collection budget exceeded"
+                logger.warning(f"  {name} {error}")
+                self.source_results.append({"source_id": journal.get("id"), "id": journal.get("id"),
+                                            "success": False, "complete": False, "truncated": False,
+                                            "next_cursor": None, "window_start": None, "window_end": None,
+                                            "started_at": None, "raw_count": 0, "returned_count": 0,
+                                            "error": error})
+                if health_callback and journal.get("id"):
+                    health_callback(journal["id"], False, error)
+                return
             throttled = {"openalex": openalex, "arxiv": arxiv}.get(source_type)
             if throttled is not None and throttled.is_cooling_down():
                 error = f"skipped: {source_type} rate-limit cooldown active"
@@ -618,7 +640,7 @@ class JournalFetcher:
         articles: list[dict] = []
         seen: set[str] = set()
         for category in categories:
-            feed = arxiv.fetch_rss(category, timeout=max(self.timeout, 30))
+            feed = arxiv.fetch_rss(category, timeout=max(self._request_timeout(), 15))
             keyword_groups = [phrases for cats, phrases in parsed if category in cats]
             for entry in list(feed.entries)[:per_max]:
                 announce = str(entry.get("arxiv_announce_type") or "").strip().lower()
@@ -699,7 +721,7 @@ class JournalFetcher:
         url = (f"https://export.arxiv.org/api/query?search_query={quote(query)}"
                f"&sortBy=submittedDate&sortOrder=descending&max_results={per_max}")
         try:
-            feed = arxiv.fetch_feed(url, timeout=max(self.timeout, 30))
+            feed = arxiv.fetch_feed(url, timeout=max(self._request_timeout(), 15))
             raw_count = len(feed.entries)
             complete = raw_count < per_max
             articles = []
@@ -781,7 +803,8 @@ class JournalFetcher:
         ).isoformat()
         works, page_meta = oa.search_works_page(query, from_date=from_date,
                                 to_date=self._window_date.isoformat(),
-                                limit=int(journal.get("max_articles", self.max_per_journal)))
+                                limit=int(journal.get("max_articles", self.max_per_journal)),
+                                timeout=self._request_timeout())
         articles = []
         self._source_status().update({"window_start": from_date, "window_end": self._window_date.isoformat(),
                                          "raw_count": page_meta.get("raw_count", len(works)),
@@ -811,7 +834,7 @@ class JournalFetcher:
         articles, total = journal_works_page(
             (journal.get("query") or "").strip(),
             limit=int(journal.get("max_articles", self.max_per_journal)),
-            days=self.date_filter_days, timeout=self.timeout, today=self._window_date,
+            days=self.date_filter_days, timeout=self._request_timeout(), today=self._window_date,
         )
         self._source_status().update({"raw_count": len(articles),
                                          "truncated": total is None or total > len(articles),

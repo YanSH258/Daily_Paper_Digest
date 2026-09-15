@@ -14,10 +14,10 @@ class P0ModeTests(unittest.TestCase):
             self.assertTrue(ok)
         # The worker is intentionally exercised directly to avoid a race with Thread.start.
         with patch("web_server.run_once", return_value={}) as run_once:
-            runner._run_task("t", "manual", "light", None, "preview")
+            runner._run_task("t", "manual", "light", None, "preview", False)
             run_once.assert_called_once_with(
                 {"database": {"path": "/tmp/p0-test.db"}, "fetcher": {"use_fulltext": False}, "analyzer": {"analyze_abstract_only": False}},
-                date_str=None, task_id="t", trial=False, preview=True
+                date_str=None, task_id="t", trial=False, preview=True, refresh=False
             )
 
     def test_invalid_run_mode_is_rejected(self):

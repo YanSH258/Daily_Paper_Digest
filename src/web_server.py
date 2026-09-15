@@ -114,7 +114,7 @@ class TaskRunner:
         return cfg
 
     def start_run(self, trigger: str, mode: str = "default", date_str: Optional[str] = None,
-                  run_mode: str = "normal") -> tuple[bool, str]:
+                  run_mode: str = "normal", refresh: bool = False) -> tuple[bool, str]:
         if run_mode not in {"normal", "trial", "preview"}:
             return False, "run_mode 必须是 normal/trial/preview"
         with self._lock:
@@ -129,6 +129,7 @@ class TaskRunner:
                 "trigger": trigger,
                 "mode": mode,
                 "run_mode": run_mode,
+                "refresh": bool(refresh),
                 "started_at": datetime.now().isoformat(timespec="seconds"),
                 "ended_at": None,
                 "last_error": None,
@@ -137,14 +138,15 @@ class TaskRunner:
 
         thread = threading.Thread(
             target=self._run_task,
-            args=(task_id, trigger, mode, date_str, run_mode, config_snapshot),
+            args=(task_id, trigger, mode, date_str, run_mode, bool(refresh), config_snapshot),
             daemon=True,
         )
         thread.start()
         return True, task_id
 
     def _run_task(self, task_id: str, trigger: str, mode: str, date_str: Optional[str],
-                  run_mode: str = "normal", config_snapshot: Optional[dict[str, Any]] = None) -> None:
+                  run_mode: str = "normal", refresh: bool = False,
+                  config_snapshot: Optional[dict[str, Any]] = None) -> None:
         base = config_snapshot if config_snapshot is not None else copy.deepcopy(self._base_config)
         cfg = self._make_run_cfg(mode, base)
         success = False
@@ -162,7 +164,7 @@ class TaskRunner:
             else:
                 stats = run_once(
                     cfg, date_str=date_str, task_id=task_id,
-                    trial=run_mode == "trial", preview=run_mode == "preview",
+                    trial=run_mode == "trial", preview=run_mode == "preview", refresh=refresh,
                 )
             success = not (stats and stats.get("digest_overall_status") == "failed")
             if not success:
@@ -2298,6 +2300,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 ok, msg = self.ctx.runner.start_run(
                     trigger="manual", mode=mode, date_str=date_str, run_mode=run_mode,
+                    refresh=bool(data.get("refresh")),
                 )
                 if not ok:
                     self._json_response({"ok": False, "error": msg, "message": msg}, code=409)

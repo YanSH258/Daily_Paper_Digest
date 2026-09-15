@@ -62,6 +62,12 @@ arXiv Terms of Use 要求“每 3 秒不超过 1 次请求，且同时只使用 
 - **单连接**：复用同一个 `Session`，符合 ToU 的 single connection 要求。
 - 每个被合并的订阅仍各自写入一条 source_result，因此游标与健康状态照常推进；文章只归属首个订阅，来源信息通过 `_sources` 记录全部订阅 id。
 
+## 采集预算与并行
+
+- **Step 1 总预算**：`fetcher.collection_budget_seconds`（默认 300 秒，0 = 不限制）。超时后剩余来源标记为 `skipped: collection budget exceeded`，游标不推进，下次运行补采；请求超时也会收敛到剩余预算，避免单个慢来源吃满时间。
+- **追踪与采集并行**：引文/作者追踪与订阅抓取同时启动，而不是串行等待。追踪超出剩余预算时本次跳过并记录 `tracking_skipped`，游标不推进；追踪失败同样不阻断主流水线。
+- **预览缓存**：采集预览在同一天首次成功后写入 `data/cache/preview-<date>.json`；再次预览直接复用（结果含 `cached: true`），不再请求外部来源。含失败或不完整来源的结果不缓存，以便重试。CLI 用 `--refresh` 强制重新采集；Web `/api/run` 可传 `refresh: true`。
+
 ## 统计口径
 
 - `fetched_raw`：本次来源原始返回量（不是源历史总数）。

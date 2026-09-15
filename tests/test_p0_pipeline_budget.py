@@ -33,7 +33,7 @@ class P0PipelineTests(unittest.TestCase):
         class Fetcher:
             def __init__(self, config):
                 self.source_results = copy.deepcopy(owner.sources)
-            def fetch_all(self, health_callback=None):
+            def fetch_all(self, health_callback=None, deadline=None):
                 return copy.deepcopy(owner.articles)
             def close(self):
                 pass
