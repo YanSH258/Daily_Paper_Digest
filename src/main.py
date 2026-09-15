@@ -416,10 +416,12 @@ def preview_collection(config: dict, date_str: str, *, refresh: bool = False) ->
     selected = build_queue(pending, config, validate_budget(config))
     result.update(score_queue_total=len(pending), score_planned=len(selected),
                   score_deferred=len(pending) - len(selected))
-    # Only cache fully successful collections; partial runs should be re-tried.
+    # Truncation is normal (we keep the newest N), so only real failures block
+    # reuse: a failed source must be retried on the next preview.
     failed = sum(1 for s in sources if not s.get("success"))
     incomplete = sum(1 for s in sources if s.get("success") and not s.get("complete"))
-    if not failed and not incomplete:
+    result["source_incomplete"] = incomplete
+    if not failed:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(
