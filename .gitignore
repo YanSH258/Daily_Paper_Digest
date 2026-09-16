@@ -1,0 +1,71 @@
+# Python bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local pip --target deps
+.deps/
+
+# Test artifacts & pytest cache
+.pytest_cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Runtime / generated outputs
+output/
+data/output/
+
+# Local databases or other artifacts
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+*.backup-*.db
+data/db/*
+!data/db/.gitkeep
+.pipeline.lock
+
+# Build / dist
+*.egg-info/
+dist/
+build/
+config/config.yaml
+config/*.bak*
+
+*.csv
+
+# Logs & temp
+data/logs/
+*.log
+.zcode/
+
+# Local docs / plans / reviews (not for public repo)
+docs/
+
+
+# macOS
+.DS_Store
+config/maintenance.yaml
+
+# Private configuration: publish only reviewed examples and presets
+/config/*
+!/config/config_template.yaml
+!/config/source_presets.json
+/data/*
+!/data/db/
+/data/db/*
+!/data/db/.gitkeep
+.env
+.env.*
+!.env.example
+cookies.json
+/config/maintenance*

@@ -1,0 +1,131 @@
+# ============================================================
+# chem-daily 配置模板
+# 使用前请将此文件复制到 config/config.yaml 并填入你自己的 API Key
+# ============================================================
+
+# ---------- LLM 配置 ----------
+# provider 可任意命名（deepseek / qwen / zhipu / siliconflow 等），
+# 只要 llm.<provider> 下配置 api_key + base_url + model（OpenAI 兼容接口）即可
+llm:
+  provider: "deepseek"
+  deepseek:
+    api_key: "填入你的_DEEPSEEK_API_KEY"
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-flash"
+  qwen:
+    api_key: "填入你的_QWEN_API_KEY"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen-plus"
+
+  temperature: 0.3
+  max_tokens: 8192
+
+# ---------- 解读分析设置 ----------
+analyzer:
+  # 当未抓取到全文时，是否依然对高相关文章基于摘要进行深度解读 (默认 true)
+  analyze_abstract_only: true
+
+# ---------- 研究方向过滤 ----------
+# 请替换为你自己的研究方向关键词
+research_topics:
+- "machine learning interatomic potential"
+- "density functional theory DFT"
+- "molecular dynamics simulation"
+
+# 相关性分数阈值（0-10），低于此分数的文章不推送
+relevance_threshold: 4
+
+# ---------- 日报选择规则（Phase0 Top-N）----------
+# 不配置时使用与下方相同的默认值；显式非法值会在启动时被拒绝
+digest:
+  daily:
+    limit: 10                  # 每日入选数量
+    repeat_window_days: 30     # 防重窗口：30 天内已入选过的文章不再重复入选（0=关闭防重）
+    pool_window_days: 60       # 候选池时间窗口：只从报告日期前 60 天内的入库文章中选取
+    min_score: 5               # 候选池的相关性分数下限
+    category_limits:           # 类别配额（min/max），类别由评分规则自动归类
+      mlip:         {min: 2, max: 4}   # 机器学习势函数
+      ai_materials: {min: 1, max: 3}   # AI for materials
+      dft:          {min: 1, max: 3}   # DFT/第一性原理
+      llm_science:  {min: 0, max: 2}   # LLM for science
+      top_chemistry:  {min: 0, max: 3}   # 顶刊化学
+      other:        {min: 0, max: 2}
+
+
+# ---------- OpenAlex ----------
+# API key 非必需；无 key 时列表查询消耗免费额度（约 10 credits/次，100,000/天）
+openalex:
+  api_key: ""            # 也可用环境变量 OPENALEX_API_KEY 覆盖
+
+# ---------- 抓取设置 ----------
+processing:
+  max_score_articles_per_run: 100
+  trial_max_score_articles: 30
+
+fetcher:
+  use_fulltext: false  # 不抓全文，直接用摘要分析
+  use_browser: false
+  max_articles_per_journal: 100   # 每个期刊最多抓取文章数
+  date_filter_days: 3
+  request_timeout: 15            # 请求超时秒数
+  retry_times: 3                 # 失败重试次数
+  delay_between_requests: 2      # 请求间隔秒数（避免频繁访问）
+  arxiv_min_interval_seconds: 3  # arXiv ToU：每次请求间隔不少于 3 秒（多个 arXiv 订阅会合并为一次查询）
+  collection_budget_seconds: 300  # Step 1 采集总时长上限（秒）；超时跳过剩余来源并保留游标，0=不限制
+
+# ---------- 输出与邮件推送设置 ----------
+output:
+  formats: ["markdown", "html"]
+  output_dir: "data/output"
+  email:
+    enabled: false # 如果需要邮件推送，请改为 true 并填写下方信息
+    smtp_server: "smtp.163.com"
+    smtp_port: 465
+    username: "YOUR_EMAIL@163.com"
+    password: "YOUR_AUTH_CODE"
+    recipients:
+    - "TARGET_EMAIL@qq.com"
+
+  # 飞书 Webhook 推送（可选）
+  feishu:
+    enabled: false
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_TOKEN"
+
+
+# ---------- 调度设置 ----------
+scheduler:
+  run_time: "08:00"              # 每天运行时间
+  timezone: "Asia/Shanghai"
+
+# ---------- 数据库 ----------
+database:
+  path: "data/db/chem_daily.db"  # SQLite 数据库路径（用于去重）
+
+# ---------- 性能优化 ----------
+performance:
+  # 并发处理设置
+  concurrency: 5                # 全文抓取并发数（建议 3-10）
+  llm_concurrency: 3            # LLM 并发调用数（建议 2-5，受 API 限额影响）
+
+  # 速率限制
+  rate_limit:
+    global_rps: 5               # 全局每秒请求数上限
+    domain_limits:              # 针对特定域名的速率（每秒请求数）
+      "onlinelibrary.wiley.com": 1   # Wiley 限制严格
+      "pubs.acs.org": 2
+      "www.nature.com": 2
+      "pubs.rsc.org": 2
+
+  # 重试设置
+  retry:
+    max_attempts: 3              # 每层最大重试次数
+    backoff_factor: 1.5          # 指数退避系数（等待 backoff_factor^attempt 秒）
+    retry_status_codes: [403, 429, 500, 502, 503, 504]  # 触发重试的状态码
+
+unpaywall_email: "YOUR_EMAIL@163.com" # Unpaywall API 要求提供一个联系邮箱地址，用于监控和联系用户（请替换为你的邮箱）
+
+# ---------- 网页端 ----------
+web:
+  enable_scheduler: false   # 网页端是否启用每日定时调度（按 scheduler.run_time）
+  readonly: false           # 只读模式：服务端拒绝所有写操作
+  api_token: ""            # 可选：配置后，POST /api/run 需在请求头带 X-API-Token
