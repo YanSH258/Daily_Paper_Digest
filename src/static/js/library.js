@@ -61,9 +61,12 @@ const Library = {
       set("maUrl", a.url);
       const abs = document.getElementById("maAbstract");
       if (abs && a.abstract) abs.value = a.abstract;
-      msg.innerHTML = res.fetched_from_openalex
-        ? '<span class="ok">已补全，请核对后点「加入文献库」</span>'
-        : '<span class="err">OpenAlex 未找到，请手动填写后加入</span>';
+      const src = res.fetched_from === "crossref" ? "Crossref"
+        : (res.fetched_from === "openalex+crossref" ? "OpenAlex 与 Crossref"
+        : (res.fetched_from === "arxiv" ? "arXiv" : "OpenAlex"));
+      msg.innerHTML = res.fetched_from
+        ? `<span class="ok">已从 ${src} 补全，请核对后点「加入文献库」</span>`
+        : '<span class="err">没查到这篇的元数据（DOI 已查 OpenAlex/Crossref，arXiv 编号已查 arXiv），请手动填写后加入</span>';
     } catch (e) {
       msg.innerHTML = `<span class="err">${API.esc(e.message)}</span>`;
     }

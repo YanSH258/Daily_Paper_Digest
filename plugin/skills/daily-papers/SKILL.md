@@ -28,6 +28,7 @@ daily-paper-web --config <绝对路径>/config/config.yaml --port 8080
 | 意图 | 工具 |
 |------|------|
 | 今天读什么 | `preview_daily_digest`（只读预览，含推荐理由） |
+| 今日入选 Top-N | `today_top_n`（相关性/新鲜度/类别/期刊加权的选文结果，只读；`commit=True` 是旧版落盘接口，正式发布仍用 `publish_daily_digest`） |
 | 找文献 | `search_papers` |
 | 深入某篇 | `get_paper`（默认不含全文） |
 | 管理阅读 | `set_reading_status` / `star_paper` / `add_note` / `add_tags`（均为覆盖式写操作） |

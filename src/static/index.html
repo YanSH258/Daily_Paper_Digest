@@ -123,10 +123,10 @@
 
         <div id="manualAddPanel" class="card" style="margin-bottom:16px; display:none;">
           <h3 style="margin-top:0;">手动添加文献</h3>
-          <p class="small muted" style="margin-top:0;">填 DOI 可自动从 OpenAlex 补全标题/摘要/期刊；也可全部手填。入库默认收藏、评分 8，避免被低分清理删掉。</p>
+          <p class="small muted" style="margin-top:0;">填 DOI 或 arXiv 链接/编号可自动补全标题/摘要/期刊/作者（DOI 查 OpenAlex，查不到回退 Crossref；arXiv 走 arXiv 接口）；也可全部手填。入库默认收藏、评分 8，避免被低分清理删掉。</p>
           <div class="row" style="flex-wrap:wrap; gap:10px;">
-            <input id="maDoi" placeholder="DOI（推荐，如 10.1038/s41586-024-00000-0）" style="min-width:280px; flex:1;" />
-            <button class="secondary" onclick="Library.fetchByDoi()">从 DOI 补全</button>
+            <input id="maDoi" placeholder="DOI 或 arXiv 链接/编号（如 10.1038/s41586-024-00000-0 / arxiv.org/abs/2601.12984）" style="min-width:280px; flex:1;" />
+            <button class="secondary" onclick="Library.fetchByDoi()">补全信息</button>
           </div>
           <div class="row" style="flex-wrap:wrap; gap:10px; margin-top:10px;">
             <input id="maTitle" placeholder="标题 *" style="min-width:280px; flex:2;" />

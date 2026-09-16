@@ -475,9 +475,65 @@ def _normalize_doi(raw: str) -> str:
     return s.lower()
 
 
+def _lookup_doi_metadata(ctx: WebContext, doi: str) -> tuple[dict[str, Any], str]:
+    """按 DOI 取元数据：先 OpenAlex，缺字段或没收录时再问 Crossref。
+
+    OpenAlex 收录滞后于 Crossref（新文献往往 Crossref 已有、OpenAlex 没有），
+    只查一家会让"输入 DOI 自动补全"对手头的新文献失效。
+    返回 (元数据, 来源说明)；两家都没有时返回 ({} , "")。
+    """
+    work: dict[str, Any] = {}
+    source = ""
+    try:
+        from integrations import openalex
+        openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
+        openalex.configure(ctx.config)
+        work = openalex.get_work_by_doi(doi) or {}
+        if work:
+            source = "openalex"
+    except Exception as e:  # noqa: BLE001 - 补全失败不阻断手填
+        logger.warning("OpenAlex 按 DOI 补全失败: %s", e)
+
+    if work.get("title") and work.get("journal") and work.get("abstract"):
+        return work, source
+
+    try:
+        from integrations import crossref
+        fallback = crossref.work_by_doi(doi) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Crossref 按 DOI 补全失败: %s", e)
+        fallback = {}
+
+    if not fallback:
+        return work, source
+    if not work:
+        return fallback, "crossref"
+    merged = dict(work)
+    for key, value in fallback.items():
+        if not merged.get(key) and value:
+            merged[key] = value
+    return merged, "openalex+crossref"
+
+
+def _lookup_arxiv_metadata(arxiv_id: str) -> tuple[dict[str, Any], str]:
+    """按 arXiv 编号取元数据（预印本一般没有 DOI，按 DOI 查一定落空）。"""
+    try:
+        from integrations import arxiv
+        work = arxiv.lookup_by_id(arxiv_id) or {}
+    except Exception as e:  # noqa: BLE001 - 补全失败不阻断手填
+        logger.warning("arXiv 按编号补全失败: %s", e)
+        return {}, ""
+    return (work, "arxiv") if work else ({}, "")
+
+
 def _manual_add_article(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """手动添加文献：可只给 DOI 由 OpenAlex 补全，也可手工填字段。"""
-    doi = _normalize_doi(str(data.get("doi") or ""))
+    """手动添加文献：可只给 DOI 或 arXiv 链接由外部来源补全，也可手工填字段。"""
+    from integrations import arxiv as _arxiv
+
+    raw_input = str(data.get("doi") or "").strip()
+    arxiv_id = _arxiv.parse_id(raw_input)
+    # arXiv 链接/编号不是 DOI：留空 doi 字段，避免把 URL 当成 DOI 存进去
+    doi = "" if arxiv_id else _normalize_doi(raw_input)
     title = str(data.get("title") or "").strip()
     url = str(data.get("url") or "").strip()
     journal = str(data.get("journal") or "").strip()
@@ -492,29 +548,31 @@ def _manual_add_article(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str
     except (TypeError, ValueError):
         relevance = 8.0
 
-    fetched = False
-    if doi and (not title or not journal or not abstract):
-        from integrations import openalex
-        openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
-        openalex.configure(ctx.config)
-        work = openalex.get_work_by_doi(doi)
+    fetched_from = ""
+    if (doi or arxiv_id) and (not title or not journal or not abstract):
+        work, fetched_from = (_lookup_arxiv_metadata(arxiv_id) if arxiv_id
+                              else _lookup_doi_metadata(ctx, doi))
         if work:
-            fetched = True
             title = title or work.get("title") or ""
             journal = journal or work.get("journal") or ""
             abstract = abstract or work.get("abstract") or ""
-            authors = authors or ", ".join(work.get("authors") or [])
             pub_date = pub_date or work.get("pub_date") or ""
             url = url or work.get("url") or ""
+            doi = doi or (work.get("doi") or "").strip()
+            if not authors:
+                src_authors = work.get("authors")
+                authors = ", ".join(src_authors) if isinstance(src_authors, list) \
+                    else (src_authors or "")
 
-    if not title and not doi:
-        return {"ok": False, "error": "至少需要 DOI 或标题"}, 400
+    if not title and not doi and not arxiv_id:
+        return {"ok": False, "error": "至少需要 DOI、arXiv 编号或标题"}, 400
 
     if data.get("dry_run"):
         return {
             "ok": True,
             "dry_run": True,
-            "fetched_from_openalex": fetched,
+            "fetched_from": fetched_from,
+            "fetched_from_openalex": fetched_from.startswith("openalex"),
             "article": {
                 "doi": doi,
                 "title": title,
@@ -566,11 +624,17 @@ def _manual_add_article(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str
             return {"ok": True, "duplicate": True, "id": existing_id, "message": "库中已有该文献"}, 200
         return {"ok": False, "error": "添加失败：可能缺标题或数据库错误"}, 400
 
-    metric = ctx.db.get_journal_metric(journal) if journal else None
+    # 文章此时已写入：后续附加信息（期刊指标等）失败不得改写成"添加失败"
+    try:
+        metric = ctx.db.get_journal_metric(journal) if journal else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("期刊指标查询失败（不影响已入库的文章）: %s", e)
+        metric = None
     return {
         "ok": True,
         "id": new_id,
-        "fetched_from_openalex": fetched,
+        "fetched_from": fetched_from,
+        "fetched_from_openalex": fetched_from.startswith("openalex"),
         "impact_factor": (metric or {}).get("if_value"),
         "cas_zone": (metric or {}).get("cas_zone"),
         "message": "已加入文献库（默认收藏，避免被低分清理）",
@@ -908,6 +972,8 @@ _SETTINGS_FIELDS = [
     "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
     "scheduler.run_time", "scheduler.timezone", "web.api_token", "web.api_token_clear", "web.protect_read",
     "output.email_enabled", "output.email_recipients",
+    "output.email_smtp_server", "output.email_smtp_port",
+    "output.email_username", "output.email_password", "output.email_password_clear",
     "output.feishu_enabled", "output.feishu_webhook",
     "zotero.enabled", "zotero.user_id", "zotero.api_key", "zotero.collection",
     "zotero.include_note", "zotero.attach_oa_pdf",
@@ -988,8 +1054,13 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
         "output": {
             "email_enabled": bool(email.get("enabled")),
             "email_recipients": email.get("recipients", []),
+            "email_smtp_server": email.get("smtp_server", ""),
+            "email_smtp_port": email.get("smtp_port", 465),
             "email_username": email.get("username", ""),
+            "email_password_set": bool(email.get("password")),
+            "email_password_masked": _mask_secret(email.get("password")),
             "feishu_enabled": bool(feishu.get("enabled")),
+            "feishu_webhook_set": bool(feishu.get("webhook_url")),
         },
         "config_path": ctx.config_path,
     }
@@ -1124,6 +1195,34 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     recips = [str(r).strip() for r in (value or []) if str(r).strip()]
                     ensure(["output", "email"])["recipients"] = recips
                     changed.append(key)
+                elif key == "output.email_smtp_server":
+                    s = str(value or "").strip()
+                    if s:  # 留空 = 保持不变
+                        ensure(["output", "email"])["smtp_server"] = s
+                        changed.append(key)
+                elif key == "output.email_smtp_port":
+                    if value in (None, ""):
+                        continue
+                    port = int(value)
+                    if not 1 <= port <= 65535:
+                        return {"ok": False, "error": "SMTP 端口必须在 1-65535 之间"}, 400
+                    ensure(["output", "email"])["smtp_port"] = port
+                    changed.append(key)
+                elif key == "output.email_username":
+                    s = str(value or "").strip()
+                    if s:  # 留空 = 保持不变
+                        ensure(["output", "email"])["username"] = s
+                        changed.append(key)
+                elif key == "output.email_password":
+                    if value:  # 留空 = 保持不变（授权码不回显）
+                        ensure(["output", "email"])["password"] = str(value)
+                        changed.append(key)
+                elif key == "output.email_password_clear":
+                    if type(value) is not bool:
+                        raise RequestBodyError("output.email_password_clear 必须是 JSON 布尔值 true/false")
+                    if value:
+                        ensure(["output", "email"])["password"] = ""
+                        changed.append("output.email_password")
                 elif key == "output.feishu_enabled":
                     ensure(["output", "feishu"])["enabled"] = parse_json_bool({key: value}, key)
                     changed.append(key)
@@ -1573,16 +1672,14 @@ def _reanalyze_article_unlocked(ctx: WebContext, article_id: int, data: Optional
         return {"ok": False, "error": f"LLM 初始化失败，请检查配置: {e}"}, 500
 
     article = dict(item)
-    # 缺摘要时先尝试 OpenAlex 补全，避免"仅凭标题"解读
+    # 缺摘要时先尝试 OpenAlex/Crossref 补全，避免"仅凭标题"解读
     if not (article.get("abstract") or "").strip() and article.get("doi"):
         try:
-            from integrations import openalex
-            openalex.set_polite_email(ctx.config.get("unpaywall_email", "your@email.com"))
-            openalex.configure(ctx.config)
-            work = openalex.get_work_by_doi(article["doi"])
-            if work and work.get("abstract"):
+            work, source = _lookup_doi_metadata(ctx, article["doi"])
+            if work.get("abstract"):
                 ctx.db.update_article_fields(article_id, abstract=work["abstract"])
                 article["abstract"] = work["abstract"]
+                logger.info("解读前按 DOI 补全摘要（来源 %s）: article_id=%s", source, article_id)
         except Exception:  # noqa: BLE001 - 补全失败不阻断解读
             pass
 

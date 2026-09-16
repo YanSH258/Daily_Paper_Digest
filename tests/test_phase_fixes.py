@@ -203,6 +203,81 @@ class TestSettingsSave(unittest.TestCase):
         self.assertEqual([f for f in os.listdir(tmp) if f.endswith(".tmp")], [])
 
 
+class TestSmtpSettings(unittest.TestCase):
+    """设置页 SMTP 字段：留空不改 / 显式清除 / 端口校验 / 明文不回传。"""
+
+    _SEED = (
+        "output:\n"
+        "  email:\n"
+        "    enabled: true\n"
+        "    smtp_server: smtp.163.com\n"
+        "    smtp_port: 465\n"
+        "    username: old@163.com\n"
+        "    password: OLDAUTHCODE1234\n"
+        "    recipients:\n"
+        "    - me@163.com\n"
+    )
+
+    def _ctx_with_seed(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp, self._SEED)
+        return cfg, web_server.WebContext(config_path=cfg)
+
+    def test_password_blank_keeps_existing(self):
+        cfg, ctx = self._ctx_with_seed()
+        payload, code = web_server._save_settings(ctx, {"output.email_smtp_port": 587})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config.get("output") or {})["email"]["password"], "OLDAUTHCODE1234")
+
+    def test_password_replace_and_clear(self):
+        cfg, ctx = self._ctx_with_seed()
+        payload, code = web_server._save_settings(ctx, {"output.email_password": "NEWAUTHCODE5678"})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config["output"])["email"]["password"], "NEWAUTHCODE5678")
+        # 显式清除
+        payload, code = web_server._save_settings(ctx, {"output.email_password_clear": True})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config["output"])["email"]["password"], "")
+
+    def test_password_clear_requires_bool(self):
+        cfg, ctx = self._ctx_with_seed()
+        payload, code = web_server._save_settings(ctx, {"output.email_password_clear": "yes"})
+        self.assertEqual(code, 400)
+        self.assertEqual((ctx.config["output"])["email"]["password"], "OLDAUTHCODE1234")
+
+    def test_server_port_username_written(self):
+        cfg, ctx = self._ctx_with_seed()
+        payload, code = web_server._save_settings(ctx, {
+            "output.email_smtp_server": "smtp.qq.com",
+            "output.email_smtp_port": 587,
+            "output.email_username": "new@qq.com",
+        })
+        self.assertEqual(code, 200)
+        email = ctx.config["output"]["email"]
+        self.assertEqual(email["smtp_server"], "smtp.qq.com")
+        self.assertEqual(email["smtp_port"], 587)
+        self.assertEqual(email["username"], "new@qq.com")
+
+    def test_port_out_of_range_rejected(self):
+        for bad in (0, 70000, -1, "abc"):
+            with self.subTest(port=bad):
+                cfg, ctx = self._ctx_with_seed()
+                before = open(cfg, encoding="utf-8").read()
+                payload, code = web_server._save_settings(ctx, {"output.email_smtp_port": bad})
+                self.assertEqual(code, 400)
+                self.assertEqual(before, open(cfg, encoding="utf-8").read())
+
+    def test_view_never_returns_plaintext_password(self):
+        cfg, ctx = self._ctx_with_seed()
+        view = web_server._settings_view(ctx)
+        out = view["output"]
+        self.assertTrue(out["email_password_set"])
+        self.assertNotIn("OLDAUTHCODE1234", json.dumps(view, ensure_ascii=False))
+        self.assertIn("****", out["email_password_masked"])
+        self.assertEqual(out["email_smtp_server"], "smtp.163.com")
+        self.assertEqual(out["email_smtp_port"], 465)
+
+
 class TestWebServerAuth(unittest.TestCase):
     """端到端鉴权：Token 开启后写操作必须携带 X-API-Token。"""
 

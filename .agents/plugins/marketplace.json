@@ -1,0 +1,19 @@
+{
+  "name": "daily-papers",
+  "interface": {
+    "displayName": "Daily Paper Digest"
+  },
+  "plugins": [
+    {
+      "name": "daily-papers",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Research"
+    }
+  ]
+}

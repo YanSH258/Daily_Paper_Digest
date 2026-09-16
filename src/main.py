@@ -1178,16 +1178,19 @@ def main():
     parser.add_argument("--import-sources", metavar="PRESET_JSON",
                         help="导入来源预设到数据库（如 config/source_presets.json）；"
                              "与 --dry-run 同用只预览不导入。不触发采集/评分/推送")
+    parser.add_argument("--export-sources", metavar="PRESET_JSON",
+                        help="把数据库订阅清单导出为来源预设文件（保留旧文件中的说明文字，"
+                             "不写密钥或邮箱）；与 --dry-run 同用只显示清单。不触发采集/评分/推送")
     parser.add_argument("--dry-run", action="store_true",
-                        help="与 --import-sources 同用：只显示将导入的清单")
+                        help="与 --import-sources / --export-sources 同用：只显示清单，不做任何写入")
     process_mode = parser.add_mutually_exclusive_group()
     process_mode.add_argument("--trial", action="store_true", help="小批量评分试运行，不生成正式日报或推送")
     process_mode.add_argument("--collect-preview", action="store_true", help="只读采集预览，不调用模型或写入业务库")
     parser.add_argument("--refresh", action="store_true",
                         help="忽略当日预览缓存，强制重新采集（与 --collect-preview 同用）")
     args = parser.parse_args()
-    if args.dry_run and not args.import_sources:
-        parser.error("--dry-run 必须与 --import-sources 配合；采集预览使用 --collect-preview")
+    if args.dry_run and not (args.import_sources or args.export_sources):
+        parser.error("--dry-run 必须与 --import-sources 或 --export-sources 配合；采集预览使用 --collect-preview")
     setup_logging(args.config)
 
     if args.init_config:
@@ -1228,6 +1231,38 @@ def main():
             print(f"  + [{it['source_type']}] {it['name']} → {it['url']}")
         for it in result["skipped"]:
             print(f"  - {it['name']}: {it['reason']}")
+        return
+
+    if args.export_sources:
+        from utils import presets
+        config = load_config(args.config)
+        exported_at = datetime.now(get_scheduler_timezone(config)).strftime("%Y-%m-%d")
+        db = Database(config["database"]["path"])
+        try:
+            if args.dry_run:
+                target = Path(args.export_sources)
+                previous = None
+                if target.exists():
+                    try:
+                        previous = presets.load_preset(target)
+                    except (ValueError, json.JSONDecodeError):
+                        previous = None
+                preset, skipped = presets.build_preset(
+                    db, previous=previous, exported_at=exported_at)
+                print(f"将导出 {len(preset['sources'])} 条来源到 {args.export_sources}"
+                      f"（预览，未写入任何文件）：")
+                for src in preset["sources"]:
+                    print(f"- [{src['source_type']}] {src['name']} → "
+                          f"{src.get('url') or src.get('query')}")
+                for it in skipped:
+                    print(f"  ! {it['name']}: {it['reason']}")
+                return
+            result = presets.export_preset(db, args.export_sources, exported_at=exported_at)
+        finally:
+            db.close()
+        print(f"已导出 {result['count']} 条来源到 {result['path']}")
+        for it in result["skipped"]:
+            print(f"  ! 略过 {it['name']}: {it['reason']}")
         return
 
     config = load_config(args.config)

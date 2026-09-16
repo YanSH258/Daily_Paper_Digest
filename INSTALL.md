@@ -64,11 +64,19 @@ python src/web_server.py --config "$HOME/dpd-data/config/config.yaml" --host 127
 
 健康检查：`curl http://127.0.0.1:8080/healthz` → `{"ok": true}`。
 
-可选：导入计算材料方向预设订阅源（MLIP/DFT，共 30+ 条，幂等可重复执行）：
+可选：导入计算材料方向预设订阅源（MLIP/DFT，共 40+ 条，幂等可重复执行）：
 
 ```bash
 python src/main.py --import-sources config/source_presets.json --dry-run  # 预览
 python src/main.py --import-sources config/source_presets.json            # 导入
+```
+
+在网页端「订阅管理」增删来源后，可以把当前清单导回预设文件（只写来源元数据，
+不含密钥或邮箱；已有说明文字会保留）：
+
+```bash
+python src/main.py --export-sources config/source_presets.json --dry-run  # 只列出将写出的清单
+python src/main.py --export-sources config/source_presets.json            # 写回文件
 ```
 
 ---

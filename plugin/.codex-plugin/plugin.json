@@ -1,0 +1,43 @@
+{
+  "name": "daily-papers",
+  "version": "0.2.0",
+  "description": "把个人文献工作台（化学/材料方向）接入 AI agent：检索/阅读管理/研究专题/版本化日报/引文追踪/Zotero 推送/AI 对比，共 25 个语义化工具。需要本地先运行 daily-paper-web 工作台服务。",
+  "author": {
+    "name": "YanSH258",
+    "url": "https://github.com/YanSH258/Daily_Paper_Digest"
+  },
+  "homepage": "https://github.com/YanSH258/Daily_Paper_Digest",
+  "repository": "https://github.com/YanSH258/Daily_Paper_Digest",
+  "license": "MIT",
+  "keywords": [
+    "literature",
+    "papers",
+    "arxiv",
+    "openalex",
+    "materials-science",
+    "chemistry",
+    "mcp",
+    "zotero",
+    "digest"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Daily Paper Digest 文献工作台",
+    "shortDescription": "检索、阅读管理、日报与引文追踪",
+    "longDescription": "把本地运行的文献工作台接入 agent：按方向检索文献、管理阅读清单与笔记、组织研究专题、查看版本化日报与周报、追踪引文与作者、推送 Zotero、生成 AI 对比与相关工作草稿。所有数据保存在本机数据目录，工具读写都走本地工作台服务（默认 http://127.0.0.1:8080）。",
+    "developerName": "YanSH258",
+    "category": "Research",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/YanSH258/Daily_Paper_Digest",
+    "defaultPrompt": [
+      "今天有什么值得读的文献？",
+      "把我标记为待读的文献整理进研究专题",
+      "最近追踪的作者有哪些新论文"
+    ]
+  }
+}

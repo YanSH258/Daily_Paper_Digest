@@ -10,6 +10,7 @@ and still caps every wait so a throttled source cannot stall collection.
 import email.utils
 import logging
 import random
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -17,8 +18,14 @@ from typing import Any, Optional
 
 import feedparser
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# 现代编号 2601.12984（可选版本号）与旧式编号 math.GT/0309136、cond-mat/0309136
+_NEW_ID_RE = re.compile(r"(?:arxiv[:\s]*)?(?:abs/|pdf/)?(\d{4}\.\d{4,5})(?:v\d+)?", re.I)
+_OLD_ID_RE = re.compile(r"(?:arxiv[:\s]*)?(?:abs/|pdf/)?([a-z-]+(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?", re.I)
+_ARXIV_QUERY_URL = "https://export.arxiv.org/api/query?id_list="
 
 _lock = threading.Lock()
 _cooldown_lock = threading.Lock()
@@ -147,3 +154,71 @@ def fetch_feed(url: str, *, timeout: int = 30) -> Any:
         if attempt < 2 and retry_wait:
             time.sleep(retry_wait_seconds(retry_wait) + random.uniform(0, 1))
     raise RuntimeError(f"arXiv 请求重试耗尽") from last_error
+
+
+def parse_id(text: str) -> str:
+    """从 URL / `arXiv:编号` / 裸编号中取出 arXiv 编号；不是 arXiv 引用返回空串。
+
+    只保留编号本身（丢弃版本号），查询时取该论文的最新版本；
+    旧式编号（math.GT/0309136）同样支持。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    # arXiv 的 DataCite DOI（10.48550/arXiv.2601.12984）等价于 arXiv 引用
+    datacite = re.search(r"10\.48550/arxiv\.([A-Za-z0-9._/-]+)", text, re.I)
+    if datacite:
+        return parse_id(datacite.group(1))
+    # 其他 DOI 优先判定：10.xxxx/yyyy.zzzz 里的数字片段会被编号正则误匹配
+    if re.match(r"^(?:https?://(?:dx\.)?doi\.org/)?10\.\d{4,}/", text, re.I):
+        return ""
+    for pattern in (_NEW_ID_RE, _OLD_ID_RE):
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _clean(text: Any) -> str:
+    return re.sub(r"\s+", " ", BeautifulSoup(str(text or ""), "html.parser").get_text()).strip()
+
+
+def _normalize_entry(entry: Any) -> dict[str, Any]:
+    """把 arXiv Atom 条目规范化为工作台文章字段（摘要不是全文）。"""
+    title = _clean(entry.get("title", ""))
+    if not title or title.lower().startswith("error"):
+        return {}
+    published = (entry.get("published") or entry.get("updated") or "").strip()
+    pub_date = published[:10] if len(published) >= 10 else ""
+    primary = ((entry.get("arxiv_primary_category") or {}).get("term") or "").strip()
+    return {
+        "title": title,
+        # 与采集流程一致：arXiv 没有期刊名，用主分类占位
+        "journal": primary or "arXiv",
+        "url": entry.get("link") or "",
+        "doi": (entry.get("arxiv_doi") or "").strip(),
+        "abstract": _clean(entry.get("summary", "")),
+        "authors": [a.get("name", "") for a in entry.get("authors", []) if a.get("name")],
+        "pub_date": pub_date,
+        "date_source": "arxiv_id_lookup",
+        "arxiv_id": parse_id(entry.get("id", "")) or "",
+        "has_fulltext": False,
+    }
+
+
+def lookup_by_id(arxiv_id: str, *, timeout: int = 30) -> Optional[dict[str, Any]]:
+    """按 arXiv 编号取单篇元数据（标题/作者/摘要/分类/日期）；查不到返回 None。
+
+    arXiv 预印本通常没有 DOI，按 DOI 查 OpenAlex/Crossref 一律落空，
+    这里走 arXiv 官方 API 的 id_list 查询（沿用同一套节流与冷却）。
+    """
+    identifier = parse_id(arxiv_id)
+    if not identifier:
+        return None
+    feed = fetch_feed(_ARXIV_QUERY_URL + identifier, timeout=timeout)
+    entries = list(getattr(feed, "entries", []) or [])
+    if not entries:
+        return None
+    article = _normalize_entry(entries[0])
+    return article or None
+

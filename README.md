@@ -28,10 +28,11 @@ python src/main.py --schedule          # 每日定时（阻塞）
 python src/main.py --weekly            # 生成周报
 ```
 
-> 采集管控（日期准入、评分预算、存量处置）详见 [docs/P0_PROCESSING.md](docs/P0_PROCESSING.md)。
+> 采集与评分的管控规则（日期准入、评分预算、来源游标、存量处置）见 `AGENTS.md` 的「采集与评分管控」一节。
 
-从零开始（含 MCP 插件接入、初始化、认证与常见故障）的完整步骤见
-`plugin/README.md`（受版本控制，克隆后即可阅读）。
+从零开始（含 ZCode / Codex 插件接入、初始化、认证与常见故障）的完整步骤见
+`plugin/README.md`（受版本控制，克隆后即可阅读）。插件可作为 ZCode 插件或
+Codex 插件安装，两种客户端共用同一份 MCP 服务器与 Skill。
 
 ### wheel 安装与数据目录
 
@@ -75,6 +76,8 @@ PYTHONPATH="src:.deps" python src/web_server.py --config config/config.yaml --ho
 主要页面：今日精选、文献库、阅读清单、研究专题、趋势、日报与周报、追踪、订阅、任务、设置。
 
 本机默认可直接使用；API Token 可在「设置」中启用。调度设置支持严格的 `HH:MM` 和 IANA 时区（如 `Asia/Shanghai`）。详见 `AGENTS.md`。
+
+**「设置」页可改的内容**：模型（提供方/Base URL/模型名/API Key）、相关性阈值与研究方向、抓取参数、推送渠道（邮件开关、SMTP 服务器/端口/发件账号/授权码、收件人，飞书开关与 Webhook）、Zotero、追踪间隔、OpenAlex API Key，以及服务端 Token。所有密钥只保存在本机 `config.yaml`，页面只回显掩码；留空表示保持不变，授权码与 Token 另有「清除」入口。SMTP 授权码是邮箱服务商生成的专用密码，不是邮箱登录密码。
 
 **Token 与访问地址**：Token 只在需要时配置。只监听本机（`--host 127.0.0.1`）时无需 Token；显式监听非本机地址时**必须**配置 `web.api_token` 或 `WEB_API_TOKEN`，否则拒绝启动。浏览器把 Token 存在 localStorage，而 localStorage 按**源**隔离——`http://localhost:8080` 与 `http://127.0.0.1:8080` 属于不同源，所以请固定用一个地址打开控制台，否则需要重新连接。Token 不匹配时页面会明确提示去「设置 → 输入服务端 Token」重新连接。
 

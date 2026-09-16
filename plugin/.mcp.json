@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "daily-papers": {
+      "command": "daily-paper-mcp",
+      "args": [],
+      "env": {
+        "DPD_API": "http://127.0.0.1:8080"
+      }
+    }
+  }
+}

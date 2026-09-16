@@ -54,9 +54,15 @@ const Settings = {
       </div>
       <div class="card"><h3>推送</h3>
         ${this.fieldRow("邮件", `<label class="small"><input id="s_email" type="checkbox" ${out.email_enabled ? "checked" : ""} /> 启用</label>`)}
+        ${this.fieldRow("SMTP 服务器", `<input id="s_smtp_server" value="${API.esc(out.email_smtp_server || "")}" placeholder="smtp.163.com" />`)}
+        ${this.fieldRow("SMTP 端口", `<input id="s_smtp_port" type="number" min="1" max="65535" value="${API.esc(out.email_smtp_port ?? 465)}" />`)}
+        ${this.fieldRow("发件账号", `<input id="s_smtp_user" value="${API.esc(out.email_username || "")}" placeholder="you@163.com" />`)}
+        ${this.fieldRow("授权码", `<input id="s_smtp_pass" type="password" placeholder="${out.email_password_set ? "已配置（" + API.esc(out.email_password_masked) + "），留空保持不变" : "邮箱服务商处获取的 SMTP 授权码"}" />
+          <label class="small" style="margin-left:8px;"><input id="s_smtp_pass_clear" type="checkbox" /> 清除</label>`)}
         ${this.fieldRow("收件人（逗号分隔）", `<input id="s_recipients" value="${API.esc((out.email_recipients || []).join(", "))}" placeholder="a@x.com, b@y.com" />`)}
         ${this.fieldRow("飞书", `<label class="small"><input id="s_feishu" type="checkbox" ${out.feishu_enabled ? "checked" : ""} /> 启用</label>`)}
-        ${this.fieldRow("飞书 Webhook", `<input id="s_webhook" value="${API.esc(out.feishu_webhook || "")}" placeholder="启用飞书后填写" />`)}
+        ${this.fieldRow("飞书 Webhook", `<input id="s_webhook" placeholder="${out.feishu_webhook_set ? "已配置，留空保持不变" : "启用飞书后填写"}" />`)}
+        <p class="small" style="margin:10px 0 0;">授权码是邮箱服务商生成的 SMTP 专用密码（非登录密码），只保存在本机 config.yaml，不回显明文；勾选「清除」并保存可移除。</p>
       </div>
       <div class="card"><h3>Zotero</h3>
         ${this.fieldRow("推送开关", `<label class="small"><input id="s_zot_on" type="checkbox" ${zot.enabled ? "checked" : ""} /> 启用推送</label>`)}
@@ -418,6 +424,16 @@ const Settings = {
       "scheduler.run_time": val("s_runtime").trim(),
       "scheduler.timezone": val("s_timezone").trim(),
     };
+    // SMTP：服务器/账号已填写才提交；授权码留空 = 不修改，勾选「清除」= 显式移除
+    const smtpServer = val("s_smtp_server").trim();
+    if (smtpServer) payload["output.email_smtp_server"] = smtpServer;
+    const smtpPort = parseInt(val("s_smtp_port"));
+    if (smtpPort) payload["output.email_smtp_port"] = smtpPort;
+    const smtpUser = val("s_smtp_user").trim();
+    if (smtpUser) payload["output.email_username"] = smtpUser;
+    const smtpPass = val("s_smtp_pass").trim();
+    if (chk("s_smtp_pass_clear")) payload["output.email_password_clear"] = true;
+    else if (smtpPass) payload["output.email_password"] = smtpPass;
     // Token 留空 = 不修改；输入新值则提交，并同步写入浏览器，之后写操作自动带上
     const newToken = val("s_token").trim();
     if (newToken) payload["web.api_token"] = newToken;
