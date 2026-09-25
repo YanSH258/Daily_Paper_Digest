@@ -1,9 +1,56 @@
 import unittest
 from core.db import Database
-from processing import admission_decision, build_queue, validate_budget
+from processing import admission_decision, build_queue, task_status_and_error, validate_budget
 
 DAY = '2026-09-13'
 CFG = {'scheduler': {'timezone': 'Asia/Shanghai'}, 'fetcher': {'date_filter_days': 3}}
+
+
+class TaskStatusTests(unittest.TestCase):
+    def test_source_truncation_alone_is_success(self):
+        stats = {"source_incomplete": 2, "sources": [
+            {"source_id": 17, "name": "ChemCatChem", "success": True, "complete": False},
+            {"source_id": 21, "name": "Angew. Chem. Int. Ed.", "success": True, "complete": False},
+        ]}
+        self.assertEqual(task_status_and_error(stats), ("success", ""))
+
+    def test_partial_reasons_include_source_names_and_incomplete_note(self):
+        stats = {
+            "source_failed": 1, "source_incomplete": 1,
+            "sources": [
+                {"source_id": 2, "name": "Nature Materials", "success": False, "complete": False},
+                {"source_id": 21, "name": "Angew. Chem. Int. Ed.", "success": True, "complete": False},
+            ],
+        }
+        status, error = task_status_and_error(stats)
+        self.assertEqual(status, "partial")
+        self.assertIn("来源抓取失败×1（如：Nature Materials）", error)
+        self.assertIn("来源未抓全×1（如：Angew. Chem. Int. Ed.", error)
+        self.assertIn("下轮自动续采", error)
+
+    def test_push_delivery_failure_is_partial(self):
+        status, error = task_status_and_error({"push_results": {"email": False}})
+        self.assertEqual(status, "partial")
+        self.assertIn("投递失败", error)
+
+    def test_all_scores_failed_is_failed(self):
+        status, _error = task_status_and_error(
+            {"score_attempted": 25, "scored_ok": 0, "scored_failed": 25})
+        self.assertEqual(status, "failed")
+
+    def test_score_error_summaries_include_samples(self):
+        stats = {"scored_failed": 3,
+                 "score_errors": {"LLMError": {"count": 3, "samples": ["Paper A"]}}}
+        status, error = task_status_and_error(stats)
+        self.assertEqual(status, "partial")
+        self.assertIn("LLMError×3（如：Paper A）", error)
+
+    def test_db_and_analysis_failures_have_reasons(self):
+        stats = {"db_errors": 2, "analyzed_failed": 4}
+        status, error = task_status_and_error(stats)
+        self.assertEqual(status, "partial")
+        self.assertIn("数据库写入失败×2", error)
+        self.assertIn("解读失败×4", error)
 
 
 class ProcessingTests(unittest.TestCase):

@@ -185,19 +185,18 @@ def _build_server():
         return item
 
     @mcp.tool()
-    def today_top_n(date: str = "", commit: bool = False) -> dict:
-        """今日 Top-N 精选：综合相关性/新鲜度/类别/期刊加权的选文结果。
+    def today_top_n(date: str = "") -> dict:
+        """今日 Top-N 精选（只读）：相关性/新鲜度/类别/期刊加权的选文结果。
+
+        需要正式发布日报时用 `publish_daily_digest`；按版本化规则预览用
+        `preview_daily_digest`。
 
         Args:
             date: 日期（YYYY-MM-DD，默认今天）
-            commit: False=只预览不落盘（推荐）；True=仅落盘旧版选择历史
-                （legacy，不创建版本、不发送；正式发布请用 publish_daily_digest）
         Returns:
             {date, articles_above_threshold, selected: [{rank, id, title,
-             scores, relevance_reason, title_zh}], report_text, deprecated?}
+             scores, relevance_reason, title_zh}], report_text}
         """
-        if commit:
-            return _call("POST", "/api/digest", body={"date": date} if date else {})
         return _call("GET", "/api/digest", params={"date": date} if date else None)
 
     # ── 版本化日报（只读）──────────────────────────────────────
@@ -269,24 +268,24 @@ def _build_server():
 
     @mcp.tool()
     def set_reading_status(paper_id: int, status: str) -> dict:
-        """设置阅读状态。status: queued(待读) / reading(在读) / read(已读) / ''(移出清单)。"""
+        """【写操作】设置阅读状态（覆盖式）。status: queued(待读) / reading(在读) / read(已读) / ''(移出清单)。"""
         return _call("POST", f"/api/articles/{int(paper_id)}/status",
                      body={"read_status": status})
 
     @mcp.tool()
     def star_paper(paper_id: int, starred: bool = True) -> dict:
-        """收藏 / 取消收藏文献。"""
+        """【写操作】收藏 / 取消收藏文献。"""
         return _call("POST", f"/api/articles/{int(paper_id)}/star",
                      body={"starred": starred})
 
     @mcp.tool()
     def add_note(paper_id: int, note: str) -> dict:
-        """写入/覆盖我的阅读笔记（上限 20000 字符）。"""
+        """【写操作】写入/覆盖我的阅读笔记（覆盖式，上限 20000 字符）。"""
         return _call("POST", f"/api/articles/{int(paper_id)}/note", body={"note": note})
 
     @mcp.tool()
     def add_tags(paper_id: int, tags: list[str]) -> dict:
-        """设置文献标签（覆盖式；传空列表清空）。"""
+        """【写操作】设置文献标签（覆盖式；传空列表清空）。"""
         return _call("POST", f"/api/articles/{int(paper_id)}/tags", body={"tags": tags})
 
     # ── 研究专题 ────────────────────────────────────────────────
@@ -303,30 +302,30 @@ def _build_server():
 
     @mcp.tool()
     def create_topic(name: str, research_question: str = "", notes: str = "") -> dict:
-        """新建研究专题。research_question 写"我具体想解决什么"。"""
+        """【写操作】新建研究专题。research_question 写"我具体想解决什么"。"""
         return _call("POST", "/api/topics",
                      body={"name": name, "research_question": research_question, "notes": notes})
 
     @mcp.tool()
     def add_papers_to_topic(topic_id: int, paper_ids: list[int]) -> dict:
-        """把文献加入专题。"""
+        """【写操作】把文献加入专题。"""
         return _call("POST", f"/api/topics/{int(topic_id)}/papers", body={"ids": paper_ids})
 
     # ── 外部集成 ────────────────────────────────────────────────
 
     @mcp.tool()
     def push_to_zotero(paper_ids: list[int]) -> dict:
-        """批量推送到 Zotero（按 DOI 幂等；可附带阅读笔记与 OA PDF 附件）。"""
+        """【写操作】批量推送到 Zotero（写用户外部账号；按 DOI 幂等；可附带阅读笔记与 OA PDF 附件）。"""
         return _call("POST", "/api/zotero/batch", body={"ids": paper_ids})
 
     @mcp.tool()
     def watch_paper(paper_id: int, active: bool = True) -> dict:
-        """关注/取消关注某文献的新引用（新引用会自动进入评分流水线）。"""
+        """【写操作】关注/取消关注某文献的新引用（新引用会自动进入评分流水线）。"""
         return _call("POST", f"/api/articles/{int(paper_id)}/watch", body={"active": active})
 
     @mcp.tool()
     def watch_author(name: str, openalex_id: str = "") -> dict:
-        """关注作者（其新文章自动入库评分）。
+        """【写操作】关注作者（其新文章自动入库评分）。
 
         Args:
             openalex_id: OpenAlex 作者 ID（A 开头）。留空时自动检索，
@@ -358,7 +357,7 @@ def _build_server():
 
     @mcp.tool()
     def run_pipeline(mode: str = "light", run_mode: str = "normal") -> dict:
-        """触发一次抓取流水线（后台运行）。mode: light(粗筛：评分+翻译) / deep(深度：全文+解读) / weekly(周报)。
+        """【写操作】触发一次抓取流水线（后台运行）。mode: light(粗筛：评分+翻译) / deep(深度：全文+解读) / weekly(周报)。
         run_mode: normal(正式) / trial(真实调用但不生成日报/推送，预算 30) / preview(只读模拟，不调用模型)。
 
         成本提示：light 会抓取全部订阅源并对新文献调用 LLM 评分；deep 额外

@@ -27,9 +27,8 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 DEFAULT_TEMPERATURE: float = 0.3
 DEFAULT_MAX_TOKENS: int = 8192
-# 中转站模型可能先输出大段思考再给 JSON：800 会被思考耗尽导致 JSON 截断，
-# 放宽到 2000 保证最终 JSON 完整输出
-RELEVANCE_MAX_TOKENS: int = 2000
+# 推理型兼容模型可能先输出思考再给 JSON；使用 JSON mode，并保留足够输出预算。
+RELEVANCE_MAX_TOKENS: int = 4096
 ANALYSIS_MIN_TOKENS: int = 4096
 ANALYSIS_MAX_TOKENS: int = 8192
 
@@ -46,6 +45,10 @@ CHUNK_BUDGET_CONCLUSION: int = 5000
 LLM_MAX_RETRIES: int = 3
 LLM_RETRY_BASE_DELAY: float = 5.0
 
+# 明确声明可接受的压缩编码：旧版 Brotli 解压库与 httpx2 的接口不兼容时，
+# 让服务端只返回 gzip/deflate，避免每次请求都在本地解压阶段崩掉。
+LLM_ACCEPT_ENCODING: str = "gzip, deflate"
+
 # 本模块专用：文献对话
 CHAT_ABSTRACT_MAX_CHARS: int = 3000
 CHAT_ANALYSIS_MAX_CHARS: int = 6000
@@ -54,9 +57,15 @@ CHAT_MAX_TOKENS: int = 4096
 
 # 分析提示词版本：改动提示词结构时递增，并记录进 articles.analysis_prompt_version
 # v3：摘要路径改为"仅中文翻译"；全文路径维持 7 节深度解读
-PROMPT_VERSION: str = "v3"
+# v4：摘要路径改为"一段完整译文"（含边界标签与截断处理）；全文路径不变
+PROMPT_VERSION: str = "v4"
+SCORE_PROMPT_VERSION: str = "v2"
 # 摘要仅翻译所需输出上限（全文深度解读仍使用 max_tokens/ANALYSIS_* 常量）
-ABSTRACT_TRANSLATION_MAX_TOKENS: int = 2048
+ABSTRACT_TRANSLATION_MAX_TOKENS: int = 4096
+ABSTRACT_TRANSLATION_MAX_TOKENS_RETRY: int = 8192
+# 模型须把正式译文放在这对内部边界标签中；缺失或残缺视为失败，不靠猜测清洗
+ABSTRACT_TRANSLATION_OPEN_TAG: str = "【译文开始】"
+ABSTRACT_TRANSLATION_CLOSE_TAG: str = "【译文结束】"
 
 
 # ──────────────────────────────────────────────
@@ -82,6 +91,10 @@ class LLMStreamError(LLMError):
     """流式对话失败（含模型未返回内容）"""
 
 
+class LLMRuntimeDependencyError(LLMError):
+    """本地运行时依赖不兼容（如 Brotli 解压接口），重试网络请求无意义"""
+
+
 # ──────────────────────────────────────────────
 # TypedDict 返回值定义
 # ──────────────────────────────────────────────
@@ -98,6 +111,7 @@ class ScoreResult(TypedDict):
     matched_topics: list
     model: str
     basis: str         # 'abstract' | 'title'
+    prompt_version: str
 
 
 # ──────────────────────────────────────────────
@@ -117,6 +131,7 @@ class LLMAnalyzer:
             api_key=provider_cfg["api_key"],
             base_url=provider_cfg["base_url"],
             max_retries=0,
+            default_headers={"Accept-Encoding": LLM_ACCEPT_ENCODING},
         )
         self.model: str = provider_cfg.get("model", "deepseek-flash")
         # 反馈注入（推荐质量闭环）：liked/disliked 样例由流水线设置
@@ -160,11 +175,23 @@ class LLMAnalyzer:
             prior_str = (f"\n【系统相似度参考】该文献与你收藏/精读文献的文本相似度约为 "
                          f"{float(sim_prior):.1f}/10（仅作参考，请独立判断）。\n")
         prompt = f"""你是一位化学领域的专业研究人员。
-请判断下面这篇论文与以下研究方向的相关性，给出 0-10 的整数评分：
-- 10：与研究方向高度相关，必读
-- 7-9：比较相关，值得关注
-- 4-6：有一定关联，可选读
-- 0-3：基本无关
+请判断下面这篇论文与以下研究方向的相关性，给出 0-10 的整数评分。
+
+【判断原则】
+- 每个研究方向都是独立且同等有效的兴趣，排列顺序不代表优先级。
+- 按论文与最匹配方向的实际关联评分，不对多个方向取平均；不要求同时命中多个方向。
+- 论文实质研究任一列出的方向，就应按该方向评价。不能因为未涉及机器学习势、AI 或其他列出方向而扣分。
+- 区分实质研究与顺带提及：仅出现关键词，或只用一个常规计算验证实验，不等于实质研究该方向。
+- 不凭期刊名气、热门模型名称或引用次数抬高相关性；只根据提供的标题和摘要判断，不补造方法、体系或结果。
+- 只有标题时说明依据有限，分数反映标题能支持的关联；不能把摘要缺失本身当作不相关的证据。
+
+【评分标准】
+- 10：研究问题、方法与具体体系都直接契合某一方向，有明确依据说明为何应优先阅读；谨慎使用。
+- 8-9：方法或研究体系与某一方向高度重合，有明确、直接的参考价值。
+- 6-7：实质属于任一列出的方向，但与具体研究问题的重合程度一般，值得关注。
+- 4-5：有间接参考价值、主题交叉或辅助性计算，但不是所列方向的实质研究。
+- 2-3：领域相邻，主要问题和方法与所列方向不同。
+- 0-1：没有可支持的关联。
 
 【研究方向】
 {topics_str}
@@ -178,7 +205,10 @@ class LLMAnalyzer:
 请只返回一个 JSON 对象，格式如下（不要有任何其他文字）：
 {{"score": <0-10的整数>, "reason": "<一句话中文说明推荐理由>", "matched_topics": ["命中的研究方向，可为空数组"]}}"""
 
-        result = self._call_llm(prompt, max_tokens=RELEVANCE_MAX_TOKENS)
+        result = self._call_llm(
+            prompt, max_tokens=RELEVANCE_MAX_TOKENS,
+            response_format={"type": "json_object"},
+        )
         data = self._parse_json(result)
 
         # ── 严格校验：缺失 / 非数值 / 越界 / NaN 一律视为解析失败 ──
@@ -201,6 +231,7 @@ class LLMAnalyzer:
             matched_topics=matched,
             model=self.model,
             basis=basis,
+            prompt_version=SCORE_PROMPT_VERSION,
         )
 
     def _feedback_prompt_section(self) -> str:
@@ -225,11 +256,19 @@ class LLMAnalyzer:
         """摘要翻译质量检查；通过返回空串，否则返回失败原因。
 
         科学摘要译文含大量英文术语/分子式/数字，中文占比不宜卡太死；
-        短摘要允许更短译文。
+        短摘要允许更短译文。额外检查思考泄漏和源文覆盖比例。
         """
         s = (analysis or "").strip()
         if not s:
             return "empty"
+        # 思考泄漏：边界标签残留或典型元讨论前缀说明模型未遵守输出契约
+        if ABSTRACT_TRANSLATION_OPEN_TAG in s or ABSTRACT_TRANSLATION_CLOSE_TAG in s:
+            return "translation_tags_leaked"
+        for hint in ("我们需要回答用户", "我们需要仔细翻译", "需要翻译。",
+                     "用户说", "术语对照", "思考过程", "让我们逐步",
+                     "翻译草稿", "术语表"):
+            if hint in s[:200]:
+                return f"deliberation_leak:{hint}"
         cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
         cjk_ratio = cjk / max(len(s), 1)
         # 去掉 ASCII 字母数字与空白后的“叙述密度”
@@ -240,6 +279,10 @@ class LLMAnalyzer:
             return f"len={len(s)}<{min_len}"
         if cjk < 15:
             return f"cjk_chars={cjk}"
+        if abstract_len >= 500:
+            min_coverage = max(80, int(abstract_len * 0.18))
+            if len(s) < min_coverage:
+                return f"coverage_len={len(s)}<{min_coverage}"
         if cjk_ratio < 0.25 and narrative_ratio < 0.35:
             return f"cjk_ratio={cjk_ratio:.2f},narrative={narrative_ratio:.2f}"
         # 明显是英文原文回显
@@ -335,9 +378,15 @@ class LLMAnalyzer:
 {content}
 
 要求：
-1. 忠实原文，逐句翻译，不增不减、不概括、不评论、不补充任何摘要以外的信息。
-2. 保持学术语言风格；专业术语保留英文原文并可在括号内附中文解释。
-3. 只输出译文，不要输出任何标题、前言、注释或格式标记。
+1. 忠实原文，完整翻译，不增不减、不概括、不评论、不补充任何摘要以外的信息。
+2. 输出为一段连续、连贯的中文译文（不要编号、不要逐句对照、不要拆成多个项目、不要分段）。
+3. 专业术语保留英文原文并可在括号内附中文解释（如 density functional theory, DFT）。
+4. 保持学术语言风格。
+
+输出格式（严格遵守）：
+在译文前输出 {ABSTRACT_TRANSLATION_OPEN_TAG}，在译文后输出 {ABSTRACT_TRANSLATION_CLOSE_TAG}。
+两个标签之间只放译文本身，不要放任何标签之外的文字。
+不要输出思考过程、草稿或标签外的任何内容。
 """
 
         analysis_max_tokens: int = (
@@ -354,14 +403,35 @@ class LLMAnalyzer:
         try:
             analysis = ""
             last_quality = ""
-            # 质量门槛失败时重试一次（flash 偶发回显英文/草稿）
+            # 质量门槛失败时重试一次；截断时用更高 token 上限重试一次
             attempts = 1 if has_fulltext else 2
+            effective_tokens = analysis_max_tokens
+            was_truncated = False
             for attempt in range(attempts):
-                analysis = self._call_llm(prompt, max_tokens=analysis_max_tokens)
-                analysis = self._strip_model_deliberation(
-                    analysis, is_translation=not has_fulltext)
+                raw_output, finish_reason = self._call_llm_with_finish(
+                    prompt, max_tokens=effective_tokens)
+                was_truncated = finish_reason == "length"
+                if was_truncated and attempt == 0 and not has_fulltext:
+                    logger.warning(
+                        "[LLM_TRUNCATED] 摘要翻译截断（max_tokens=%d），加大到 %d 重试 | title=%s",
+                        effective_tokens, ABSTRACT_TRANSLATION_MAX_TOKENS_RETRY, title[:50],
+                    )
+                    effective_tokens = ABSTRACT_TRANSLATION_MAX_TOKENS_RETRY
+                    continue
                 if has_fulltext:
+                    analysis = self._strip_model_deliberation(raw_output, is_translation=False)
                     break
+                # 摘要翻译：提取边界标签内文本
+                analysis = self._extract_tagged_translation(raw_output)
+                if analysis is None:
+                    last_quality = "missing_translation_tags"
+                    logger.warning(
+                        "[LLM_QUALITY] 摘要翻译缺少边界标签（截断=%s），重试 %d/%d | title=%s",
+                        was_truncated, attempt + 1, attempts - 1, title[:50],
+                    )
+                    continue
+                # 统一为单段：折叠换行为空格
+                analysis = re.sub(r"\s*\n\s*", " ", analysis).strip()
                 last_quality = self._translation_quality_error(
                     analysis, abstract_len=len(content))
                 if not last_quality:
@@ -370,12 +440,13 @@ class LLMAnalyzer:
                     "[LLM_QUALITY] 摘要翻译不达标（%s），重试 %d/%d | title=%s | model=%s",
                     last_quality, attempt + 1, attempts - 1, title[:50], self.model,
                 )
-            if not has_fulltext and last_quality:
+            if not has_fulltext and (last_quality or was_truncated):
+                error_reason = last_quality or "truncated_after_retry"
                 return AnalysisResult(
                     success=False,
                     analysis="",
                     evidence_level="ABSTRACT_ONLY",
-                    error=f"translation_quality_failed:{last_quality}",
+                    error=f"translation_quality_failed:{error_reason}",
                 )
             evidence_level = "FULLTEXT" if has_fulltext else "ABSTRACT_ONLY"
             return AnalysisResult(
@@ -774,11 +845,34 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
     # 内部辅助方法
     # ──────────────────────────────────────────────
 
+    def _call_llm_with_finish(self, prompt: str, max_tokens: Optional[int] = None) -> tuple[str, str]:
+        """复用 _call_llm，并从明确系统标记还原截断状态。"""
+        message = self._call_llm(prompt, max_tokens=max_tokens)
+        marker = "AI 解读因达到输出长度上限被截断"
+        return message, "length" if marker in message else ""
+
+    @staticmethod
+    def _extract_tagged_translation(raw: str) -> Optional[str]:
+        """从模型输出中提取边界标签内的译文。
+
+        返回标签内文本（不折叠换行，由调用方处理），失败返回 None。
+        """
+        if not raw:
+            return None
+        open_tag = ABSTRACT_TRANSLATION_OPEN_TAG
+        close_tag = ABSTRACT_TRANSLATION_CLOSE_TAG
+        start = raw.find(open_tag)
+        end = raw.find(close_tag)
+        if start < 0 or end < 0 or end <= start:
+            return None
+        return raw[start + len(open_tag):end].strip()
+
     def _call_llm(
         self,
         prompt: str,
         max_tokens: Optional[int] = None,
         retry: int = LLM_MAX_RETRIES,
+        response_format: Optional[dict[str, str]] = None,
     ) -> str:
         """调用 LLM API，自带重试并处理截断。
         按异常类型区分：配额耗尽、超时、认证错误、其他 API 错误。
@@ -789,12 +883,15 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
             try:
                 with self._usage_lock:
                     self.usage["requests"] += 1
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=self.temperature,
-                    max_tokens=effective_max_tokens,
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": self.temperature,
+                    "max_tokens": effective_max_tokens,
+                }
+                if response_format is not None:
+                    request_kwargs["response_format"] = response_format
+                response = self.client.chat.completions.create(**request_kwargs)
 
                 choice = response.choices[0]
                 # Token 用量统计（成本观测）
@@ -945,6 +1042,32 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
                     "请求参数含非 ASCII 字符（请检查 API Key / Base URL 是否为未替换的中文占位符）"
                 ) from e
 
+            except openai.APIConnectionError as e:
+                cause = self._runtime_dependency_cause(e)
+                if cause is not None:
+                    # 本地解压库接口不兼容（如旧版 Brotli + 新版 httpx2），
+                    # 每次请求都会在同一位置失败，重试网络请求无意义。
+                    logger.error(
+                        "[LLM_RUNTIME_ERROR] 本地解压依赖不兼容，不重试 | provider=%s | model=%s | cause: %s: %s",
+                        self.provider, self.model, type(cause).__name__, cause,
+                    )
+                    raise LLMRuntimeDependencyError(
+                        f"本地解压依赖不兼容，请运行 pip install -r requirements.txt 升级 brotli: {cause}"
+                    ) from e
+                delay = LLM_RETRY_BASE_DELAY * (attempt + 1)
+                if attempt < retry - 1:
+                    logger.warning(
+                        "LLM 调用第 %d/%d 次失败，等待 %.1f 秒 | provider=%s | model=%s: %s",
+                        attempt + 1, retry, delay, self.provider, self.model, e,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        "[LLM_ERROR] LLM 调用失败，重试耗尽 | provider=%s | model=%s: %s",
+                        self.provider, self.model, e, exc_info=True,
+                    )
+                    raise LLMError(f"LLM 调用失败，重试 {retry} 次后仍失败: {e}") from e
+
             except Exception as e:
                 delay = LLM_RETRY_BASE_DELAY * (attempt + 1)
                 if attempt < retry - 1:
@@ -968,8 +1091,31 @@ Related Work 部分的学术草稿（中文，300-500 字）。{focus_str}
                     )
                     raise LLMError(f"LLM 调用失败，重试 {retry} 次后仍失败: {e}") from e
 
-        # 不应到达此处，但为了类型完整性
+            # 不应到达此处，但为了类型完整性
         raise LLMError("LLM 调用失败：超出重试次数")
+
+    @staticmethod
+    def _runtime_dependency_cause(exc: Exception) -> Optional[BaseException]:
+        """沿 __cause__ 链找解压库接口不兼容的 TypeError。
+
+        httpx2 2.12 调用 brotli.Decompressor.process(data, output_buffer_limit=...),
+        但 brotli 1.0.x 的 process() 不接受该关键字参数，抛
+        TypeError: process() takes no keyword arguments。
+        该错误包装在 APIConnectionError 的 __cause__ 链中。
+        """
+        current: Optional[BaseException] = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, TypeError) and any(
+                pattern in str(current)
+                for pattern in ("takes no keyword arguments",
+                                "unexpected keyword argument",
+                                "got an unexpected keyword argument")
+            ):
+                return current
+            current = current.__cause__
+        return None
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         """从 LLM 返回文本中提取 JSON。

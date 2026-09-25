@@ -137,6 +137,11 @@ const API = {
     }[ch]));
   },
 
+  casZoneLabel(zone) {
+    const value = Number(zone);
+    return Number.isInteger(value) && value >= 1 && value <= 4 ? `${value}区` : "";
+  },
+
   /**
    * 清洗学术文献标题中的 LaTeX 数学格式及特殊标记（如 APS 期刊中的 ${\mathrm{PbZrO}}_{3}$ 等）
    */

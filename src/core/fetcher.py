@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup, Tag
 
 from fetchers import fetch_html, FetchResult, FetchStatus, BestFormat
+from fetchers.feed_dates import (annotate_nature_dates, publication_date,
+                                  unfetched_entries_may_be_in_window)
 from fetchers.models import (MAX_FULLTEXT_CHARS, MAX_STORED_FULLTEXT_CHARS,
                              MIN_FULLTEXT_LEN)  # 统一使用 fetchers.models 中的常量
 from fetchers.network import get_proxies
@@ -874,18 +876,17 @@ class JournalFetcher:
             re.sub(r"\s+", " ", BeautifulSoup(entry.get("title", ""), "html.parser").get_text()).strip()[:80]
             for entry in feed.entries[:5]
         ]
-        # 统计在日期窗口内的文献篇数（如有 pub_date）
-        cutoff = datetime.now() - timedelta(days=self.date_filter_days)
+        # Use the same provenance, calendar window and timezone policy as collection.
+        from processing import admission_decision
         window_count = 0
         for entry in feed.entries:
-            parsed = entry.get("published_parsed")
-            if parsed:
-                try:
-                    dt = datetime(*parsed[:6])
-                    if dt >= cutoff:
-                        window_count += 1
-                except Exception:
-                    pass
+            pub_date, source = publication_date(entry)
+            decision = admission_decision(
+                {"pub_date": pub_date, "pub_date_source": source},
+                self._window_date, self.config,
+            )
+            if decision["decision"] == "eligible":
+                window_count += 1
 
         return {
             "ok": True,
@@ -1048,10 +1049,16 @@ class JournalFetcher:
                                              "window_start": None, "window_end": self._window_date.isoformat()})
             return []
 
-        self._source_status().update({"raw_count": len(feed.entries), "truncated": len(feed.entries) > per_max,
-                                         "window_start": None, "window_end": self._window_date.isoformat()})
+        retained = feed.entries[:per_max]
+        # 截断只取决于"窗口内条目是否全部被覆盖"；讯息流历史存量超出
+        # 上限（大多是窗口外旧条目）是常态，不算不完整。
+        self._source_status().update({
+            "raw_count": len(feed.entries),
+            "truncated": unfetched_entries_may_be_in_window(
+                feed.entries, per_max, self._window_date, self.date_filter_days),
+            "window_start": None, "window_end": self._window_date.isoformat()})
         articles = []
-        for entry in feed.entries[:per_max]:
+        for entry in retained:
             art = self._parse_entry(entry, journal_name, publisher)
             if art:
                 articles.append(art)
@@ -1095,6 +1102,7 @@ class JournalFetcher:
                 resp.raise_for_status()
                 feed = feedparser.parse(resp.content)
                 if feed.entries:
+                    annotate_nature_dates(feed, resp.content, rss_url, resp.url)
                     return feed
             except Exception as e:
                 logger.warning(f"RSS 获取失败 (尝试 {attempt+1}/{self.retry}): {rss_url} - {e}")  # R6
@@ -1226,13 +1234,9 @@ class JournalFetcher:
             url = entry.get("link", "")
             doi = self._extract_doi(entry, url)
             detected_publisher = _get_publisher_from_doi(doi) or publisher
-            # feedparser converts published_parsed to UTC; retain timezone until admission.
-            pub_date = ""
-            pub_date_source = "missing"
-            parsed = entry.get("published_parsed")
-            if parsed:
-                pub_date = datetime(*parsed[:6]).isoformat() + "Z"
-                pub_date_source = "rss_published"
+            # Validate raw evidence before feedparser's permissive parsed dates.
+            # Admission later applies the shared timezone/window/future policy.
+            pub_date, pub_date_source = publication_date(entry)
             return {
                 "title":        title,
                 "journal":      journal_name,

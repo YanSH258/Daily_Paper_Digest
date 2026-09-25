@@ -290,7 +290,7 @@ const Settings = {
   },
 
   async reseedMetrics() {
-    if (!confirm("用内置种子覆盖期刊指标？会丢失手工修改的 IF。")) return;
+    if (!confirm("用内置种子覆盖期刊指标？会丢失手工修改的影响因子与分区。")) return;
     const msgEl = document.getElementById("jcrMsg");
     try {
       const data = await API.post("/api/journal-metrics/reseed", {});

@@ -1,11 +1,12 @@
 """Journal seeds must preserve user edits unless explicitly reset."""
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from core.db import Database
-from utils.journal_metrics import SEED_METRICS
+from utils.journal_metrics import PREVIOUS_SEED_METRICS, SEED_METRICS
 
 
 class MetricsSeedTests(unittest.TestCase):
@@ -70,6 +71,68 @@ class MetricsSeedTests(unittest.TestCase):
             with self.subTest(attempt=attempt):
                 self.reopen_db()
                 self.assertEqual(self.metric(self.seed["name"]), before)
+
+    def test_unchanged_previous_seed_is_upgraded_with_backup(self):
+        name, previous = next(iter(PREVIOUS_SEED_METRICS.items()))
+        current = next(m for m in SEED_METRICS if m["name"] == name)
+        conn = self.db.get_connection()
+        conn.execute(
+            "UPDATE journal_metrics SET full_name=?, if_value=?, cas_zone=?, issn=?, updated_at=? "
+            "WHERE name=?",
+            (previous["full_name"], previous["if_value"], previous["cas_zone"],
+             previous["issn"], self.OLD_TIMESTAMP, name),
+        )
+        conn.commit()
+
+        self.reopen_db()
+
+        upgraded = self.metric(name)
+        self.assertEqual(
+            {key: upgraded[key] for key in current if key != "name"},
+            {key: current[key] for key in current if key != "name"},
+        )
+        backups = list(Path(self.db_path).parent.glob("*backup*"))
+        self.assertEqual(len(backups), 1)
+
+    def test_metric_upgrade_stops_when_backup_fails(self):
+        name, previous = next(iter(PREVIOUS_SEED_METRICS.items()))
+        conn = self.db.get_connection()
+        conn.execute(
+            "UPDATE journal_metrics SET full_name=?, if_value=?, cas_zone=?, issn=? "
+            "WHERE name=?",
+            (previous["full_name"], previous["if_value"], previous["cas_zone"],
+             previous["issn"], name),
+        )
+        conn.commit()
+        self.db.close()
+
+        with patch.object(Database, "_backup_before_migration", side_effect=OSError("no space")):
+            with self.assertRaisesRegex(OSError, "no space"):
+                Database(self.db_path)
+
+        with sqlite3.connect(self.db_path) as unchanged:
+            row = unchanged.execute(
+                "SELECT full_name, if_value, cas_zone, issn FROM journal_metrics WHERE name=?",
+                (name,),
+            ).fetchone()
+        self.assertEqual(tuple(row), tuple(previous[k] for k in ("full_name", "if_value", "cas_zone", "issn")))
+
+    def test_partial_user_edit_prevents_automatic_seed_upgrade(self):
+        name, previous = next(iter(PREVIOUS_SEED_METRICS.items()))
+        conn = self.db.get_connection()
+        conn.execute(
+            "UPDATE journal_metrics SET full_name=?, if_value=?, cas_zone=?, issn=?, updated_at=? "
+            "WHERE name=?",
+            (previous["full_name"], 99.25, previous["cas_zone"], previous["issn"],
+             self.OLD_TIMESTAMP, name),
+        )
+        conn.commit()
+        before = self.metric(name)
+
+        self.reopen_db()
+
+        self.assertEqual(self.metric(name), before)
+        self.assertEqual(list(Path(self.db_path).parent.glob("*backup*")), [])
 
     def test_new_seed_is_added_without_changing_existing_metrics(self):
         before = self.customize_metric()

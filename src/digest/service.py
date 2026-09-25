@@ -36,7 +36,7 @@ CHANNELS = ("email", "feishu")
 # 快照保存渲染所需的文章字段（不只存可变 article_id，文章删除不影响历史）
 _SNAPSHOT_FIELDS = (
     "title", "authors", "journal", "pub_date", "url", "doi", "abstract",
-    "analysis", "evidence_level", "title_zh", "topic", "relevance",
+    "analysis", "evidence_level", "analysis_evidence_level", "title_zh", "topic", "relevance",
     "relevance_reason", "created_at", "cas_zone", "impact_factor",
 )
 

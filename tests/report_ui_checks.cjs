@@ -163,7 +163,7 @@ test("preview failure clears stale content and retry recovers", async () => {
   await h.run("Reports.previewVersion(7)");
   h.state.failBlob = true;
   await h.run("Reports.loadPreview()");
-  assert.match(h.element("reportPreviewStatus").textContent, /unauthorized/);
+  assert.match(h.element("reportPreviewStatus").textContent, /服务端 Token 未通过/);
   assert.equal(h.element("reportFrame").src, "");
   h.state.failBlob = false;
   await h.run("Reports.loadPreview()");

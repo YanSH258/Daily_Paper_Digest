@@ -125,9 +125,14 @@ async def run_checks(ctx, address):
             assert len(history["items"]) == 1
             error, data = parse(await session.call_tool("get_digest", {"version_id": 999999}))
             assert error, data
-            legacy = await call("today_top_n", {"date": DATE, "commit": True})
-            assert "deprecated" in legacy
+            # today_top_n 已去掉 legacy 的 commit 开关：只读
+            legacy = await call("today_top_n", {"date": DATE})
+            assert "deprecated" not in legacy, legacy
             assert len(ctx.db.list_digest_versions()) == 1
+            # 旧客户端可能仍传 commit=True：必须被忽略，不得写库（工具 schema 里已无此参数）
+            with_commit = await call("today_top_n", {"date": DATE, "commit": True})
+            assert "deprecated" not in with_commit, with_commit
+            assert len(ctx.db.list_digest_versions()) == 1, "commit=True 不应再产生任何写入"
 
             # 写路径与覆盖语义：写入后读回核验
             target = ctx.db._conn().execute(

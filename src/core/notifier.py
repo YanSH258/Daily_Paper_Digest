@@ -370,7 +370,9 @@ class Notifier:
                 lines += ["", "### 摘要", "", text(abstract), ""]
             sections, truncated = _report_analysis_sections(str(a.get("analysis") or ""))
             if sections:
-                lines += ["", "### AI 解读", ""]
+                analysis_heading = ("摘要译文" if a.get("analysis_evidence_level") == "ABSTRACT_ONLY"
+                                    else "AI 深度解读")
+                lines += ["", f"### {analysis_heading}", ""]
                 for heading, content in sections:
                     if heading:
                         lines += [f"#### {text(heading)}", ""]

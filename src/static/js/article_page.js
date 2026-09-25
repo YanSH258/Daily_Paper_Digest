@@ -61,14 +61,17 @@ const Article = {
           ? '<span class="ev-badge ev-abstract">摘要依据</span>'
           : '<span class="ev-badge ev-unknown">依据未知</span>'}
       ${a.has_analysis ? "" : '<span class="pill">暂无 AI 解读</span>'}
-      ${a.score_status === "failed" ? '<span class="pill">评分失败·将自动重试</span>' : ""}
+      ${a.score_status === "failed" ? `<span class="pill" title="${API.esc(a.score_error || "评分失败")}">评分失败·将自动重试</span>` : ""}
       ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
     `;
 
     document.getElementById("aReason").textContent = a.relevance_reason || "暂无研究关联依据，暂不判断对你课题的适用性。";
-    document.getElementById("analysisEvidence").textContent = a.evidence_level === "FULLTEXT"
-      ? "AI 解读 · 基于全文，请结合原文核实" : a.evidence_level === "ABSTRACT_ONLY"
-      ? "AI 解读 · 基于摘要" : "AI 解读 · 依据范围未确认";
+    const analysisLevel = a.analysis_evidence_level || a.evidence_level;
+    const analysisTitle = document.querySelector("#analysisCard h2");
+    if (analysisTitle) analysisTitle.textContent = analysisLevel === "ABSTRACT_ONLY" ? "摘要译文" : "AI 深度解读";
+    document.getElementById("analysisEvidence").textContent = analysisLevel === "FULLTEXT"
+      ? "AI 深度解读 · 基于全文，请结合原文核实" : analysisLevel === "ABSTRACT_ONLY"
+      ? "摘要译文 · 忠实翻译原摘要，不包含额外解读" : "AI 内容 · 依据范围未确认";
 
     // 操作行
     const fb = a.relevance_feedback || "";
@@ -127,9 +130,10 @@ const Article = {
       const data = await API.get("/api/journal-metrics");
       const metric = (data.items || []).find(m => m.name === a.journal);
       if (!metric) return;
+      const zone = API.casZoneLabel(metric.cas_zone);
       box.innerHTML = `<strong>${API.esc(a.journal)}</strong>` +
-        `<p class="small">影响因子：${API.esc(metric.if_value ?? "未提供")} · 分区：${API.esc(metric.cas_zone ?? "未提供")}</p>` +
-        '<p class="small muted">本地期刊指标；指标年份未确认</p>';
+        `<p class="small">影响因子：${API.esc(metric.if_value ?? "未提供")} · 中科院分区：${API.esc(zone || "未提供")}</p>` +
+        '<p class="small muted">本地期刊指标：影响因子为 2025 年数据；部分分区沿用既有值</p>';
     } catch (e) { box.append(document.createTextNode("（指标暂不可用）")); }
   },
 
@@ -225,16 +229,20 @@ const Article = {
     } catch (e) { alert("收藏失败: " + e.message); }
   },
 
-  async reanalyze(fetchFulltext = false) {
+  async reanalyze(mode = "abstract_translation") {
     const a = this.a;
     if (!a) return;
-    if (fetchFulltext && !confirm("先获取全文（arXiv/OA 自动下载）再做 AI 解读？将调用 LLM，约 30-120 秒。")) return;
-    const btn = document.getElementById("reanalyzeBtn");
+    const fulltext = mode === "fulltext_analysis";
+    const action = fulltext ? "先获取全文（arXiv/OA 自动下载）再做 AI 深度解读" : "把原摘要重新翻译为一段中文译文";
+    if (!confirm(`${action}？将调用 LLM，约 30-120 秒。`)) return;
+    const btn = fulltext ? document.getElementById("refetchBtn") : document.getElementById("reanalyzeBtn");
     const msg = document.getElementById("reanalyzeMsg");
     btn.disabled = true;
-    msg.textContent = "解读运行中…";
+    msg.textContent = fulltext ? "深度解读运行中…" : "摘要翻译中…";
     try {
-      const resp = await API.post(`/api/articles/${this.id}/reanalyze`, { fetch_fulltext: fetchFulltext });
+      const resp = await API.post(`/api/articles/${this.id}/reanalyze`, {
+        mode, fetch_fulltext: fulltext,
+      });
       if (resp.ok) {
         this.a = resp.item;
         this.render(this.a);

@@ -8,7 +8,7 @@ const Trends = {
       this.renderMonthly(d.monthly || []);
       this.renderBars("trendJournals", (d.journals || []).map((j) => ({
         label: j.journal, value: j.total,
-        sub: `相关 ${j.relevant}/${j.total}`,
+        sub: `模型相关 ${j.model_relevant}/${j.model_scored} · 手动 ${j.manual_scored} · 来源未标记 ${j.unknown_scored}`,
       })));
       this.renderBars("trendVia", (d.discovered_via || []).map((v) => ({
         label: ({ rss: "RSS 订阅", citation_watch: "引文追踪", author_watch: "作者追踪",
@@ -33,9 +33,9 @@ const Trends = {
         <span class="trend-label mono">${API.esc(r.month)}</span>
         <div class="trend-track">
           <div class="trend-fill" style="width:${Math.round(r.total / max * 100)}%;"></div>
-          <div class="trend-fill accent" style="width:${Math.round((r.relevant || 0) / max * 100)}%;"></div>
+          <div class="trend-fill accent" style="width:${Math.round((r.model_relevant || 0) / max * 100)}%;"></div>
         </div>
-        <span class="small muted">${r.total} 篇 / 相关 ${r.relevant || 0}</span>
+        <span class="small muted">${r.total} 篇 · 模型相关 ${r.model_relevant || 0}/${r.model_scored || 0} · 手动 ${r.manual_scored || 0} · 来源未标记 ${r.unknown_scored || 0}</span>
       </div>`).join("");
   },
 

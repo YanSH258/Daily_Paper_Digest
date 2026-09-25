@@ -56,7 +56,7 @@ def test_runtime_and_dev_dependency_contract():
     text = open(f"{root}/requirements.txt", encoding="utf-8").read().lower()
     runtime, marker, dev = text.partition("# ---- 以下为开发")
     assert marker, "dev section marker missing"
-    for pkg in ("requests", "feedparser", "openai"):
+    for pkg in ("requests", "feedparser", "openai", "brotli"):
         assert pkg in runtime
     assert "pytest" not in runtime and "httpx2" not in runtime
     for pkg in ("pytest", "httpx2"):

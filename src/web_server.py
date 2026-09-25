@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core.analyzer import LLMAnalyzer
 from core.db import Database
+from processing import task_status_and_error
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import Notifier, classify_article
 from digest.service import DigestError, DigestService
@@ -95,9 +96,34 @@ class TaskRunner:
             "last_report": None,
             "run_count": 0,
             "success_count": 0,
+            "partial_count": 0,
             "failure_count": 0,
+            "last_status": None,
             "last_stats": None,
         }
+        if db is not None:
+            try:
+                runs = db.list_task_runs(limit=1000)
+                if isinstance(runs, list) and runs:
+                    latest = runs[0]
+                    self.state.update({
+                        "task_id": latest.get("task_id"),
+                        "trigger": latest.get("trigger"),
+                        "mode": latest.get("mode"),
+                        "started_at": latest.get("started_at"),
+                        "ended_at": latest.get("ended_at"),
+                        "last_status": latest.get("status"),
+                        "last_error": latest.get("error"),
+                        "last_stats": latest.get("stats"),
+                        "run_count": len(runs),
+                        "success_count": sum(r.get("status") == "success" for r in runs),
+                        "partial_count": sum(r.get("status") == "partial" for r in runs),
+                        "failure_count": sum(r.get("status") in ("failed", "interrupted") for r in runs),
+                    })
+                    latest_success = next((r for r in runs if r.get("status") == "success"), None)
+                    self.state["last_success_at"] = (latest_success or {}).get("ended_at")
+            except Exception:  # noqa: BLE001 - 状态恢复失败不阻断 Web 启动
+                logger.debug("恢复历史任务状态失败", exc_info=True)
 
     def _make_run_cfg(self, mode: str, base_config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         cfg = copy.deepcopy(base_config if base_config is not None else self._base_config)
@@ -133,6 +159,7 @@ class TaskRunner:
                 "started_at": datetime.now().isoformat(timespec="seconds"),
                 "ended_at": None,
                 "last_error": None,
+                "last_status": "running",
                 "last_stats": None,
             })
 
@@ -149,7 +176,7 @@ class TaskRunner:
                   config_snapshot: Optional[dict[str, Any]] = None) -> None:
         base = config_snapshot if config_snapshot is not None else copy.deepcopy(self._base_config)
         cfg = self._make_run_cfg(mode, base)
-        success = False
+        status = "failed"
         error_msg = None
         stats: Optional[dict[str, Any]] = None
 
@@ -166,11 +193,10 @@ class TaskRunner:
                     cfg, date_str=date_str, task_id=task_id,
                     trial=run_mode == "trial", preview=run_mode == "preview", refresh=refresh,
                 )
-            success = not (stats and stats.get("digest_overall_status") == "failed")
-            if not success:
-                error_msg = "; ".join(e.get("message", "日报失败") for e in stats.get("digest_errors", [])) or "日报生成失败"
-            logger.info("任务完成: task_id=%s", task_id)
+            status, error_msg = task_status_and_error(stats)
+            logger.info("任务完成: task_id=%s status=%s", task_id, status)
         except Exception as e:  # pragma: no cover - 运行期保护
+            status = "failed"
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             logger.error("任务失败: task_id=%s, error=%s", task_id, e, exc_info=True)
 
@@ -178,24 +204,22 @@ class TaskRunner:
             self.state["running"] = False
             self.state["ended_at"] = datetime.now().isoformat(timespec="seconds")
             self.state["run_count"] += 1
+            self.state["last_status"] = status
             if stats is not None:
                 self.state["last_stats"] = stats
-            if success:
+            if status == "success":
                 self.state["success_count"] += 1
                 self.state["last_success_at"] = self.state["ended_at"]
+            elif status == "partial":
+                self.state["partial_count"] += 1
+                self.state["last_error"] = error_msg
             else:
                 self.state["failure_count"] += 1
                 self.state["last_error"] = error_msg
 
         if self._db is not None:
-            status = "success" if success else "failed"
-            if success and stats and (stats.get("db_errors") or stats.get("scored_failed")
-                                      or stats.get("analyzed_failed")
-                                      or stats.get("source_failed") or stats.get("source_incomplete")
-                                      or stats.get("digest_overall_status") == "partial"):
-                status = "partial"
             self._db.task_finish(task_id, status=status, stats=stats, error=error_msg,
-                                 stage="done" if success else "failed")
+                                 stage="failed" if status == "failed" else "done")
 
     def get_state(self) -> dict[str, Any]:
         with self._lock:
@@ -346,7 +370,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
         # 2. 数据库层面物理分页，避免全量内存加载（不含 fulltext_text 大字段）
         sql = (
             "SELECT id, doi, title, journal, authors, pub_date, url, relevance, analysis, "
-            "abstract, starred, tags, created_at, topic, relevance_reason, score_status, "
+            "abstract, starred, tags, created_at, topic, relevance_reason, score_status, score_error, "
             "evidence_level, analysis_status, read_status, relevance_feedback, "
             "zotero_key, discovered_via, cited_count, sim_prior, title_zh, "
             "jm.if_value AS impact_factor, jm.cas_zone AS cas_zone "
@@ -1281,18 +1305,46 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
     return {"ok": True, "changed": changed}, 200
 
 
+_MANUAL_SCORE_SQL = (
+    "(COALESCE(score_model,'')='manual' OR COALESCE(score_basis,'')='manual' "
+    "OR COALESCE(discovered_via,'')='manual')"
+)
+_MODEL_SCORE_SQL = (
+    f"(relevance IS NOT NULL AND NOT {_MANUAL_SCORE_SQL} "
+    "AND trim(COALESCE(score_model,'')) != '')"
+)
+_UNKNOWN_SCORE_SQL = (
+    f"(relevance IS NOT NULL AND NOT {_MANUAL_SCORE_SQL} AND NOT {_MODEL_SCORE_SQL})"
+)
+
+
 def _db_summary(ctx: WebContext) -> dict[str, Any]:
     conn = ctx.connect_db()
     try:
-        total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
-        analyzed = conn.execute(
-            "SELECT COUNT(*) FROM articles WHERE analysis IS NOT NULL AND analysis != ''"
-        ).fetchone()[0]
-        avg_score = conn.execute("SELECT ROUND(AVG(COALESCE(relevance, 0)), 2) FROM articles").fetchone()[0]
+        row = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN analysis IS NOT NULL AND analysis != '' THEN 1 ELSE 0 END), "
+            f"ROUND(AVG(CASE WHEN {_MODEL_SCORE_SQL} THEN relevance END), 2), "
+            f"SUM(CASE WHEN {_MODEL_SCORE_SQL} THEN 1 ELSE 0 END), "
+            f"ROUND(AVG(CASE WHEN {_MANUAL_SCORE_SQL} THEN relevance END), 2), "
+            f"SUM(CASE WHEN {_MANUAL_SCORE_SQL} AND relevance IS NOT NULL THEN 1 ELSE 0 END), "
+            f"ROUND(AVG(CASE WHEN {_UNKNOWN_SCORE_SQL} THEN relevance END), 2), "
+            f"SUM(CASE WHEN {_UNKNOWN_SCORE_SQL} THEN 1 ELSE 0 END), "
+            "ROUND(AVG(relevance), 2) FROM articles"
+        ).fetchone()
+        model_avg = row[2] or 0
         return {
-            "total_articles": total,
-            "analyzed_articles": analyzed,
-            "avg_relevance": avg_score or 0,
+            "total_articles": row[0],
+            "analyzed_articles": row[1] or 0,
+            # Compatibility field now has an unambiguous model-only definition.
+            "avg_relevance": model_avg,
+            "avg_model_relevance": model_avg,
+            "model_scored": row[3] or 0,
+            "avg_manual_relevance": row[4] or 0,
+            "manual_scored": row[5] or 0,
+            "avg_unknown_relevance": row[6] or 0,
+            "unknown_scored": row[7] or 0,
+            "avg_all_scored_relevance": row[8] or 0,
         }
     finally:
         conn.close()
@@ -1672,23 +1724,42 @@ def _reanalyze_article_unlocked(ctx: WebContext, article_id: int, data: Optional
         return {"ok": False, "error": f"LLM 初始化失败，请检查配置: {e}"}, 500
 
     article = dict(item)
-    # 缺摘要时先尝试 OpenAlex/Crossref 补全，避免"仅凭标题"解读
-    if not (article.get("abstract") or "").strip() and article.get("doi"):
-        try:
-            work, source = _lookup_doi_metadata(ctx, article["doi"])
-            if work.get("abstract"):
-                ctx.db.update_article_fields(article_id, abstract=work["abstract"])
-                article["abstract"] = work["abstract"]
-                logger.info("解读前按 DOI 补全摘要（来源 %s）: article_id=%s", source, article_id)
-        except Exception:  # noqa: BLE001 - 补全失败不阻断解读
-            pass
+    data = data or {}
+    requested_mode = str(data.get("mode") or "").strip().lower()
+    if requested_mode not in {"", "abstract_translation", "fulltext_analysis"}:
+        return {"ok": False, "error": "mode 必须是 abstract_translation 或 fulltext_analysis"}, 400
+    # 兼容旧客户端：fetch_fulltext=true 等价于全文解读；省略 mode 时沿用已有证据。
+    if not requested_mode:
+        requested_mode = "fulltext_analysis" if data.get("fetch_fulltext") else (
+            "fulltext_analysis" if article.get("evidence_level") == "FULLTEXT" else "abstract_translation"
+        )
+    force_abstract = requested_mode == "abstract_translation"
+    force_fulltext = requested_mode == "fulltext_analysis" and bool(data.get("fetch_fulltext"))
+    if force_abstract:
+        # 即使文章曾保存过全文，显式摘要模式也只翻译摘要。
+        article["evidence_level"] = "ABSTRACT_ONLY"
 
-    # 可选：先抓全文再解读（粗筛模式下按需深读的入口）
-    if data.get("fetch_fulltext"):
+    # 摘要模式优先补全摘要，但不因已有全文而切换到全文解读。
+    if force_abstract or not (article.get("abstract") or "").strip():
+        if not (article.get("abstract") or "").strip() and article.get("doi"):
+            try:
+                work, source = _lookup_doi_metadata(ctx, article["doi"])
+                if work.get("abstract"):
+                    ctx.db.update_article_fields(article_id, abstract=work["abstract"])
+                    article["abstract"] = work["abstract"]
+                    logger.info("解读前按 DOI 补全摘要（来源 %s）: article_id=%s", source, article_id)
+            except Exception:  # noqa: BLE001 - 补全失败不阻断解读
+                pass
+
+    # 仅全文模式且明确要求取全文时才访问全文抓取层。
+    if force_fulltext:
         try:
             from core.fetcher import JournalFetcher
             fetcher = JournalFetcher(ctx.config)
-            fr = fetcher.fetch_fulltext_with_status(article)
+            try:
+                fr = fetcher.fetch_fulltext_with_status(article)
+            finally:
+                fetcher.close()
             ev = getattr(fr.evidence_level, "value", str(fr.evidence_level))
             updates = {
                 "fetch_status": getattr(fr.fetch_status, "value", str(fr.fetch_status)),
@@ -1723,11 +1794,14 @@ def _reanalyze_article_unlocked(ctx: WebContext, article_id: int, data: Optional
 
     from core.analyzer import PROMPT_VERSION
     import hashlib as _hashlib
-    input_text = article.get("fulltext_text") or article.get("abstract") or ""
+    input_text = (article.get("abstract") or "") if force_abstract else (
+        article.get("fulltext_text") or article.get("abstract") or ""
+    )
     now = datetime.now().isoformat(timespec="seconds")
     ctx.db.update_article_fields(
         article_id,
         analysis=result["analysis"], analysis_status="ok",
+        analysis_evidence_level=result.get("evidence_level"),
         analysis_model=analyzer.model, analysis_prompt_version=PROMPT_VERSION,
         analysis_input_hash=_hashlib.sha256(
             (input_text + "|" + PROMPT_VERSION).encode("utf-8")).hexdigest(),
@@ -1873,27 +1947,45 @@ def _run_tool(ctx: WebContext, data: dict[str, Any], kind: str) -> tuple[dict[st
 def _trends_view(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, Any]:
     months = _to_int(query.get("months", ["6"])[0], 6, 2, 24)
     threshold = float(ctx.config.get("relevance_threshold", 4))
+    score_columns = (
+        f"SUM(CASE WHEN {_MODEL_SCORE_SQL} THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {_MODEL_SCORE_SQL} AND relevance >= ? THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {_MANUAL_SCORE_SQL} AND relevance IS NOT NULL THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {_MANUAL_SCORE_SQL} AND relevance >= ? THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {_UNKNOWN_SCORE_SQL} THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN {_UNKNOWN_SCORE_SQL} AND relevance >= ? THEN 1 ELSE 0 END)"
+    )
+
+    def score_row(row, *, label: str) -> dict[str, Any]:
+        return {
+            label: row[0], "total": row[1],
+            # Legacy aggregate retained for API compatibility; consumers that care
+            # about provenance must use the explicit groups below.
+            "relevant": (row[3] or 0) + (row[5] or 0) + (row[7] or 0),
+            "model_scored": row[2] or 0, "model_relevant": row[3] or 0,
+            "manual_scored": row[4] or 0, "manual_relevant": row[5] or 0,
+            "unknown_scored": row[6] or 0, "unknown_relevant": row[7] or 0,
+        }
+
     conn = ctx.connect_db()
     try:
         monthly = conn.execute(
             "SELECT strftime('%Y-%m', date(created_at, 'localtime')) AS m, COUNT(*), "
-            "SUM(CASE WHEN COALESCE(relevance, 0) >= ? THEN 1 ELSE 0 END) "
-            "FROM articles GROUP BY m ORDER BY m DESC LIMIT ?",
-            (threshold, months)).fetchall()
+            + score_columns + " FROM articles GROUP BY m ORDER BY m DESC LIMIT ?",
+            (threshold, threshold, threshold, months)).fetchall()
         journals = conn.execute(
-            "SELECT journal, COUNT(*) AS total, "
-            "SUM(CASE WHEN COALESCE(relevance, 0) >= ? THEN 1 ELSE 0 END) AS relevant "
-            "FROM articles WHERE journal IS NOT NULL AND trim(journal) != '' "
-            "GROUP BY journal ORDER BY total DESC, relevant DESC",
-            (threshold,)).fetchall()
+            "SELECT journal, COUNT(*) AS total, " + score_columns +
+            " FROM articles WHERE journal IS NOT NULL AND trim(journal) != '' "
+            "GROUP BY journal ORDER BY total DESC, journal",
+            (threshold, threshold, threshold)).fetchall()
         via = conn.execute(
             "SELECT COALESCE(discovered_via, 'rss') AS src, COUNT(*) FROM articles "
             "GROUP BY src ORDER BY 2 DESC").fetchall()
         statuses = conn.execute(
             "SELECT COALESCE(read_status, '') AS st, COUNT(*) FROM articles GROUP BY st").fetchall()
         return {
-            "monthly": [{"month": r[0], "total": r[1], "relevant": r[2] or 0} for r in monthly],
-            "journals": [{"journal": r[0], "total": r[1], "relevant": r[2] or 0} for r in journals],
+            "monthly": [score_row(r, label="month") for r in monthly],
+            "journals": [score_row(r, label="journal") for r in journals],
             "discovered_via": [{"via": r[0], "count": r[1]} for r in via],
             "read_status": [{"status": r[0] or "未加入清单", "count": r[1]} for r in statuses],
         }

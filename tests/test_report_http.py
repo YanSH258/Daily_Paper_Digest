@@ -216,7 +216,71 @@ class TaskDigestStatusTests(unittest.TestCase):
                     runner._run_task("test-task", "manual", "default", "2026-09-11")
                 self.assertEqual(db.task_finish.call_args.kwargs["status"], expected)
                 self.assertEqual(runner.state["failure_count"], int(digest_status == "failed"))
+                self.assertEqual(runner.state["partial_count"], int(digest_status == "partial"))
+                self.assertEqual(runner.state["success_count"], 0)
+                self.assertEqual(runner.state["last_status"], expected)
                 self.assertEqual(runner.state["last_stats"], stats)
+
+    def test_all_score_attempts_failed_marks_task_failed_with_reason(self):
+        runner = web_server.TaskRunner({})
+        db = Mock()
+        runner.attach_db(db)
+        stats = {
+            "score_attempted": 25, "scored_ok": 0, "scored_failed": 25,
+            "score_errors": {"LLMRuntimeDependencyError": {
+                "count": 25, "samples": ["Paper A", "Paper B"]}},
+        }
+        with patch.object(web_server, "run_once", return_value=stats):
+            runner._run_task("test-task", "manual", "light", "2026-09-20")
+        self.assertEqual(runner.state["last_status"], "failed")
+        self.assertEqual(runner.state["failure_count"], 1)
+        self.assertEqual(runner.state["success_count"], 0)
+        self.assertIn("LLMRuntimeDependencyError×25", runner.state["last_error"])
+        self.assertIn("Paper A", runner.state["last_error"])
+        self.assertEqual(db.task_finish.call_args.kwargs["status"], "failed")
+
+    def test_source_truncation_alone_does_not_mark_task_partial(self):
+        runner = web_server.TaskRunner({})
+        db = Mock()
+        runner.attach_db(db)
+        stats = {
+            "source_incomplete": 2,
+            "sources": [
+                {"source_id": 17, "name": "ChemCatChem", "success": True, "complete": False},
+                {"source_id": 21, "name": "Angew. Chem. Int. Ed.", "success": True, "complete": False},
+            ],
+        }
+        with patch.object(web_server, "run_once", return_value=stats):
+            runner._run_task("test-task", "manual", "light", "2026-09-23")
+        self.assertEqual(db.task_finish.call_args.kwargs["status"], "success")
+        self.assertEqual(runner.state["last_status"], "success")
+        self.assertEqual(runner.state["success_count"], 1)
+        self.assertEqual(runner.state["partial_count"], 0)
+
+    def test_source_failure_error_names_the_sources(self):
+        runner = web_server.TaskRunner({})
+        db = Mock()
+        runner.attach_db(db)
+        stats = {
+            "source_failed": 1,
+            "sources": [{"source_id": 2, "name": "Nature Materials",
+                         "success": False, "complete": False}],
+        }
+        with patch.object(web_server, "run_once", return_value=stats):
+            runner._run_task("test-task", "manual", "light", "2026-09-23")
+        self.assertEqual(runner.state["last_status"], "partial")
+        self.assertIn("来源抓取失败×1（如：Nature Materials）", runner.state["last_error"])
+        self.assertEqual(db.task_finish.call_args.kwargs["status"], "partial")
+
+    def test_push_delivery_failure_marks_task_partial(self):
+        runner = web_server.TaskRunner({})
+        db = Mock()
+        runner.attach_db(db)
+        stats = {"push_results": {"email": False}}
+        with patch.object(web_server, "run_once", return_value=stats):
+            runner._run_task("test-task", "manual", "light", "2026-09-23")
+        self.assertEqual(runner.state["last_status"], "partial")
+        self.assertIn("投递失败", runner.state["last_error"])
 
 
 if __name__ == "__main__":

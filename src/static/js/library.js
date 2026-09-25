@@ -217,10 +217,8 @@ const Library = {
     if (a.impact_factor != null && a.impact_factor !== "") {
       parts.push(`IF ${Number(a.impact_factor).toFixed(1)}`);
     }
-    // cas_zone 存 JCR 四分位 1-4，显示为 Q1…；无则退回「N区」
-    if (a.cas_zone) {
-      parts.push(`Q${a.cas_zone}`);
-    }
+    const zone = API.casZoneLabel(a.cas_zone);
+    if (zone) parts.push(`中科院 ${API.esc(zone)}`);
     return parts;
   },
 
@@ -390,7 +388,7 @@ const Library = {
         <td>${Number(a.relevance || 0).toFixed(1)}</td>
         <td>${API.esc(a.topic || "")}</td>
         <td>${API.esc(a.journal || "")}${a.impact_factor != null && a.impact_factor !== ""
-          ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${a.cas_zone ? " · Q" + a.cas_zone : ""}</div>`
+          ? `<div class="small muted">IF ${Number(a.impact_factor).toFixed(1)}${API.casZoneLabel(a.cas_zone) ? " · 中科院 " + API.esc(API.casZoneLabel(a.cas_zone)) : ""}</div>`
           : ""}</td>
         <td><span class="title-link" data-id="${a.id}">${
           a.title_zh ? `<div class="title-zh">${API.esc(a.title_zh)}</div>` : ""

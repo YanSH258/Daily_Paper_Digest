@@ -362,7 +362,8 @@ def preview_collection(config: dict, date_str: str, *, refresh: bool = False) ->
     refresh=True 强制重新采集。
     """
     import sqlite3
-    from processing import admission_decision, build_queue, validate_budget
+    from processing import (admission_decision, build_queue, discovered_metadata_updates,
+                            needs_abstract_rescore, scoring_candidates, validate_budget)
     cache_path = _preview_cache_path(config, date_str)
     if not refresh:
         try:
@@ -391,19 +392,29 @@ def preview_collection(config: dict, date_str: str, *, refresh: bool = False) ->
               "new_eligible": 0, "new_quarantined": 0, "already_in_db": 0,
               "score_attempted": 0, "llm_requests": 0, "sources": sources,
               "report_skipped_reason": "采集预览不调用模型、不入库、不生成正式日报或推送"}
+    journals_by_id = {j.get("id"): j for j in journals}
+    for result_item in sources:
+        source = journals_by_id.get(result_item.get("source_id") or result_item.get("id"))
+        if source and not result_item.get("name"):
+            result_item["name"] = source.get("name") or source.get("rss") or ""
     unique = dedupe_batch(raw)
     result["cross_source_duplicates"] = len(raw) - len(unique)
     known = dedupe_batch(existing)
     dois = {a.get("doi") for a in known if a.get("doi")}
     urls = {a.get("url") for a in known if a.get("url")}
     titles = {" ".join(str(a.get("title") or "").lower().split()) for a in known}
-    pending = []
-    for a in existing:
-        if a.get("score_status") == "ok" or a.get("processed"):
-            continue
-        decision = admission_decision(a, date_str, config)
-        if a.get("processing_status") == "eligible" or (a.get("processing_status") in (None, "", "unreviewed") and decision["decision"] == "eligible"):
-            pending.append({**a, "processing_status": "eligible"})
+    by_doi = {str(a["doi"]).strip().lower(): a for a in existing if a.get("doi")}
+    by_url = {a["url"]: a for a in existing if a.get("url")}
+    for discovery in raw:
+        doi = str(discovery.get("doi") or "").strip().lower()
+        current = by_doi.get(doi) or by_url.get(discovery.get("url"))
+        if current is not None:
+            current_doi = str(current.get("doi") or "").strip().lower()
+            if doi and current_doi and doi != current_doi:
+                continue
+            candidate = {**discovery, "_admission": admission_decision(discovery, date_str, config)}
+            current.update(discovered_metadata_updates(current, candidate))
+    pending = scoring_candidates(existing, date_str, config)
     for index, a in enumerate(unique, 1):
         decision = admission_decision(a, date_str, config)
         if decision["decision"] != "eligible":
@@ -419,7 +430,9 @@ def preview_collection(config: dict, date_str: str, *, refresh: bool = False) ->
             result["new_quarantined"] += 1
     selected = build_queue(pending, config, validate_budget(config))
     result.update(score_queue_total=len(pending), score_planned=len(selected),
-                  score_deferred=len(pending) - len(selected))
+                  score_deferred=len(pending) - len(selected),
+                  rescore_queued=sum(needs_abstract_rescore(row) for row in pending),
+                  rescore_selected=sum(needs_abstract_rescore(row) for row in selected))
     # Truncation is normal (we keep the newest N), so only real failures block
     # reuse: a failed source must be retried on the next preview.
     failed = sum(1 for s in sources if not s.get("success"))
@@ -453,7 +466,8 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
     threshold = config.get("relevance_threshold", 5)
     retry_window_days = int(config.get("fetcher", {}).get("retry_window_days", 7))
     processing_cfg = config.get("processing", {}) or {}
-    from processing import admission_decision, validate_budget
+    from processing import (ABSTRACT_RESCORE_ERROR, admission_decision, is_score_retry,
+                            needs_abstract_rescore, task_status_and_error, validate_budget)
     validate_budget(config, trial=trial)
     score_budget = int(processing_cfg.get("trial_max_score_articles", 30) if trial else
                        processing_cfg.get("max_score_articles_per_run", 100))
@@ -463,6 +477,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         "fetched": 0, "batch_duplicates": 0, "db_duplicates": 0,
         "new_articles": 0, "retried_score": 0, "retried_analysis": 0,
         "scored_ok": 0, "scored_failed": 0,
+        "rescored_ok": 0, "rescored_failed": 0, "dates_completed": 0,
         "candidates": 0, "fulltext_fetched": 0, "abstract_completed": 0,
         "analyzed_ok": 0, "analyzed_failed": 0, "analyzed_skipped": 0,
         "saved": 0, "db_errors": 0,
@@ -618,6 +633,13 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 db.update_article_fields(a["id"], discovered_via=via)
         discovery_pairs = []
         for discovery in all_discoveries:
+            try:
+                completed = db.complete_discovered_metadata(discovery)
+                stats["abstract_completed"] += int("abstract" in completed)
+                stats["dates_completed"] += int("pub_date" in completed)
+            except Exception as exc:
+                stats["db_errors"] += 1
+                logger.error("重复文章的元数据补充未保存: %s", exc)
             aid = db.record_article_sources(discovery)
             if aid is not None:
                 discovery_pairs.append((aid, discovery))
@@ -627,7 +649,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 stats["citation_edges"] = edges
             # 追踪文章已全部尝试入库：此时才推进引文/作者游标。
             # 入库失败（save_articles_batch 部分失败）时不推进对应窗口，下轮可重试。
-            if stats["saved"] == stats.get("new_articles", 0):
+            if stats["saved"] == stats.get("new_articles", 0) and not stats["db_errors"]:
                 mark_tracking_cursor(db, tracking_meta)
             else:
                 logger.warning("  有文章入库失败，本次不推进追踪游标（失败窗口将重试）")
@@ -635,6 +657,11 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         progress("saved_base")
 
         source_results = getattr(fetcher, "source_results", [])
+        journals_by_id = {j.get("id"): j for j in config.get("journals", [])}
+        for result in source_results:
+            source = journals_by_id.get(result.get("source_id") or result.get("id"))
+            if source and not result.get("name"):
+                result["name"] = source.get("name") or source.get("rss") or ""
         stats["sources"] = source_results
         stats["source_failed"] = sum(not r["success"] for r in source_results)
         stats["source_incomplete"] = sum(r["success"] and not r["complete"] for r in source_results)
@@ -650,7 +677,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         stats.update(queue)
         stats["score_attempted"] = 0
         new_id_set = {a["id"] for a in new_articles}
-        score_retry = [a for a in to_score if a.get("score_status") == "failed"]
+        score_retry = [a for a in to_score if is_score_retry(a)]
         stats["retried_score"] = len(score_retry)
         analysis_queue = db.get_analysis_queue(config, date_str, trial=trial)
         analysis_retry = analysis_queue["selected"]
@@ -746,9 +773,30 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         score_results: list[Any] = [None] * len(to_score)
 
         score_counter_lock = __import__("threading").Lock()
+        _score_abort = __import__("threading").Event()
+
+        # 确定性错误类型：出现一次就停止整个批次，避免重复消耗
+        from core.analyzer import LLMRuntimeDependencyError, LLMQuotaExhaustedError, LLMError as _LLMError
+        _batch_abort_error: Optional[Exception] = None
+
+        def _is_deterministic(err: Exception) -> bool:
+            """认证失败、模型名错误、本地依赖不兼容：重试必败。"""
+            if isinstance(err, LLMRuntimeDependencyError):
+                return True
+            if isinstance(err, _LLMError) and "API 客户端错误" in str(err):
+                return True
+            if isinstance(err, LLMQuotaExhaustedError) and "认证失败" in str(err):
+                return True
+            return False
+
+        score_errors: dict[str, int] = {}
+        score_error_samples: dict[str, list[str]] = {}
 
         def _score_one(idx_article):
+            nonlocal _batch_abort_error
             idx, article = idx_article
+            if _score_abort.is_set():
+                return
             logger.info(f"  [{idx+1}/{len(to_score)}] 评分: {article['title'][:60]}...")
             with score_counter_lock:
                 stats["score_attempted"] += 1
@@ -757,49 +805,84 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
             except Exception as e:  # noqa: BLE001 - 单篇评分失败不阻断批次
                 logger.error(f"  评分失败 (idx={idx}): {e}")
                 score_results[idx] = e
+                kind = type(e).__name__
+                with score_counter_lock:
+                    score_errors[kind] = score_errors.get(kind, 0) + 1
+                    samples = score_error_samples.setdefault(kind, [])
+                    if len(samples) < 3:
+                        samples.append(article.get("title", "")[:100])
+                if _is_deterministic(e) and not _score_abort.is_set():
+                    _batch_abort_error = e
+                    _score_abort.set()
+                    logger.warning(f"  评分遇到确定性错误，停止剩余队列: {e}")
 
         llm_concurrency = config.get("performance", {}).get("llm_concurrency", 3)
         with concurrent.futures.ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
             list(executor.map(_score_one, enumerate(to_score)))
 
+        if _score_abort.is_set() and _batch_abort_error is not None:
+            aborted = sum(1 for r in score_results if r is None)
+            stats["score_aborted"] = aborted
+            stats["score_deferred"] += aborted
+            stats["score_abort_error"] = str(_batch_abort_error)[:300]
+            logger.warning(f"  批次熔断: {aborted} 篇未评分，保持队列等待下轮")
+
         candidate_articles: list[dict] = []
         for article, res in zip(to_score, score_results):
+            if res is None:
+                # 批次熔断：未评分的文章保持队列状态，不写失败、不消耗预算
+                continue
+            rescore = needs_abstract_rescore(article)
             if isinstance(res, dict):
-                ok = db.update_article_fields(
-                    article["id"],
-                    relevance=res["score"], relevance_reason=res["reason"],
-                    score_status="ok", score_model=res["model"], score_basis=res["basis"],
-                    sim_prior=article.get("sim_prior"),
-                )
-                article.update({
+                analyzed = article.get("analysis_status") == "ok"
+                updates = {
                     "relevance": res["score"], "relevance_reason": res["reason"],
-                    "score_status": "ok",
-                })
-                stats["scored_ok"] += 1
+                    "score_status": "ok", "score_error": None,
+                    "score_model": res["model"], "score_basis": res["basis"],
+                    "score_prompt_version": res.get("prompt_version"),
+                    "sim_prior": article.get("sim_prior"),
+                    "processed": int(res["score"] < threshold or analyzed),
+                }
+                ok = db.update_article_fields(article["id"], **updates)
                 if not ok:
                     stats["db_errors"] += 1
-                if ok and res["score"] >= threshold:
-                    candidate_articles.append(article)
+                    continue
+                article.update(updates)
+                stats["scored_ok"] += 1
+                stats["rescored_ok"] += int(rescore)
+                if res["score"] >= threshold:
+                    if not analyzed:
+                        candidate_articles.append(article)
                     logger.info(f"    ✓ 入选: {article['title'][:60]} (score={res['score']:.1f})")
                 else:
-                    # 评分完成且低于阈值：该文章处理结束
-                    db.update_article_fields(article["id"], processed=1)
                     logger.info(f"    ✗ 过滤: {article['title'][:60]} (score={res['score']:.1f})")
             else:
                 err = res if isinstance(res, Exception) else RuntimeError("未知评分错误")
-                ok = db.update_article_fields(
-                    article["id"], score_status="failed", score_error=str(err)[:500],
-                )
-                article["score_status"] = "failed"
+                updates = {"score_error": ((ABSTRACT_RESCORE_ERROR if rescore else "") + str(err))[:500]}
+                if not rescore:
+                    updates["score_status"] = "failed"
+                ok = db.update_article_fields(article["id"], **updates)
+                if ok:
+                    article.update(updates)
                 stats["scored_failed"] += 1
+                stats["rescored_failed"] += int(rescore)
                 if not ok:
                     stats["db_errors"] += 1
+                if (rescore and float(article.get("relevance") or 0) >= threshold
+                        and not article.get("processed") and article.get("analysis_status") in (None, "", "failed")):
+                    candidate_articles.append(article)
 
         # 分析失败重试的文章直接进入候选（评分已通过）
         candidate_articles = list({a["id"]: a for a in analysis_retry + candidate_articles}.values())
         stats["analysis_deferred"] += max(0, len(candidate_articles) - score_budget)
         candidate_articles = candidate_articles[:score_budget]
         stats["candidates"] = len(candidate_articles)
+        if score_errors:
+            top_errors = sorted(score_errors.items(), key=lambda x: -x[1])
+            stats["score_errors"] = {
+                kind: {"count": count, "samples": score_error_samples.get(kind, [])}
+                for kind, count in top_errors[:5]
+            }
         logger.info(f"  初筛通过: {len(candidate_articles)} 篇")
         progress("scored")
 
@@ -887,6 +970,7 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                 ok = db.update_article_fields(
                     article["id"],
                     analysis=result["analysis"], analysis_status="ok",
+                    analysis_evidence_level=result.get("evidence_level"),
                     analysis_model=analyzer.model, analysis_prompt_version=PROMPT_VERSION,
                     analysis_input_hash=_sha256(input_text + "|" + PROMPT_VERSION),
                     analyzed_at=datetime.now().isoformat(timespec="seconds"),
@@ -916,12 +1000,14 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         stats["llm_requests"] = analyzer.usage.get("requests", analyzer.usage.get("calls", 0))
         stats["budget_completed"] = True
         stats["backlog_remaining"] = stats["score_deferred"] + stats.get("analysis_deferred", 0)
+        stats["score_failed_backlog"] = db.count_score_failed()
         if trial:
             stats["trial"] = True
             stats["report_skipped_reason"] = "试运行不生成正式日报或推送"
             stats["tokens"] = dict(analyzer.usage)
             if own_task:
-                db.task_finish(task_id, status="partial" if stats["scored_failed"] or stats["db_errors"] or stats.get("source_failed") or stats.get("source_incomplete") else "success", stats=stats)
+                task_status, error_text = task_status_and_error(stats)
+                db.task_finish(task_id, status=task_status, stats=stats, error=error_text)
             return stats
 
         # ── Step 6: 更新 HTML 索引（邮件需要附加最新版本）─────
@@ -1025,16 +1111,8 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
         stats["tokens"] = dict(analyzer.usage)
 
         if own_task:
-            push_ok = all(bool(v) for v in (stats.get("push_results") or {}).values()) \
-                if stats.get("push_results") else True
-            has_failure = bool(
-                stats["db_errors"] or stats["scored_failed"]
-                or stats["analyzed_failed"] or stats.get("source_failed") or stats.get("source_incomplete") or not push_ok
-                or stats.get("digest_overall_status") in ("partial", "failed")
-            )
-            task_status = ("failed" if stats.get("digest_overall_status") == "failed"
-                           else "partial" if has_failure else "success")
-            db.task_finish(task_id, status=task_status, stats=stats)
+            task_status, error_text = task_status_and_error(stats)
+            db.task_finish(task_id, status=task_status, stats=stats, error=error_text)
         return stats
     except Exception as e:
         if own_task:

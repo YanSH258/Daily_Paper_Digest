@@ -241,8 +241,9 @@ class AnalysisPromptStrategyTests(unittest.TestCase):
                                            "abstract": "Original abstract."})
         self.assertTrue(result["success"], result.get("error"))
         prompt = captured["messages"][0]["content"]
-        for required in ("翻译为中文", "不增不减", "忠实原文"):
+        for required in ("翻译为中文", "不增不减", "忠实原文", "一段连续", "【译文开始】", "【译文结束】"):
             self.assertIn(required, prompt)
+        self.assertNotIn("逐句翻译", prompt)
         for banned in ("方法动机", "速记版 Pipeline", "无此信息", "一句话核心思想"):
             self.assertNotIn(banned, prompt)
 
@@ -262,12 +263,15 @@ class AnalysisPromptStrategyTests(unittest.TestCase):
         analyzer.analyze_article({"title": "T", "journal": "J", "authors": ["A"],
                                   "doi": "10.test/x", "evidence_level": "ABSTRACT_ONLY",
                                   "abstract": "Abstract."})
-        self.assertEqual(captured["max_tokens"], 2048)
+        self.assertEqual(captured["max_tokens"], 4096)
 
 
 def _fake_response():
     from types import SimpleNamespace
-    choice = SimpleNamespace(message=SimpleNamespace(content="二维（2D）材料的化学气相沉积（CVD）经历了一个复杂的非平衡高温表面反应级联过程，这对原子尺度的原位实验探测与理论模拟都是重大挑战。研究人员开发了化学感知的主动学习蒸馏（Chem-ALD）框架来构建机器学习力场，并以接近量子化学的精度揭示了由多过渡态机制主导的普适非经典成核路径。", reasoning_content=None),
+    content = ("【译文开始】二维（2D）材料的化学气相沉积（CVD）经历了一个复杂的非平衡高温表面反应级联过程，"
+               "这对原子尺度的原位实验探测与理论模拟都是重大挑战。研究人员开发了化学感知的主动学习蒸馏（Chem-ALD）框架来构建机器学习力场，"
+               "并以接近量子化学的精度揭示了由多过渡态机制主导的普适非经典成核路径。【译文结束】")
+    choice = SimpleNamespace(message=SimpleNamespace(content=content, reasoning_content=None),
                              finish_reason="stop")
     return SimpleNamespace(choices=[choice], usage=None)
 
@@ -306,12 +310,55 @@ class TranslationQualityGateTests(unittest.TestCase):
     def test_clean_translation_passes_gate(self):
         analyzer = self._analyzer()
         good = "二维（2D）材料的化学气相沉积（CVD）经历了一个复杂的非平衡高温表面反应级联过程。" * 3
-        self._set_output(analyzer, good)
+        self._set_output(analyzer, f"【译文开始】{good}【译文结束】")
         result = analyzer.analyze_article({
             "title": "T", "journal": "J", "authors": ["A"], "doi": "10.t/q",
             "evidence_level": "ABSTRACT_ONLY", "abstract": "Abstract text."})
         self.assertTrue(result["success"])
         self.assertEqual(result["analysis"], good)
+
+    def test_tagged_translation_ignores_deliberation_and_returns_one_paragraph(self):
+        analyzer = self._analyzer()
+        translated = ("第一句完整译文说明研究背景与目标。第二句包含 density functional theory（密度泛函理论，DFT）术语。"
+                      "第三句完整呈现方法、结果与结论，不进行概括或评论。")
+        output = f"我们需要回答用户并逐句处理术语。\n【译文开始】{translated[:45]}\n{translated[45:]}【译文结束】\n不要输出其他内容。"
+        with patch.object(analyzer, "_call_llm_with_finish", return_value=(output, "stop")):
+            result = analyzer.analyze_article({
+                "title": "T", "journal": "J", "authors": ["A"], "doi": "10.t/q",
+                "evidence_level": "ABSTRACT_ONLY", "abstract": "Original abstract " * 20})
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(result["analysis"], translated[:45] + " " + translated[45:])
+        self.assertNotIn("我们需要", result["analysis"])
+        self.assertNotIn("\n", result["analysis"])
+
+    def test_truncated_translation_retries_with_larger_budget(self):
+        analyzer = self._analyzer()
+        good = "完整的单段中文译文，保留 density functional theory（密度泛函理论，DFT）术语。" * 4
+        calls = []
+        def fake(prompt, max_tokens=None):
+            calls.append(max_tokens)
+            if len(calls) == 1:
+                return "【译文开始】只翻了一半", "length"
+            return f"【译文开始】{good}【译文结束】", "stop"
+        with patch.object(analyzer, "_call_llm_with_finish", side_effect=fake):
+            result = analyzer.analyze_article({
+                "title": "T", "journal": "J", "authors": ["A"], "doi": "10.t/q",
+                "evidence_level": "ABSTRACT_ONLY", "abstract": "Original abstract " * 60})
+        self.assertTrue(result["success"], result.get("error"))
+        self.assertEqual(calls, [4096, 8192])
+        self.assertEqual(result["analysis"], good)
+
+    def test_repeated_truncation_never_persists_partial_translation(self):
+        analyzer = self._analyzer()
+        with patch.object(analyzer, "_call_llm_with_finish",
+                          return_value=("【译文开始】只有半段", "length")) as llm:
+            result = analyzer.analyze_article({
+                "title": "T", "journal": "J", "authors": ["A"], "doi": "10.t/q",
+                "evidence_level": "ABSTRACT_ONLY", "abstract": "Original abstract " * 60})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["analysis"], "")
+        self.assertIn("translation_quality_failed", result["error"])
+        self.assertEqual(llm.call_count, 2)
 
     def test_strip_helper_extracts_clean_translation(self):
         analyzer = self._analyzer()

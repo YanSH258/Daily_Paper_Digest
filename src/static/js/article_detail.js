@@ -57,6 +57,8 @@ const Detail = {
       : '<span class="muted small">暂无标签</span>';
 
     const hasAnalysis = Boolean(a.analysis);
+    const analysisLevel = a.analysis_evidence_level || a.evidence_level;
+    const analysisLabel = analysisLevel === "ABSTRACT_ONLY" ? "摘要译文" : "AI 深度解读";
     const evidenceBadge = a.evidence_level === "FULLTEXT"
       ? '<span class="ev-badge ev-full">全文依据</span>'
       : (a.evidence_level === "ABSTRACT_ONLY"
@@ -82,13 +84,14 @@ const Detail = {
         <span class="badge blue">${API.esc(a.topic || "未分类")}</span>
         <span class="badge ${Number(a.relevance || 0) >= 7 ? "green" : "muted"}">⭐ ${Number(a.relevance || 0).toFixed(1)}</span>
         ${evidenceBadge}
+        ${a.score_status === 'failed' ? `<span class="ev-badge ev-unknown" title="${API.esc(a.score_error || '评分失败')}">评分失败·将重试</span>` : ''}
         <a class="ext-link" href="/article/${a.id}" target="_blank">📖 完整阅读页</a>
         ${a.zotero_key
           ? `<a class="ext-link" href="https://www.zotero.org/users/${Settings._zUserId || '0'}/items/${API.esc(a.zotero_key)}" target="_blank" title="${API.esc(a.zotero_key)}">Zotero ✓</a>`
           : `<a class="ext-link" onclick="Detail.pushZotero()">推送 Zotero</a>`}
         <label class="small"><input type="checkbox" id="watchSeed" ${Detail.watched ? "checked" : ""} onchange="Detail.toggleWatch(this.checked)" /> 关注新引用</label>
-        <a class="ext-link" onclick="Detail.reanalyze()" title="调用 LLM 重新生成 AI 解读（约 30-90 秒）">${a.analysis_status === 'failed' ? '⚠️ 重新解读' : '🔄 重新解读'}</a>
-        <a class="ext-link" onclick="Detail.reanalyze(true)" title="先下载全文（arXiv/OA）再做 AI 解读，质量更高">📥 取全文并解读</a>
+        <a class="ext-link" onclick="Detail.reanalyze('abstract_translation')" title="把原摘要重新翻译为一段中文译文">${a.analysis_status === 'failed' ? '⚠️ 重新翻译摘要' : '🔄 重新翻译摘要'}</a>
+        <a class="ext-link" onclick="Detail.reanalyze('fulltext_analysis')" title="先下载全文（arXiv/OA）再做深度解读">📥 取全文并深度解读</a>
         ${a.url ? `<a href="${API.esc(a.url)}" target="_blank" rel="noopener">原文 ↗</a>` : ""}
       </div>
       <div class="meta-line"><strong>期刊：</strong>${API.esc(a.journal || "-")} · <strong>日期：</strong>${API.esc(a.pub_date || "-")}</div>
@@ -104,7 +107,7 @@ const Detail = {
 
       <!-- 选项卡切换 -->
       <div class="drawer-tabs">
-        <button class="drawer-tab ${this.currentTab === 'analysis' ? 'active' : ''}" data-tab="analysis" onclick="Detail.switchTab('analysis')">AI 解读</button>
+        <button class="drawer-tab ${this.currentTab === 'analysis' ? 'active' : ''}" data-tab="analysis" onclick="Detail.switchTab('analysis')">${analysisLabel}</button>
         <button class="drawer-tab ${this.currentTab === 'abstract' ? 'active' : ''}" data-tab="abstract" onclick="Detail.switchTab('abstract')">原文摘要</button>
         <button class="drawer-tab ${this.currentTab === 'notes' ? 'active' : ''}" data-tab="notes" onclick="Detail.switchTab('notes')">我的笔记与标签</button>
       </div>
@@ -112,7 +115,7 @@ const Detail = {
       <!-- Tab 1: AI 解读 -->
       <div class="drawer-tab-pane" id="drawer-pane-analysis" ${this.currentTab !== 'analysis' ? 'hidden' : ''}>
         <div class="content md analysis-content">
-          ${hasAnalysis ? MarkdownLite.render(a.analysis) : '<div class="empty-state">暂无 AI 解读（未过相关性门槛或未启用全文解读）</div>'}
+          ${hasAnalysis ? MarkdownLite.render(a.analysis) : `<div class="empty-state">暂无${API.esc(analysisLabel)}（未过相关性门槛或尚未运行）</div>`}
         </div>
       </div>
 
@@ -208,17 +211,20 @@ const Detail = {
     } catch (e) { alert("推送失败: " + e.message); }
   },
 
-  async reanalyze(fetchFulltext = false) {
+  async reanalyze(mode = "abstract_translation") {
     const a = this.article;
     if (!a) return;
-    const mode = fetchFulltext ? "先获取全文（arXiv/OA 可自动下载）再做 AI 解读" : `基于${a.evidence_level === "FULLTEXT" ? "已存全文" : "标题摘要"}`;
-    if (!confirm(`对《${API.cleanTitle(a.title || "").slice(0, 40)}…》运行 AI 解读？\n模式：${mode}\n将调用 LLM（约 30-120 秒）。`)) return;
+    const fulltext = mode === "fulltext_analysis";
+    const modeText = fulltext ? "先获取全文（arXiv/OA 可自动下载）再做 AI 深度解读" : "把原摘要重新翻译为一段中文译文";
+    if (!confirm(`对《${API.cleanTitle(a.title || "").slice(0, 40)}…》运行？\n模式：${modeText}\n将调用 LLM（约 30-120 秒）。`)) return;
     // 简单忙碌提示：替换解读 Tab 内容
     const pane = document.getElementById("drawer-pane-analysis");
-    if (pane) pane.innerHTML = '<div class="small muted" style="padding:20px 0;">🔄 AI 解读运行中（约 30-90 秒），请勿关闭…</div>';
+    if (pane) pane.innerHTML = `<div class="small muted" style="padding:20px 0;">🔄 ${fulltext ? "AI 深度解读" : "摘要翻译"}运行中（约 30-90 秒），请勿关闭…</div>`;
     this.switchTab("analysis");
     try {
-      const resp = await API.post(`/api/articles/${a.id}/reanalyze`, { fetch_fulltext: fetchFulltext });
+      const resp = await API.post(`/api/articles/${a.id}/reanalyze`, {
+        mode, fetch_fulltext: fulltext,
+      });
       if (resp.ok) {
         this.article = resp.item;
         this.render(resp.item);

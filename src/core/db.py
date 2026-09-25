@@ -106,6 +106,7 @@ class Database:
                 score_error   TEXT,
                 score_model   TEXT,
                 score_basis   TEXT,
+                score_prompt_version TEXT,
                 relevance_reason TEXT,
                 fetch_status  TEXT,
                 evidence_level TEXT,
@@ -117,6 +118,7 @@ class Database:
                 content_hash  TEXT,
                 analysis_status TEXT DEFAULT '',
                 analysis_error  TEXT,
+                analysis_evidence_level TEXT,
                 analysis_model  TEXT,
                 analysis_prompt_version TEXT,
                 analysis_input_hash TEXT,
@@ -374,6 +376,7 @@ class Database:
             ("score_error", "TEXT"),
             ("score_model", "TEXT"),
             ("score_basis", "TEXT"),
+            ("score_prompt_version", "TEXT"),
             ("relevance_reason", "TEXT"),
             ("processing_status", "TEXT DEFAULT 'unreviewed'"),
             ("processing_reason", "TEXT"),
@@ -392,6 +395,7 @@ class Database:
             # 分析阶段
             ("analysis_status", "TEXT DEFAULT ''"),
             ("analysis_error", "TEXT"),
+            ("analysis_evidence_level", "TEXT"),
             ("analysis_model", "TEXT"),
             ("analysis_prompt_version", "TEXT"),
             ("analysis_input_hash", "TEXT"),
@@ -421,19 +425,45 @@ class Database:
             ("last_error", "TEXT"),
         ], backup_before=False)
 
-        # 初始化仅补缺失期刊；已有指标（含时间戳）仅由手工编辑或显式重置更新。
+        # 初始化补缺失期刊，并只升级仍保持上一版内置值的记录；用户修改过的
+        # 任一字段都不会匹配，仍由手工编辑或显式重置控制。
         try:
-            from utils.journal_metrics import SEED_METRICS
+            from utils.journal_metrics import PREVIOUS_SEED_METRICS, SEED_METRICS
+            metric_fields = ("full_name", "if_value", "cas_zone", "issn")
+            upgrades = []
+            additions = []
             for m in SEED_METRICS:
-                conn.execute(
-                    "INSERT INTO journal_metrics (name, full_name, if_value, cas_zone, issn) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(name) DO NOTHING",
-                    (m["name"], m.get("full_name"), m.get("if_value"), m.get("cas_zone"), m.get("issn")),
-                )
-            conn.commit()
-        except Exception as e:  # noqa: BLE001 - 指标种子失败不阻断启动
-            logger.warning("初始化 journal_metrics 种子失败: %s", e)
+                previous = PREVIOUS_SEED_METRICS.get(m["name"])
+                row = conn.execute(
+                    "SELECT full_name, if_value, cas_zone, issn FROM journal_metrics WHERE name=?",
+                    (m["name"],),
+                ).fetchone()
+                previous_values = tuple(previous.get(k) for k in metric_fields) if previous else None
+                current_values = tuple(m.get(k) for k in metric_fields)
+                if row is not None and tuple(row) == previous_values and tuple(row) != current_values:
+                    upgrades.append((m["name"], current_values))
+                elif row is None:
+                    additions.append((m["name"], current_values))
+        except Exception as e:  # noqa: BLE001 - 只读扫描失败不阻断其他数据库功能
+            logger.warning("读取 journal_metrics 种子失败: %s", e)
+        else:
+            if upgrades:
+                # 备份失败必须阻断升级；_backup_before_migration 会清理残缺备份并抛错。
+                self._backup_before_migration(conn)
+            try:
+                with conn:
+                    conn.executemany(
+                        "UPDATE journal_metrics SET full_name=?, if_value=?, cas_zone=?, "
+                        "issn=?, updated_at=datetime('now') WHERE name=?",
+                        [(*values, name) for name, values in upgrades],
+                    )
+                    conn.executemany(
+                        "INSERT INTO journal_metrics (name, full_name, if_value, cas_zone, issn) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [(name, *values) for name, values in additions],
+                    )
+            except sqlite3.Error as e:
+                logger.warning("写入 journal_metrics 种子失败: %s", e)
 
         # 创建索引
         index_statements = [
@@ -626,20 +656,19 @@ class Database:
             raise
 
     def get_processing_queue(self, config: Optional[dict[str, Any]] = None, date_str: Optional[str] = None, trial: bool = False) -> dict[str, Any]:
-        from processing import admission_decision, build_queue, validate_budget
+        from processing import build_queue, needs_abstract_rescore, scoring_candidates, validate_budget
         budget = validate_budget(config or {}, trial=trial)
         conn = self._conn()
-        cur = conn.execute("SELECT * FROM articles WHERE processing_status IN ('unreviewed','eligible') AND (score_status IS NULL OR score_status NOT IN ('ok','success')) AND processed=0 ORDER BY COALESCE(queued_at, created_at), id")
+        cur = conn.execute("""
+            SELECT * FROM articles WHERE COALESCE(NULLIF(processing_status,''),'unreviewed')
+                IN ('unreviewed','eligible') AND (
+                ((score_status IS NULL OR score_status NOT IN ('ok','success')) AND processed=0)
+                OR (score_status IN ('ok','success') AND score_basis='title'
+                    AND trim(COALESCE(abstract,'')) != '')
+            ) ORDER BY COALESCE(queued_at, created_at), id
+        """)
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
-        # Only legacy rows that pass admission are enrolled; quarantined legacy rows remain untouched.
-        eligible = []
-        for row in rows:
-            if row.get('processing_status') == 'unreviewed':
-                decision = admission_decision(row, date_str or datetime.now().date().isoformat(), config or {})
-                if decision.get('decision') != 'eligible':
-                    continue
-                row = {**row, 'processing_status': 'eligible', 'processing_reason': decision.get('reason'), 'date_source': decision.get('date_source')}
-            eligible.append(row)
+        eligible = scoring_candidates(rows, date_str or datetime.now().date().isoformat(), config or {})
         selected = build_queue(eligible, config, budget)
         ids = [r["id"] for r in selected]
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -650,15 +679,50 @@ class Database:
                 if row["id"] in deferred:
                     conn.execute("UPDATE articles SET processing_reason='budget_deferred', queued_at=COALESCE(queued_at, ?), updated_at=? WHERE id=? AND processing_status='eligible'", (now, now, row["id"]))
             conn.executemany("UPDATE articles SET processing_status='eligible', queued_at=COALESCE(queued_at, ?), updated_at=? WHERE id=? AND processing_status='eligible'", [(now, now, i) for i in ids])
-        return {"selected": selected, "score_queue_total": len(eligible), "score_deferred": len(deferred), "score_attempted": 0, "budget": budget}
+        return {"selected": selected, "score_queue_total": len(eligible),
+                "score_deferred": len(deferred), "score_attempted": 0, "budget": budget,
+                "rescore_queued": sum(needs_abstract_rescore(row) for row in eligible),
+                "rescore_selected": sum(needs_abstract_rescore(row) for row in selected)}
 
     def get_analysis_queue(self, config: Optional[dict[str, Any]] = None, date_str: Optional[str] = None, trial: bool = False) -> dict[str, Any]:
-        from processing import validate_budget
-        budget = validate_budget(config, trial)
+        from processing import admission_decision, is_score_retry, needs_abstract_rescore, validate_budget
+        cfg = config or {}
+        budget = validate_budget(cfg, trial)
         conn = self._conn()
-        cur = conn.execute("SELECT * FROM articles WHERE processing_status='eligible' AND score_status IN ('ok','success') AND COALESCE(relevance, 0) >= ? AND (analysis_status IS NULL OR analysis_status IN ('','failed')) AND processed=0 ORDER BY COALESCE(queued_at, created_at), id", (float((config or {}).get("relevance_threshold", 0)),))
+        cur = conn.execute("""
+            SELECT * FROM articles
+            WHERE processing_status='eligible'
+              AND score_status IN ('ok','success')
+              AND COALESCE(relevance, 0) >= ?
+              AND (analysis_status IS NULL OR analysis_status IN ('','failed'))
+              AND processed=0
+            ORDER BY COALESCE(queued_at, created_at), id
+        """, (float(cfg.get("relevance_threshold", 0)),))
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        run_date = date_str or datetime.now().date().isoformat()
+        rows = [
+            row for row in rows
+            if not (
+                needs_abstract_rescore(row)
+                and not is_score_retry(row)
+                and admission_decision(row, run_date, cfg)["decision"] == "eligible"
+            )
+        ]
         return {"selected": rows[:budget], "analysis_queue_total": len(rows), "analysis_deferred": max(0, len(rows)-budget), "budget": budget}
+
+    def count_score_failed(self) -> int:
+        """评分失败且仍排队待重试的文章数（跨运行存量，不随单轮预算清空）。"""
+        try:
+            sql = ("SELECT COUNT(*) FROM articles WHERE score_status = 'failed' "
+                   "AND COALESCE(NULLIF(processing_status,''),'unreviewed') IN ('unreviewed','eligible') "
+                   "AND processed = 0")
+            if self._memory_conn is not None:
+                with self._memory_lock:
+                    return int(self._memory_conn.execute(sql).fetchone()[0])
+            return int(self._conn().execute(sql).fetchone()[0])
+        except sqlite3.Error as e:
+            logger.error("count_score_failed 失败: %s", e)
+            return 0
 
     def get_admission_reason_counts(self) -> dict[str, int]:
         cur = self._conn().execute("SELECT COALESCE(processing_reason, 'unknown'), COUNT(*) FROM articles GROUP BY COALESCE(processing_reason, 'unknown')")
@@ -728,6 +792,42 @@ class Database:
             if h and conn.execute("SELECT id FROM articles WHERE title_hash = ?", (h,)).fetchone():
                 return True
         return False
+
+    def complete_discovered_metadata(self, article: dict[str, Any]) -> dict[str, Any]:
+        """补充再次发现的文章元数据；只允许 DOI 或 URL 精确匹配。"""
+        from processing import discovered_metadata_updates
+        doi = str(article.get("doi") or "").strip().lower()
+        url = str(article.get("url") or "").strip()
+
+        def complete(conn):
+            cur = None
+            if doi:
+                cur = conn.execute("SELECT * FROM articles WHERE lower(trim(doi))=?", (doi,))
+                row = cur.fetchone()
+            else:
+                row = None
+            if row is None and url:
+                cur = conn.execute("SELECT * FROM articles WHERE url=?", (url,))
+                row = cur.fetchone()
+            if row is None:
+                return {}
+            existing = dict(zip([d[0] for d in cur.description], row))
+            existing_doi = str(existing.get("doi") or "").strip().lower()
+            if doi and existing_doi and existing_doi != doi:
+                return {}
+            updates = discovered_metadata_updates(existing, article)
+            if updates:
+                columns = ", ".join(f"{key}=?" for key in updates)
+                conn.execute(f"UPDATE articles SET {columns}, updated_at=datetime('now') WHERE id=?",
+                             (*updates.values(), existing["id"]))
+            return updates
+
+        if self._memory_conn is not None:
+            with self._memory_lock, self._memory_conn:
+                return complete(self._memory_conn)
+        conn = self._conn()
+        with conn:
+            return complete(conn)
 
     def record_article_sources(self, article):
         conn = self._conn()
@@ -952,11 +1052,13 @@ class Database:
             INSERT INTO articles
                 (doi, title, journal, authors, pub_date, url, abstract,
                  relevance, processed, title_hash, topic, tags, note,
-                 starred, discovered_via, created_at, updated_at)
+                 starred, discovered_via, score_status, score_model, score_basis,
+                 relevance_reason, created_at, updated_at)
             VALUES
                 (:doi, :title, :journal, :authors, :pub_date, :url, :abstract,
                  :relevance, 1, :title_hash, :topic, :tags, :note,
-                 1, 'manual', datetime('now'), datetime('now'))
+                 1, 'manual', 'ok', 'manual', 'manual',
+                 '手动添加评分（非模型评分）', datetime('now'), datetime('now'))
         """
         try:
             if self._memory_conn is not None:
@@ -1042,10 +1144,10 @@ class Database:
 
     _ARTICLE_FIELD_WHITELIST = {
         "relevance", "relevance_reason", "score_status", "score_error", "processing_status", "processing_reason", "admitted_at", "queued_at", "date_source",
-        "score_model", "score_basis",
+        "score_model", "score_basis", "score_prompt_version",
         "fetch_status", "evidence_level", "fetch_source", "network_mode",
         "access_path", "fulltext_url", "fulltext_text", "content_hash",
-        "abstract", "analysis", "analysis_status", "analysis_error", "analysis_model",
+        "abstract", "analysis", "analysis_status", "analysis_error", "analysis_evidence_level", "analysis_model",
         "analysis_prompt_version", "analysis_input_hash", "analyzed_at",
         "read_status", "relevance_feedback", "processed", "topic",
         "zotero_key", "discovered_via", "sim_prior", "cited_count", "title_zh",
