@@ -15,6 +15,43 @@ const Settings = {
     const llm = c.llm || {};
     const known = llm.providers || {};
     const knownNames = Object.keys(known);
+    const dg = c.digest || {};
+    const tGroups = c.topic_groups || [];
+    const tGroupsText = tGroups.map((g) => `${g.name}: ${(g.keywords || []).join(", ")}`).join("\n");
+
+    // 脏字段基准：记录本次加载时各字段的值，save() 只提交有变化的部分，
+    // 避免旧页面上一次无关的保存把其他窗口/手改过的配置覆盖回去（丢失更新）。
+    this._loaded = {
+      "llm.provider": llm.provider || "",
+      "llm.base_url": llm.base_url || "",
+      "llm.model": llm.model || "",
+      "relevance_threshold": Number(c.relevance_threshold ?? 4),
+      "research_topics": (c.research_topics || []),
+      "fetcher.use_browser": !!f.use_browser,
+      "fetcher.max_articles_per_journal": Number(f.max_articles_per_journal ?? 100),
+      "fetcher.date_filter_days": Number(f.date_filter_days ?? 3),
+      "output.email_enabled": !!out.email_enabled,
+      "output.email_recipients": (out.email_recipients || []),
+      "output.email_smtp_server": out.email_smtp_server || "",
+      "output.email_smtp_port": Number(out.email_smtp_port ?? 465),
+      "output.email_username": out.email_username || "",
+      "output.feishu_enabled": !!out.feishu_enabled,
+      "output.feishu_webhook": "",  // 已存 webhook 不回显，基准即表单空值
+      "scheduler.run_time": sched.run_time || "08:00",
+      "scheduler.timezone": sched.timezone || "UTC",
+      "web.protect_read": !!(c.web && c.web.protect_read),
+      "zotero.enabled": !!zot.enabled,
+      "zotero.user_id": zot.user_id || "",
+      "zotero.collection": zot.collection || "",
+      "zotero.include_note": !!zot.include_note,
+      "zotero.attach_oa_pdf": !!zot.attach_oa_pdf,
+      "tracking.enabled": !!track.enabled,
+      "tracking.citation_check_days": Number(track.citation_check_days ?? 3),
+      "tracking.author_check_days": Number(track.author_check_days ?? 3),
+      "digest.categories": dg.categories !== false,
+      // 快照与保存走同一个解析函数，保证未编辑时逐字相等（不触发提交）
+      "topic_groups": this.parseTopicGroups(tGroupsText).groups,
+    };
 
     // 提供方下拉：当前值 + 常见默认项 + 已保存的提供方；"✏️ 新建"入口保留自定义命名
     const providerNames = [...new Set([llm.provider, "deepseek", "qwen", ...knownNames].filter(Boolean))];
@@ -46,6 +83,12 @@ const Settings = {
       <div class="card"><h3>相关性过滤</h3>
         ${this.fieldRow("阈值（0-10）", `<input id="s_threshold" type="number" min="0" max="10" step="0.5" value="${API.esc(c.relevance_threshold ?? 4)}" />`)}
         ${this.fieldRow("研究方向（每行一个）", `<textarea id="s_topics" rows="4">${API.esc((c.research_topics || []).join("\n"))}</textarea>`)}
+      </div>
+      <div class="card"><h3>日报选择</h3>
+        ${this.fieldRow("领域类别选择", `<label class="small"><input id="s_digest_cat" type="checkbox" ${dg.categories !== false ? "checked" : ""} /> 按领域类别加分与配额选择日报</label>`)}
+        <p class="small" style="margin:0 0 8px;">内置类别偏向计算材料方向（MLIP/DFT/AI 材料）。关闭后日报按相关性+新鲜度选择，适合其他领域；分类标签仍会展示。<span class="err">${dg.category_limits_configured && dg.categories === false ? "注意：config.yaml 里配置了 category_limits/quotas，需先删除才能启用中性模式。" : ""}</span></p>
+        ${this.fieldRow("子方向分组（每行：名称: 关键词1, 关键词2）", `<textarea id="s_tgroups" rows="4" placeholder="催化 / 反应机理: catalysis, photocatalysis">${API.esc(tGroupsText)}</textarea>`)}
+        <p class="small" style="margin:0 0 8px;">留空 = 使用内置分组。只影响文章标签、推送分组与筛选下拉，不影响相关性评分。</p>
       </div>
       <div class="card"><h3>抓取</h3>
         ${this.fieldRow("浏览器渲染", `<label class="small"><input id="s_browser" type="checkbox" ${f.use_browser ? "checked" : ""} /> 启用</label>`)}
@@ -402,18 +445,51 @@ const Settings = {
     }
   },
 
+  /** 解析子方向分组 textarea：每行「名称: 关键词1, 关键词2」，返回 {groups} 或 {error} */
+  parseTopicGroups(text) {
+    const groups = [];
+    for (const line of String(text || "").split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const m = t.match(/^(.+?)[:=：](.*)$/);
+      const name = m ? m[1].trim() : "";
+      const keywords = m ? m[2].split(/[,，]/).map((s) => s.trim()).filter(Boolean) : [];
+      if (!name) return { error: `分组行「${t}」缺少名称（格式：名称: 关键词1, 关键词2）` };
+      if (!keywords.length) return { error: `分组「${name}」至少需要一个关键词（逗号分隔）` };
+      groups.push({ name, keywords });
+    }
+    return { groups };
+  },
+
   async save() {
     const msgEl = document.getElementById("settingsMsg");
     msgEl.innerText = "保存中...";
     const val = (id) => document.getElementById(id)?.value ?? "";
     const chk = (id) => document.getElementById(id)?.checked ?? false;
-    const payload = {
-      "llm.provider": this.getProvider(),
+    // 提供方名与后端同规则校验：空名/非法名会被后端 400，这里提前拦截给出明确提示
+    const provider = this.getProvider();
+    if (!provider) {
+      msgEl.innerHTML = '<span class="err">提供方名不能为空：请填写「新建提供方」名称或从下拉框选择</span>';
+      return;
+    }
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(provider)) {
+      msgEl.innerHTML = '<span class="err">提供方名只能包含字母、数字、下划线、短横线（1-32 位）</span>';
+      return;
+    }
+    // 子方向分组：逐行校验，非法行直接拦截（服务端也会 400）
+    const parsedGroups = this.parseTopicGroups(val("s_tgroups"));
+    if (parsedGroups.error) {
+      msgEl.innerHTML = `<span class="err">${API.esc(parsedGroups.error)}</span>`;
+      return;
+    }
+    const candidate = {
+      "llm.provider": provider,
       "llm.base_url": val("s_baseurl").trim(),
       "llm.model": this.getModelValue(),
-      "llm.api_key": val("s_apikey").trim(),
       "relevance_threshold": parseFloat(val("s_threshold")) || 0,
       "research_topics": val("s_topics").split("\n").map((s) => s.trim()).filter(Boolean),
+      "digest.categories": chk("s_digest_cat"),
+      "topic_groups": parsedGroups.groups,
       "fetcher.use_browser": chk("s_browser"),
       "fetcher.max_articles_per_journal": parseInt(val("s_maxart")) || 100,
       "fetcher.date_filter_days": parseInt(val("s_datedays")) || 0,
@@ -426,30 +502,54 @@ const Settings = {
     };
     // SMTP：服务器/账号已填写才提交；授权码留空 = 不修改，勾选「清除」= 显式移除
     const smtpServer = val("s_smtp_server").trim();
-    if (smtpServer) payload["output.email_smtp_server"] = smtpServer;
+    if (smtpServer) candidate["output.email_smtp_server"] = smtpServer;
     const smtpPort = parseInt(val("s_smtp_port"));
-    if (smtpPort) payload["output.email_smtp_port"] = smtpPort;
+    if (smtpPort) candidate["output.email_smtp_port"] = smtpPort;
     const smtpUser = val("s_smtp_user").trim();
-    if (smtpUser) payload["output.email_username"] = smtpUser;
+    if (smtpUser) candidate["output.email_username"] = smtpUser;
     const smtpPass = val("s_smtp_pass").trim();
-    if (chk("s_smtp_pass_clear")) payload["output.email_password_clear"] = true;
-    else if (smtpPass) payload["output.email_password"] = smtpPass;
+    if (chk("s_smtp_pass_clear")) candidate["output.email_password_clear"] = true;
+    else if (smtpPass) candidate["output.email_password"] = smtpPass;
     // Token 留空 = 不修改；输入新值则提交，并同步写入浏览器，之后写操作自动带上
     const newToken = val("s_token").trim();
-    if (newToken) payload["web.api_token"] = newToken;
-    payload["web.protect_read"] = chk("s_protect");
-    payload["zotero.enabled"] = chk("s_zot_on");
-    payload["zotero.user_id"] = val("s_zot_uid").trim();
+    if (newToken) candidate["web.api_token"] = newToken;
+    candidate["web.protect_read"] = chk("s_protect");
+    candidate["zotero.enabled"] = chk("s_zot_on");
+    candidate["zotero.user_id"] = val("s_zot_uid").trim();
     const zotKey = val("s_zot_key").trim();
-    if (zotKey) payload["zotero.api_key"] = zotKey;
-    payload["zotero.collection"] = val("s_zot_coll").trim();
-    payload["zotero.include_note"] = chk("s_zot_note");
-    payload["zotero.attach_oa_pdf"] = chk("s_zot_pdf");
+    if (zotKey) candidate["zotero.api_key"] = zotKey;
+    candidate["zotero.collection"] = val("s_zot_coll").trim();
+    candidate["zotero.include_note"] = chk("s_zot_note");
+    candidate["zotero.attach_oa_pdf"] = chk("s_zot_pdf");
     const oaKey = val("s_oa_key").trim();
-    if (oaKey) payload["openalex.api_key"] = oaKey;
-    payload["tracking.enabled"] = chk("s_track_on");
-    payload["tracking.citation_check_days"] = parseInt(val("s_track_cit")) || 3;
-    payload["tracking.author_check_days"] = parseInt(val("s_track_au")) || 3;
+    if (oaKey) candidate["openalex.api_key"] = oaKey;
+    candidate["tracking.enabled"] = chk("s_track_on");
+    candidate["tracking.citation_check_days"] = parseInt(val("s_track_cit")) || 3;
+    candidate["tracking.author_check_days"] = parseInt(val("s_track_au")) || 3;
+
+    // 脏字段过滤：只提交与本次加载快照不同的字段（丢失更新防护）。
+    // 无快照（如测试直接调用）时保持旧行为：全量提交。
+    const apiKey = val("s_apikey").trim();
+    let payload = candidate;
+    const loaded = this._loaded;
+    if (loaded) {
+      payload = {};
+      for (const [k, v] of Object.entries(candidate)) {
+        if (!(k in loaded) || JSON.stringify(v) !== JSON.stringify(loaded[k])) payload[k] = v;
+      }
+      if ("research_topics" in payload && payload["research_topics"].length === 0
+          && loaded["research_topics"].length > 0
+          && !confirm("研究方向将被清空，相关性评分会失去参照。确定保存吗？")) {
+        msgEl.innerText = "已取消保存。";
+        return;
+      }
+    }
+    // 密钥类字段：留空 = 保持不变，不参与 diff，填了才提交
+    if (apiKey) payload["llm.api_key"] = apiKey;
+    if (loaded && !Object.keys(payload).length) {
+      msgEl.innerHTML = '<span class="ok">没有修改任何设置。</span>';
+      return;
+    }
     try {
       const data = await API.post("/api/settings", payload);
       if (data.ok) {

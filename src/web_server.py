@@ -25,7 +25,7 @@ from core.analyzer import LLMAnalyzer
 from core.db import Database
 from processing import task_status_and_error
 from core.fetcher import JournalFetcher, detect_publisher_from_url
-from core.notifier import Notifier, classify_article
+from core.notifier import Notifier, active_topic_names, classify_article, configure_topic_groups
 from digest.service import DigestError, DigestService
 from main import (DEFAULT_SCHEDULER_TIMEZONE, get_scheduler_timezone, load_config,
                   load_config_from_obj, run_once, setup_logging, validate_config,
@@ -270,6 +270,7 @@ class WebContext:
         self.config_path = str(resolve_config_file(config_path))
         self.config = load_config(self.config_path)
         validate_config(self.config)
+        configure_topic_groups(self.config)
         self.runner = TaskRunner(self.config)
         self.db = Database(self.config["database"]["path"])
         self.runner.attach_db(self.db)
@@ -410,6 +411,7 @@ def _list_articles(ctx: WebContext, query: dict[str, list[str]]) -> dict[str, An
             "offset": offset,
             "limit": limit,
             "journals": journals,
+            "topic_names": active_topic_names(),
             "recent_report_dates": recent_dates,
         }
     finally:
@@ -1003,6 +1005,7 @@ _SETTINGS_FIELDS = [
     "zotero.include_note", "zotero.attach_oa_pdf",
     "tracking.enabled", "tracking.citation_check_days", "tracking.author_check_days",
     "openalex.api_key",
+    "digest.categories", "topic_groups",
 ]
 
 
@@ -1020,6 +1023,8 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
     zotero = c.get("zotero", {}) or {}
     tracking_cfg = c.get("tracking", {}) or {}
     openalex = c.get("openalex", {}) or {}
+    digest_cfg = c.get("digest", {}) or {}
+    digest_daily = digest_cfg.get("daily", {}) or {}
 
     # 已配置的 provider 列表（供前端切换时回填 base_url / model）
     known_providers: dict[str, dict[str, Any]] = {}
@@ -1075,6 +1080,17 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
             "api_key_set": bool(openalex.get("api_key")),
             "api_key_masked": _mask_secret(openalex.get("api_key")),
         },
+        "digest": {
+            "categories": bool(digest_cfg.get("categories", True)),
+            "category_limits_configured": bool(
+                digest_daily.get("category_limits") or digest_daily.get("quotas")
+            ),
+        },
+        "topic_groups": [
+            {"name": str(g.get("name") or ""),
+             "keywords": [str(k) for k in (g.get("keywords") or [])]}
+            for g in (c.get("topic_groups") or []) if isinstance(g, dict)
+        ],
         "output": {
             "email_enabled": bool(email.get("enabled")),
             "email_recipients": email.get("recipients", []),
@@ -1129,17 +1145,28 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                 node = node[k]
             return node
 
-        provider = str(updates.get("llm.provider") or cfg.get("llm", {}).get("provider") or "deepseek")
+        raw_provider = updates.get("llm.provider")
+        if raw_provider is not None:
+            # 提供方名随请求出现时必须合法：不合法直接拒绝，
+            # 绝不静默跳过——否则同请求里的 model/base_url/api_key 会被写到
+            # 回退提供方（污染原配置）或没人引用的孤儿分节。
+            new_provider = str(raw_provider).strip()
+            if not new_provider:
+                return {"ok": False, "error": "提供方名不能为空：请填写「新建提供方」名称或从下拉框选择"}, 400
+            if not re.match(r"^[A-Za-z0-9_-]{1,32}$", new_provider):
+                return {"ok": False,
+                        "error": f"提供方名「{new_provider}」无效：只能包含字母、数字、下划线、短横线（1-32 位）"}, 400
+            provider = new_provider
+        else:
+            provider = str(cfg.get("llm", {}).get("provider") or "deepseek")
         changed: list[str] = []
 
         try:
             for key, value in updates.items():
                 if key == "llm.provider":
-                    # 自定义提供方：任意字母/数字/下划线/短横线组合
-                    s = str(value).strip()
-                    if s and re.match(r"^[A-Za-z0-9_-]{1,32}$", s):
-                        ensure(["llm"])["provider"] = s
-                        changed.append(key)
+                    # 自定义提供方：任意字母/数字/下划线/短横线组合（合法性已在上方校验）
+                    ensure(["llm"])["provider"] = str(value).strip()
+                    changed.append(key)
                 elif key == "llm.model":
                     if value:
                         ensure(["llm", provider])["model"] = str(value)
@@ -1161,10 +1188,33 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                         cfg["relevance_threshold"] = v
                         changed.append(key)
                 elif key == "research_topics":
+                    # 键随请求出现即生效（含空列表=显式清空）；前端脏字段 diff
+                    # 保证只有用户真的改动了方向才会提交，不会误清。
                     topics = [str(t).strip() for t in (value or []) if str(t).strip()]
-                    if topics:
-                        cfg["research_topics"] = topics
-                        changed.append(key)
+                    cfg["research_topics"] = topics
+                    changed.append(key)
+                elif key == "digest.categories":
+                    # false = 中性模式（类别加分统一、无配额）；与已配置的
+                    # category_limits 冲突时由写盘前的 validate_config 拒绝
+                    ensure(["digest"])["categories"] = parse_json_bool({key: value}, key)
+                    changed.append(key)
+                elif key == "topic_groups":
+                    # 自定义子方向分组：非法整单拒绝——运行时静默回退内置表会掩盖错误
+                    if not isinstance(value, list):
+                        return {"ok": False, "error": "topic_groups 必须是列表"}, 400
+                    groups = []
+                    for i, g in enumerate(value):
+                        name = str(g.get("name") or "").strip() if isinstance(g, dict) else ""
+                        keywords = (
+                            [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
+                            if isinstance(g, dict) else []
+                        )
+                        if not name or not keywords:
+                            return {"ok": False,
+                                    "error": f"topic_groups 第 {i + 1} 项无效：需要非空 name 和 keywords"}, 400
+                        groups.append({"name": name, "keywords": keywords})
+                    cfg["topic_groups"] = groups  # 空列表 = 恢复内置分组
+                    changed.append(key)
                 elif key == "scheduler.run_time":
                     ensure(["scheduler"])["run_time"] = validate_scheduler_time(value)
                     changed.append(key)
@@ -1295,6 +1345,10 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
     try:
         from integrations import openalex as _oa
         _oa.configure(ctx.config)
+    except Exception:
+        pass
+    try:
+        configure_topic_groups(ctx.config)
     except Exception:
         pass
     if ("scheduler.run_time" in changed or "scheduler.timezone" in changed) and ctx.enable_scheduler:

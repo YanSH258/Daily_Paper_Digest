@@ -71,9 +71,10 @@ def build_weekly(config: dict, db, date_str: Optional[str] = None) -> tuple[str,
     prev_start = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
     articles = db.list_articles_created_between(start, end)
+    from core.notifier import classify_article, configure_topic_groups
+    configure_topic_groups(config)  # 分类先于 Notifier 构造，需显式按配置刷新
     for a in articles:
         if not a.get("topic"):
-            from core.notifier import classify_article
             a["topic"] = classify_article(a)
 
     cur_dist = _topic_dist(db, start, end)

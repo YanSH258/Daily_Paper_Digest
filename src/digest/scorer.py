@@ -32,14 +32,20 @@ def score_article(
     now: Optional[datetime] = None,
     metrics_by_name: Optional[dict[str, dict]] = None,
     top_journals: Optional[list] = None,
+    category_enabled: bool = True,
 ) -> dict[str, Any]:
-    """返回打分明细，不修改入参。"""
+    """返回打分明细，不修改入参。
+
+    category_enabled=False（中性模式）：类别不再影响排序——各文章统一给
+    "other" 档加分，final 退化为 relevance/freshness/journal 主导；
+    category 标签仍按规则分类输出，供展示与统计。
+    """
     relevance = float(article.get("relevance") or 0.0)
     relevance = max(0.0, min(10.0, relevance))
     cat = classify_digest_category(article, top_journals=top_journals)
     fresh = freshness_score(article, now=now)
     jbonus = journal_bonus(article, metrics_by_name=metrics_by_name)
-    cbonus = CATEGORY_BONUS.get(cat, 4.0)
+    cbonus = CATEGORY_BONUS.get(cat, 4.0) if category_enabled else CATEGORY_BONUS["other"]
     final = (
         WEIGHTS["relevance"] * relevance
         + WEIGHTS["freshness"] * fresh

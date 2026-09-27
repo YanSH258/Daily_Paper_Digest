@@ -78,6 +78,74 @@ _TOPIC_PATTERNS: List[tuple] = [
     for topic_name, keywords in TOPIC_CLASSIFIER
 ]
 
+# 当前生效的子方向表：默认内置 TOPIC_CLASSIFIER，可被 config.topic_groups 覆盖
+_ACTIVE_TOPIC_CLASSIFIER: List[tuple] = list(TOPIC_CLASSIFIER)
+
+
+def _compile_topic_patterns(classifier: List[tuple]) -> List[tuple]:
+    return [
+        (topic_name, [_build_kw_pattern(kw) for kw in keywords])
+        for topic_name, keywords in classifier
+    ]
+
+
+def _configured_groups(config: Dict[str, Any]) -> tuple[Optional[List[tuple]], Optional[str]]:
+    """解析 config['topic_groups']。返回 (groups, problem)；
+    groups=None 表示使用内置表（含缺省/显式空的情况），problem 非空表示配置非法。"""
+    raw = (config or {}).get("topic_groups")
+    if raw is None or raw is False or raw == []:
+        return None, None
+    if not isinstance(raw, list):
+        return None, f"topic_groups 必须是列表，当前为 {type(raw).__name__}"
+    groups: List[tuple] = []
+    problems: List[str] = []
+    for i, g in enumerate(raw):
+        if not isinstance(g, dict):
+            problems.append(f"第 {i + 1} 项不是对象")
+            continue
+        name = str(g.get("name") or "").strip()
+        keywords = [str(k).strip() for k in (g.get("keywords") or []) if str(k).strip()]
+        if not name:
+            problems.append(f"第 {i + 1} 项缺少 name")
+            continue
+        if not keywords:
+            problems.append(f"「{name}」没有任何关键词")
+            continue
+        groups.append((name, keywords))
+    if problems:
+        return None, "; ".join(problems)
+    if not groups:
+        return None, None
+    # “其他”是固定兜底：去重后强制置于表末（classify_article 只匹配 [:-1]）
+    groups = [g for g in groups if g[0] != "其他"]
+    groups.append(("其他", []))
+    return groups, None
+
+
+def configure_topic_groups(config: Dict[str, Any]) -> None:
+    """按 config['topic_groups'] 切换子方向分类表（幂等）。
+
+    分类只影响展示分组与 topic 标签，不参与相关性评分；配置非法时回退
+    内置表并记警告，不让整条流水线失败。构建 Notifier 与 Web 配置热更新
+    时调用，保证 classify_article 用的是当前配置的分组。
+    """
+    global _ACTIVE_TOPIC_CLASSIFIER, _TOPIC_PATTERNS
+    groups, problem = _configured_groups(config)
+    if problem:
+        logger.warning("topic_groups 配置无效（%s），使用内置子方向表", problem)
+    target = groups if groups else list(TOPIC_CLASSIFIER)
+    if target == _ACTIVE_TOPIC_CLASSIFIER:
+        return
+    _ACTIVE_TOPIC_CLASSIFIER = target
+    _TOPIC_PATTERNS = _compile_topic_patterns(target)
+    if groups:
+        logger.info("已启用自定义子方向分组：%s", "、".join(n for n, _ in groups[:-1]))
+
+
+def active_topic_names() -> List[str]:
+    """当前生效的子方向名称（含末位兜底「其他」），供前端筛选下拉使用。"""
+    return [name for name, _ in _ACTIVE_TOPIC_CLASSIFIER]
+
 
 def classify_article(article: Dict[str, Any]) -> str:
     """根据标题和摘要判断文章属于哪个子方向"""
@@ -198,6 +266,8 @@ class Notifier:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.output_cfg = config.get("output", {})
+        # 子方向分组表随配置刷新（幂等）；classify_article 全程用当前配置
+        configure_topic_groups(config)
         # 相对路径统一锚定到项目根（utils.paths），避免工作目录影响
         self.output_dir = resolve_against_root(
             self.output_cfg.get("output_dir", "data/output")

@@ -56,7 +56,8 @@ def collect_daily_config(config: dict[str, Any]) -> tuple[dict[str, Any], list[s
     """归一化 digest 配置：返回 (values, errors)。
 
     values 键：limit / repeat_window_days / pool_window_days / category_limits /
-    min_score。errors 非空表示配置非法，调用方不得使用本次结果继续发布流程。
+    category_enabled / min_score。errors 非空表示配置非法，调用方不得使用本次
+    结果继续发布流程。
     """
     errors: list[str] = []
     digest_cfg = config.get("digest")
@@ -67,7 +68,25 @@ def collect_daily_config(config: dict[str, Any]) -> tuple[dict[str, Any], list[s
         return {}, [f"digest.daily 必须是映射，当前为 {type(daily).__name__}"]
     daily = daily or {}
 
-    values: dict[str, Any] = {}
+    # 类别启发式开关：缺省/true = 按 mlip/dft 等类别加分与配额选择；
+    # false = 中性模式（各类别加分统一、无 min 保底/max 限制，日报按
+    # 相关性+新鲜度选择；分类标签仍用于展示）。显式非法值报错，不静默改默认。
+    categories_raw = (digest_cfg or {}).get("categories")
+    category_enabled = True
+    if categories_raw is not None:
+        if type(categories_raw) is not bool:
+            errors.append(
+                f"digest.categories 必须是布尔值 true/false，当前为 {categories_raw!r}"
+            )
+        else:
+            category_enabled = categories_raw
+    if not category_enabled and ("category_limits" in daily or "quotas" in daily):
+        errors.append(
+            "digest.categories: false 时类别已停用，"
+            "不应再配置 digest.daily.category_limits/quotas"
+        )
+
+    values: dict[str, Any] = {"category_enabled": category_enabled}
     invalid: set[str] = set()
     for key, default in DAILY_DEFAULTS.items():
         raw = daily.get(key)
@@ -106,6 +125,11 @@ def collect_daily_config(config: dict[str, Any]) -> tuple[dict[str, Any], list[s
     else:
         errors.append(f"relevance_threshold 必须是数字，当前为 {threshold!r}")
         values["min_score"] = DEFAULT_MIN_SCORE
+
+    # 类别停用（中性模式）时不读配额：选择器不按类别限制，category_limits 置 None
+    if not category_enabled:
+        values["category_limits"] = None
+        return values, errors
 
     # 类别配额：键存在性决定 category_limits/quotas 优先级（category_limits 优先），
     # 不用 `or` 选择——否则显式 false / [] 等假值会被静默吞成默认配额。

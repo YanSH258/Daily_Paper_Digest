@@ -9,7 +9,8 @@ const src = fs.readFileSync(path.join(__dirname, '../src/static/js/settings.js')
 const fieldRowSrc = src.match(/  fieldRow\(label, inner\) \{[\s\S]*?\n  \},/)[0];
 const renderSrc = src.match(/  render\(c\) \{[\s\S]*?\n  \},/)[0];
 const saveSrc = src.match(/  async save\(\) \{[\s\S]*?\n  \},/)[0];
-assert.ok(fieldRowSrc && renderSrc && saveSrc, 'failed to extract fieldRow()/render()/save() from settings.js');
+const parseGroupsSrc = src.match(/  parseTopicGroups\(text\) \{[\s\S]*?\n  \},/)[0];
+assert.ok(fieldRowSrc && renderSrc && parseGroupsSrc && saveSrc, 'failed to extract fieldRow()/render()/parseTopicGroups()/save() from settings.js');
 
 const SETTINGS = {
   fetcher: {},
@@ -38,7 +39,7 @@ const SETTINGS = {
 {
   const context = { API: { esc: (s) => String(s) }, console };
   vm.createContext(context);
-  vm.runInContext(`globalThis.Settings = { ${fieldRowSrc} ${renderSrc} };`, context);
+  vm.runInContext(`globalThis.Settings = { ${fieldRowSrc} ${parseGroupsSrc} ${renderSrc} };`, context);
 
   const html = context.Settings.render(SETTINGS);
 
@@ -74,7 +75,7 @@ function makeSaveContext(fields) {
   };
   vm.createContext(context);
   vm.runInContext(
-    `globalThis.Settings = { getProvider: () => 'deepseek', getModelValue: () => 'deepseek-chat',
+    `globalThis.Settings = { ${parseGroupsSrc} getProvider: () => 'deepseek', getModelValue: () => 'deepseek-chat',
        load: async () => {}, ${saveSrc} };`,
     context,
   );

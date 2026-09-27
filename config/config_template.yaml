@@ -32,12 +32,24 @@ research_topics:
 - "density functional theory DFT"
 - "molecular dynamics simulation"
 
+# 子方向分组（可选）：影响文章 topic 标签、文献库筛选下拉与推送分组展示，
+# 不参与相关性评分。不配置时使用内置分组（MLIP/MD/MOF/DFT/催化…计算材料向）。
+# topic_groups:
+# - name: "催化 / 反应机理"
+#   keywords: ["catalysis", "photocatalysis", "electrocatalysis"]
+# - name: "电池材料"
+#   keywords: ["battery", "solid-state electrolyte", "lithium"]
+
 # 相关性分数阈值（0-10），低于此分数的文章不推送
 relevance_threshold: 4
 
 # ---------- 日报选择规则（Phase0 Top-N）----------
 # 不配置时使用与下方相同的默认值；显式非法值会在启动时被拒绝
 digest:
+  # categories: false 为「中性模式」：关闭领域类别加分与配额（内置类别偏向
+  # 计算材料方向），日报按相关性+新鲜度选择，适合非计算材料领域用户；
+  # 分类标签仍会展示。缺省/true = 启用类别加分与配额。
+  # categories: true
   daily:
     limit: 10                  # 每日入选数量
     repeat_window_days: 30     # 防重窗口：30 天内已入选过的文章不再重复入选（0=关闭防重）

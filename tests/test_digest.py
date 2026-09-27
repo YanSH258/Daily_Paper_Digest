@@ -598,5 +598,65 @@ class TestDryRunFileSemantics(unittest.TestCase):
         self.assertIsNone(main_mod._write_dry_run_report(cfg, "2026-09-10", "v1"))
 
 
+class TestNeutralCategoryMode(unittest.TestCase):
+    """digest.categories: false 中性模式：加分统一、无配额，分类标签仍输出。"""
+
+    def test_categories_must_be_bool(self):
+        errors = validate_digest_config({"digest": {"categories": "off"}})
+        self.assertTrue(any("digest.categories" in e for e in errors), msg=str(errors))
+        errors = validate_digest_config({"digest": {"categories": 0}})
+        self.assertTrue(any("digest.categories" in e for e in errors), msg=str(errors))
+
+    def test_categories_false_rejects_category_limits(self):
+        for key in ("category_limits", "quotas"):
+            errors = validate_digest_config(
+                {"digest": {"categories": False, "daily": {key: {"mlip": 2}}}})
+            self.assertTrue(any("不应再配置" in e and key in e for e in errors), msg=key)
+
+    def test_categories_false_collect(self):
+        values, errors = collect_daily_config({"digest": {"categories": False}})
+        self.assertEqual(errors, [])
+        self.assertFalse(values["category_enabled"])
+        self.assertIsNone(values["category_limits"])
+
+    def test_categories_absent_enabled(self):
+        values, errors = collect_daily_config({})
+        self.assertEqual(errors, [])
+        self.assertTrue(values["category_enabled"])
+        self.assertIsNotNone(values["category_limits"])
+
+    def test_scorer_uniform_bonus_keeps_label(self):
+        mlip_a = _art(1, "universal machine learning potential", relevance=8.0)
+        other_a = _art(2, "total synthesis of alkaloid natural products", relevance=8.0)
+        s_mlip = score_article(mlip_a, category_enabled=False)
+        s_other = score_article(other_a, category_enabled=False)
+        self.assertEqual(s_mlip["category"], "mlip")  # 分类标签保留供展示
+        self.assertEqual(s_other["category"], "other")
+        # 中性模式：类别加分统一，不再抬 MLIP 文章
+        self.assertEqual(s_mlip["category_bonus"], s_other["category_bonus"])
+        enabled_bonus = score_article(mlip_a)["category_bonus"]
+        self.assertGreater(enabled_bonus, s_mlip["category_bonus"])
+
+    def test_selector_quota_ignored_when_disabled(self):
+        items = [{"id": i, "scores": {"category": "mlip", "final": 10 - i * 0.1}}
+                 for i in range(1, 6)]
+        enabled = select_daily_top(items, limit=5, category_enabled=True)
+        self.assertEqual(len(enabled.selected), 4)  # 默认配额 mlip max=4
+        disabled = select_daily_top(items, limit=5, category_enabled=False)
+        self.assertEqual(len(disabled.selected), 5)  # 中性模式无类别限制
+        self.assertEqual(disabled.stats["limits"]["mlip"]["min"], 0)
+
+    def test_min_quota_not_filled_when_disabled(self):
+        # 只有 1 篇 dft + 9 篇 other：启用时 dft min=1 保底抢位；停用时纯按 final
+        items = [{"id": 0, "scores": {"category": "dft", "final": 5.0}}] + [
+            {"id": i, "scores": {"category": "other", "final": 9.0 - i * 0.1}}
+            for i in range(1, 10)
+        ]
+        enabled = select_daily_top(items, limit=3, category_enabled=True)
+        self.assertIn(0, [r["id"] for r in enabled.selected])  # 保底把 dft 拉进来
+        disabled = select_daily_top(items, limit=3, category_enabled=False)
+        self.assertEqual([r["id"] for r in disabled.selected], [1, 2, 3])  # 纯按 final
+
+
 if __name__ == "__main__":
     unittest.main()

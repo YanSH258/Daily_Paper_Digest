@@ -54,6 +54,7 @@ def build_daily_digest(
     window_days = values["repeat_window_days"]
     pool_window_days = values["pool_window_days"]
     min_score = values["min_score"]
+    category_enabled = values["category_enabled"]
     category_limits = values["category_limits"]
     top_journals = ((config.get("digest") or {}).get("tracks") or {}).get("top_chemistry", {}).get("journals")
 
@@ -93,7 +94,10 @@ def build_daily_digest(
 
     scored = []
     for a in articles:
-        s = score_article(a, now=now, metrics_by_name=metrics, top_journals=top_journals)
+        s = score_article(
+            a, now=now, metrics_by_name=metrics, top_journals=top_journals,
+            category_enabled=category_enabled,
+        )
         item = dict(a)
         item["scores"] = s
         scored.append(item)
@@ -108,7 +112,8 @@ def build_daily_digest(
         )
 
     selection = select_daily_top(
-        scored, limit=limit, category_limits=category_limits, excluded_ids=excluded
+        scored, limit=limit, category_limits=category_limits, excluded_ids=excluded,
+        category_enabled=category_enabled,
     )
 
     if not dry_run:
@@ -135,6 +140,7 @@ def build_daily_digest(
         "limit": limit,
         "repeat_window_days": window_days,
         "pool_window_days": pool_window_days,
+        "category_enabled": category_enabled,
         "category_limits": category_limits,
         "articles_above_threshold": len(articles),
         "excluded_ids": excluded,
@@ -165,6 +171,10 @@ def format_dry_run_report(result: dict[str, Any], max_reject_notes: int = 12) ->
         "Selected",
         "-" * 48,
     ]
+    if result.get("category_enabled") is False:
+        # 中性模式：插入说明行，不改变默认输出的既有行
+        idx = next((i for i, ln in enumerate(lines) if ln.startswith("By category")), len(lines))
+        lines.insert(idx, "Category selection:               disabled (uniform bonus, no quota)")
     for i, row in enumerate(sel.selected, 1):
         s = row.get("scores") or {}
         title = (row.get("title") or "")[:70]

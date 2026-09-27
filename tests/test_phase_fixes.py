@@ -203,6 +203,149 @@ class TestSettingsSave(unittest.TestCase):
         self.assertEqual([f for f in os.listdir(tmp) if f.endswith(".tmp")], [])
 
 
+class TestProviderAndTopicsSave(unittest.TestCase):
+    """提供方名非法必须整单拒绝（不得把 model/base_url/api_key 写到别的提供方名下）；
+    研究方向键随请求出现即生效，空列表=显式清空。"""
+
+    def _ctx(self, cfg_path):
+        return web_server.WebContext(config_path=cfg_path)
+
+    def test_empty_provider_rejected_without_polluting(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {
+            "llm.provider": "",
+            "llm.base_url": "https://api.third-party.example/v1",
+            "llm.model": "third-model",
+            "llm.api_key": "sk-third",
+        })
+        self.assertEqual(code, 400)
+        self.assertIn("提供方名不能为空", payload["error"])
+        text = open(cfg, encoding="utf-8").read()
+        self.assertNotIn("api.third-party.example", text)  # 不得写进 deepseek 分节
+        self.assertNotIn("third-model", text)
+        self.assertIn("https://api.deepseek.com", text)
+
+    def test_invalid_provider_name_rejected_without_orphan_section(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        before = open(cfg, encoding="utf-8").read()
+        for bad in ("api.gptsapi", "智谱", "open ai"):
+            with self.subTest(provider=bad):
+                payload, code = web_server._save_settings(ctx, {
+                    "llm.provider": bad,
+                    "llm.base_url": "https://api.third-party.example/v1",
+                    "llm.model": "third-model",
+                    "llm.api_key": "sk-third",
+                })
+                self.assertEqual(code, 400)
+                self.assertIn("提供方名", payload["error"])
+                self.assertEqual(before, open(cfg, encoding="utf-8").read())
+        view = web_server._settings_view(ctx)
+        self.assertEqual(view["llm"]["provider"], "deepseek")
+
+    def test_valid_new_provider_still_saves(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {
+            "llm.provider": "siliconflow",
+            "llm.base_url": "https://api.siliconflow.example/v1",
+            "llm.model": "Qwen2.5-72B",
+            "llm.api_key": "sk-sf",
+        })
+        self.assertEqual(code, 200)
+        self.assertIn("llm.provider", payload["changed"])
+        self.assertEqual(ctx.config["llm"]["provider"], "siliconflow")
+        sf = ctx.config["llm"]["siliconflow"]
+        self.assertEqual(sf["base_url"], "https://api.siliconflow.example/v1")
+        self.assertEqual(sf["api_key"], "sk-sf")
+
+    def test_research_topics_replace_and_explicit_clear(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp, "research_topics:\n- 机器学习势函数\n")
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"research_topics": ["cof", "除铀"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(ctx.config["research_topics"], ["cof", "除铀"])
+        # 空列表 = 显式清空（前端脏字段 diff 保证只有用户真的清空才会提交）
+        payload, code = web_server._save_settings(ctx, {"research_topics": []})
+        self.assertEqual(code, 200)
+        self.assertEqual(ctx.config["research_topics"], [])
+
+    def test_research_topics_absent_keeps_existing(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp, "research_topics:\n- 机器学习势函数\n")
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"relevance_threshold": 5})
+        self.assertEqual(code, 200)
+        self.assertEqual(ctx.config["research_topics"], ["机器学习势函数"])
+
+
+class TestDigestAndGroupsSave(unittest.TestCase):
+    """设置页保存 digest.categories / topic_groups：类型校验、冲突拒绝、视图回显。"""
+
+    def _ctx(self, cfg_path):
+        return web_server.WebContext(config_path=cfg_path)
+
+    def test_digest_categories_saved_and_validated(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"digest.categories": False})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config.get("digest") or {}).get("categories"), False)
+        payload, code = web_server._save_settings(ctx, {"digest.categories": "yes"})
+        self.assertEqual(code, 400)
+
+    def test_digest_categories_false_conflicts_with_limits(self):
+        tmp = tempfile.mkdtemp()
+        extra = "digest:\n  daily:\n    category_limits:\n      mlip: {min: 1, max: 2}\n"
+        cfg = _make_tmp_config(tmp, extra)
+        ctx = self._ctx(cfg)
+        before = open(cfg, encoding="utf-8").read()
+        payload, code = web_server._save_settings(ctx, {"digest.categories": False})
+        self.assertEqual(code, 400)
+        self.assertIn("未保存", payload["error"])
+        self.assertEqual(before, open(cfg, encoding="utf-8").read())
+
+    def test_topic_groups_save_clear_and_invalid(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"topic_groups": [
+            {"name": "催化 / 反应机理", "keywords": ["catalysis", " photocatalysis "]},
+        ]})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config.get("topic_groups") or [{}])[0]["keywords"],
+                         ["catalysis", "photocatalysis"])
+        # 空列表 = 恢复内置分组
+        payload, code = web_server._save_settings(ctx, {"topic_groups": []})
+        self.assertEqual(code, 200)
+        self.assertEqual(ctx.config.get("topic_groups"), [])
+        # 非法整单拒绝（运行时静默回退会掩盖错误，必须在保存时拦下）
+        for bad in ("not-a-list", [{"name": "no keywords"}],
+                    [{"keywords": ["x"]}], [{"name": "x", "keywords": []}]):
+            with self.subTest(bad=bad):
+                payload, code = web_server._save_settings(ctx, {"topic_groups": bad})
+                self.assertEqual(code, 400)
+                self.assertIn("topic_groups", payload["error"])
+
+    def test_view_exposes_digest_and_groups(self):
+        tmp = tempfile.mkdtemp()
+        extra = ("digest:\n  categories: false\n"
+                 "topic_groups:\n- name: 催化\n  keywords:\n  - catalysis\n")
+        cfg = _make_tmp_config(tmp, extra)
+        ctx = self._ctx(cfg)
+        view = web_server._settings_view(ctx)
+        self.assertFalse(view["digest"]["categories"])
+        self.assertFalse(view["digest"]["category_limits_configured"])
+        self.assertEqual(view["topic_groups"],
+                         [{"name": "催化", "keywords": ["catalysis"]}])
+
+
 class TestSmtpSettings(unittest.TestCase):
     """设置页 SMTP 字段：留空不改 / 显式清除 / 端口校验 / 明文不回传。"""
 

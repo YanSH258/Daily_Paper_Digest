@@ -76,12 +76,18 @@ def select_daily_top(
     quotas: Optional[dict] = None,
     category_limits: Optional[dict] = None,
     excluded_ids: Optional[set] = None,
+    category_enabled: bool = True,
 ) -> SelectionResult:
     """scored: [{id, title, scores:{category, final, ...}}, ...]
 
     quotas 为兼容旧接口：映射为 max；min 用默认保底。
+    category_enabled=False（中性模式）：不设类别配额（min=0、max=limit，
+    约束永不生效），仅保留 by_category 统计；category_limits 入参忽略。
     """
-    limits = normalize_limits(category_limits if category_limits is not None else quotas)
+    if not category_enabled:
+        limits = {cat: {"min": 0, "max": max(1, int(limit))} for cat in DEFAULT_CATEGORY_LIMITS}
+    else:
+        limits = normalize_limits(category_limits if category_limits is not None else quotas)
     excluded = excluded_ids or set()
 
     pool: list[dict] = []

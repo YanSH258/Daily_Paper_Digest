@@ -287,6 +287,7 @@ const Library = {
       this.renderCards(data.items);
       this.renderRows(data.items);
       this.renderJournals(data.journals);
+      this.renderTopics(data.topic_names);
       this.renderPagination();
       summaryEl.textContent = `共 ${this.total} 篇` +
         (this.total > this.perPage ? ` · 第 ${this.page + 1}/${Math.ceil(this.total / this.perPage)} 页` : "");
@@ -543,6 +544,27 @@ const Library = {
       opt.textContent = j;
       if (j === current) opt.selected = true;
       sel.appendChild(opt);
+    }
+  },
+
+  /** 方向筛选/手动添加下拉按服务端当前生效的子方向表刷新（保留首项与已选值） */
+  renderTopics(names) {
+    if (!names || !names.length) return;  // 服务端未提供时保留页面内置选项
+    for (const id of ["topic", "maTopic"]) {
+      const sel = document.getElementById(id);
+      if (!sel) continue;
+      const first = sel.options[0];  // “全部方向” / “方向（可选）”
+      const current = sel.value;
+      sel.innerHTML = "";
+      if (first) sel.appendChild(first);
+      for (const n of names) {
+        const opt = document.createElement("option");
+        opt.value = n;
+        opt.textContent = n;
+        if (n === current) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some((o) => o.value === current)) sel.value = current;
     }
   },
 
