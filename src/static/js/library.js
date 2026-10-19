@@ -180,35 +180,13 @@ const Library = {
   async translateTitles() {
     const btn = document.getElementById("translateBtn");
     const items = this.lastItems || [];
-    if (!items.length) {
-      alert("当前页没有文献，请先加载文献库");
-      return;
-    }
-    if (!confirm(`用免费 MyMemory 接口翻译当前页 ${items.length} 条标题？（有日配额，失败会自动重试一次）`)) return;
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = "翻译中…";
-    }
+    if (!items.length) return alert("当前页没有文献，请先加载文献库");
+    if (!confirm(`提交当前页 ${items.length} 条标题的后台翻译？可在任务页查看进度。`)) return;
+    if (btn) { btn.disabled = true; btn.textContent = "提交中…"; }
     try {
-      const res = await API.post("/api/articles/translate", {
-        ids: items.map((a) => a.id),
-        limit: items.length,
-        provider: "mymemory",
-      });
-      if (!res.ok) throw new Error(res.error || "翻译失败");
-      alert(`当前页：新译 ${res.translated} · 已有/跳过 ${res.skipped} · 失败 ${res.failed}`);
-      if (res.failed > 0) {
-        alert("仍有失败条目，可再点一次「译标题」补译。");
-      }
-      this.load();
-    } catch (e) {
-      alert("翻译失败: " + e.message);
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = "译标题";
-      }
-    }
+      await BatchTasks.submit("translate", items.map(a => a.id));
+    } catch (e) { alert("后台翻译提交失败：" + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = "译标题"; } }
   },
 
   journalMeta(a) {
@@ -472,31 +450,12 @@ const Library = {
 
   async batchPushZotero() {
     if (!this.selection.size || this.zoteroBusy) return;
-    if (!confirm(`确定把选中的 ${this.selection.size} 篇推送到 Zotero 吗？`)) return;
-    const ids = [...this.selection];
-    const results = [];
+    if (!confirm(`提交选中的 ${this.selection.size} 篇到 Zotero 后台任务？可在任务页查看进度和重试。`)) return;
     this.zoteroBusy = true;
     try {
-      for (let offset = 0; offset < ids.length; offset += 100) {
-        const resp = await API.post("/api/zotero/batch", { ids: ids.slice(offset, offset + 100) });
-        if (!resp.ok) throw new Error(resp.error || "推送失败");
-        results.push(...resp.results);
-        for (const result of resp.results) {
-          if (result.ok && !result.warnings?.length) this.selection.delete(result.id);
-        }
-      }
-      const failed = results.filter(r => !r.ok);
-      const incomplete = results.filter(r => r.ok && r.warnings?.length);
-      alert(`处理完成：条目成功 ${results.length - failed.length}，失败 ${failed.length}，待补齐 ${incomplete.length}` +
-        [...failed, ...incomplete].map(r => `\n文献 ${r.id}：${r.error || r.warnings.join("；")}`).join("") +
-        (failed.length || incomplete.length ? "\n未完成条目保留勾选，再次推送可重试。" : ""));
-    } catch (e) {
-      alert("推送中断: " + e.message + "。未完成条目保留勾选，可再次推送。");
-    } finally {
-      this.zoteroBusy = false;
-      this.renderBatchBar();
-      this.load();
-    }
+      await BatchTasks.submit("zotero", [...this.selection]);
+    } catch (e) { alert("Zotero 后台任务提交失败：" + e.message); }
+    finally { this.zoteroBusy = false; }
   },
 
   async batchAddToTopic() {

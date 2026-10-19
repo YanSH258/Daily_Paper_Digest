@@ -16,6 +16,7 @@
 - `src/core/tracking.py`、`src/integrations/`：作者/引文发现、OpenAlex、Crossref、arXiv（分类 RSS 优先 + 查询 API 回退）、Zotero、WoS。
 - `src/processing.py`：日期准入与评分队列策略（纯函数，无副作用）；`src/utils/backlog.py`：存量处置（只读预览 / 备份后迁移 / 可恢复）；`src/utils/presets.py`：来源预设的导入与导出（`--import-sources` / `--export-sources`）。
 - `src/core/notifier.py`、`src/utils/`：报告、推送、引用导出、周报、相似度和期刊指标。
+- `src/core/batch_tasks.py`：后台 Zotero / 标题翻译任务，复用 `task_runs` 保存逐项进度，运行时使用配置快照并提供显式失败重试；服务重启只标记中断，不自动重放外部操作。
 - `src/web_server.py`：标准库 ThreadingHTTPServer、API、TaskRunner、设置热更新和静态资源。
 - `src/mcp_server.py`：MCP 服务器（`daily-paper-mcp`），把 HTTP API 包装为 25 个语义化工具供 AI agent 调用；薄层转换，业务逻辑不得下沉到此处。
 - `src/static/`：原生 HTML/CSS/JavaScript，无前端构建步骤；页面使用共享 API 封装。

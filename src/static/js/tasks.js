@@ -5,6 +5,7 @@ const Tasks = {
   loading: false,
   async loadStatus() {
     if (this.loading) return;
+    if (typeof BatchTasks !== "undefined") BatchTasks.load();
     this.loading = true;
     const box = document.getElementById("statusBox");
     try {

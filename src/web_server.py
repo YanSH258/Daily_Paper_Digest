@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from core.analyzer import LLMAnalyzer
 from core.db import Database
+from core.batch_tasks import BatchTaskRunner, BatchTaskError, article_ids, task_view
 from processing import task_status_and_error
 from core.fetcher import JournalFetcher, detect_publisher_from_url
 from core.notifier import Notifier, active_topic_names, classify_article, configure_topic_groups
@@ -84,6 +85,7 @@ class TaskRunner:
     def attach_db(self, db: Database) -> None:
         """注入数据库实例，用于持久化任务运行记录。"""
         self._db = db
+        self.batch = BatchTaskRunner(db)
         self.state: dict[str, Any] = {
             "running": False,
             "task_id": None,
@@ -103,7 +105,7 @@ class TaskRunner:
         }
         if db is not None:
             try:
-                runs = db.list_task_runs(limit=1000)
+                runs = [r for r in db.list_task_runs(limit=1000) if r.get("trigger") != "batch"]
                 if isinstance(runs, list) and runs:
                     latest = runs[0]
                     self.state.update({
@@ -1879,6 +1881,71 @@ def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = 
         lock.release()
 
 
+def _process_background_batch(ctx: WebContext, kind: str, ids: list[int], options: dict,
+                              config: dict, resources: Optional[dict] = None) -> list[dict]:
+    resources = resources if resources is not None else {}
+    snapshot = copy.copy(ctx)
+    snapshot.config = config
+    if kind == "zotero":
+        # Share the same guard and item synchronization with the synchronous API.
+        with _zotero_lock:
+            from integrations.zotero_client import ZoteroClient
+            if "zotero" not in resources:
+                try:
+                    resources["zotero"] = ZoteroClient(config)
+                except Exception:
+                    resources["zotero"] = None
+            client = resources["zotero"]
+            if client is None:
+                return [{"id": aid, "ok": False, "error": "无法连接 Zotero，请检查配置"} for aid in ids]
+            results = []
+            for aid in ids:
+                try:
+                    results.append(_sync_zotero_item(snapshot, client, aid))
+                except Exception:
+                    rows = ctx.db.get_articles_by_ids([aid])
+                    safe = bool(rows and (rows[0].get("doi") or rows[0].get("zotero_key")))
+                    results.append({"id": aid, "ok": False, "retryable": safe,
+                                    "error": "Zotero 处理失败" + ("，可重试" if safe else "，请先核对远端条目，避免重复创建")})
+            return results
+    before = {row["id"]: row for row in ctx.db.get_articles_by_ids(ids)}
+    request = {"ids": ids, "limit": len(ids)}
+    if options.get("provider"):
+        request["provider"] = options["provider"]
+    _batch_translate_titles(snapshot, request)
+    after = {row["id"]: row for row in ctx.db.get_articles_by_ids(ids)}
+    results = []
+    for aid in ids:
+        old = before.get(aid, {})
+        translated = bool((after.get(aid, {}).get("title_zh") or "").strip())
+        results.append({"id": aid, "title": old.get("title") or "", "ok": translated,
+                        "outcome": "skipped" if old.get("title_zh") else "translated" if translated else "failed",
+                        **({} if translated else {"error": "文献不存在、翻译失败或译文未保存，请重试"})})
+    return results
+
+
+def _start_background_batch(ctx: WebContext, data: dict, retry_of: Optional[str] = None):
+    resources = {}
+    processor = lambda kind, ids, options, config: _process_background_batch(ctx, kind, ids, options, config, resources)
+    try:
+        if retry_of:
+            task = ctx.runner.batch.retry(retry_of, ctx.config, processor)
+        else:
+            kind = data.get("kind")
+            ids = article_ids(data.get("ids"))
+            options = {}
+            provider = data.get("provider")
+            if provider is not None:
+                if kind != "translate" or not isinstance(provider, str) or provider not in {"mymemory", "libretranslate"}:
+                    raise BatchTaskError("无效的翻译提供方")
+                options["provider"] = provider
+            task = ctx.runner.batch.submit(kind, ids, options, ctx.config, processor,
+                                           request_id=data.get("request_id"))
+        return {"ok": True, "task": task, "task_id": task["task_id"]}, 202
+    except BatchTaskError as exc:
+        return {"ok": False, "error": str(exc)}, exc.status
+
+
 _zotero_lock = threading.Lock()
 
 
@@ -1888,7 +1955,7 @@ def _sync_zotero_item(ctx: WebContext, client, article_id: int) -> dict[str, Any
         return {"ok": False, "id": article_id, "error": "article not found"}
     result = client.sync_article(
         item, save_key=lambda key: ctx.db.update_article_fields(article_id, zotero_key=key))
-    return {**result, "id": article_id}
+    return {**result, "id": article_id, "title": item.get("title") or ""}
 
 
 def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
@@ -2382,6 +2449,17 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"ok": False, "error": f"查询失败: {exc}"}, code=502)
                 return
 
+            if path == "/api/batch-tasks":
+                self._json_response({"ok": True, "items": [task_view(row) for row in self.ctx.db.list_batch_tasks()]})
+                return
+
+            if path.startswith("/api/batch-tasks/"):
+                task_id = path.removeprefix("/api/batch-tasks/")
+                row = self.ctx.db.get_batch_task(task_id)
+                self._json_response({"ok": True, "task": task_view(row)} if row else
+                                    {"ok": False, "error": "任务不存在"}, code=200 if row else 404)
+                return
+
             if path == "/api/status":
                 self._json_response({
                     "task": _task_http_view(self.ctx),
@@ -2591,6 +2669,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"ok": True, "required": True, "matched": True})
                     return
                 self._json_response({"ok": False, "required": True, "error": "Token 不匹配"}, code=401)
+                return
+
+            if path == "/api/batch-tasks" or (path.startswith("/api/batch-tasks/") and path.endswith("/retry")):
+                if not self._require_token():
+                    return
+                data = _read_json_body(self) or {}
+                retry_of = path.removeprefix("/api/batch-tasks/").removesuffix("/retry") if path.endswith("/retry") else None
+                payload, code = _start_background_batch(self.ctx, data, retry_of=retry_of)
+                self._json_response(payload, code=code)
                 return
 
             if path == "/api/run":

@@ -158,6 +158,7 @@
             <span id="manualAddMsg" class="small"></span>
           </div>
         </div>
+        <div id="batchTaskNotice" aria-live="polite"></div>
         <div id="summary" class="small" style="margin-bottom:12px;"></div>
 
         <!-- 清理低分：页内确认（不依赖浏览器弹窗） -->
@@ -393,6 +394,11 @@
         <h3>任务状态</h3>
         <div id="statusBox" class="small"></div>
       </div>
+      <div class="card">
+        <h3>后台推送与翻译</h3>
+        <p class="small muted">关闭页面后任务继续运行；失败或中断后可手动重试未完成项。</p>
+        <div id="batchTaskList" aria-live="polite"></div>
+      </div>
     </section>
 
     <!-- ══ 07 设置 ══ -->
@@ -437,6 +443,7 @@
 <script src="/static/js/trends.js"></script>
 <script src="/static/js/chat.js"></script>
 <script src="/static/js/article_detail.js"></script>
+<script src="/static/js/batch_tasks.js"></script>
 <script src="/static/js/library.js"></script>
 <script src="/static/js/journals.js"></script>
 <script src="/static/js/reports.js"></script>

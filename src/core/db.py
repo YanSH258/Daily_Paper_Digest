@@ -2007,6 +2007,59 @@ class Database:
 
     # ── 任务运行记录（跨进程持久化）────────────────────────────
 
+    def create_batch_task(self, task_id: str, mode: str, stats: dict) -> None:
+        self._batch_task_sql(
+            "INSERT INTO task_runs (task_id, trigger, mode, status, stage, stats, started_at) "
+            "VALUES (?, 'batch', ?, 'running', 'queued', ?, ?)",
+            (task_id, mode, json.dumps(stats, ensure_ascii=False), datetime.now().isoformat(timespec="seconds")))
+
+    def save_batch_task(self, task_id: str, status: str, stage: str, stats: dict,
+                        error: Optional[str] = None) -> None:
+        self._batch_task_sql(
+            "UPDATE task_runs SET status=?, stage=?, stats=?, error=?, ended_at=? "
+            "WHERE task_id=? AND trigger='batch'",
+            (status, stage, json.dumps(stats, ensure_ascii=False), error,
+             None if status == "running" else datetime.now().isoformat(timespec="seconds"), task_id))
+
+    def _batch_task_sql(self, sql: str, params: tuple) -> None:
+        # Unlike legacy task logging, persistence failures must stop external writes.
+        def execute():
+            conn = self._conn()
+            with conn:
+                cur = conn.execute(sql, params)
+                if cur.rowcount != 1:
+                    raise sqlite3.DatabaseError("后台任务记录未保存")
+        if self._memory_conn is not None:
+            with self._memory_lock:
+                execute()
+        else:
+            execute()
+
+    def list_batch_tasks(self, limit: int = 20, task_id: Optional[str] = None) -> list[dict]:
+        def query():
+            where = "trigger='batch' AND mode IN ('batch_zotero', 'batch_translate')"
+            params = []
+            if task_id:
+                where += " AND task_id=?"
+                params.append(task_id)
+            params.append(limit)
+            cur = self._conn().execute(
+                "SELECT task_id, mode, status, stage, stats, error, started_at, ended_at "
+                "FROM task_runs WHERE " + where + " ORDER BY id DESC LIMIT ?", params)
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            for row in rows:
+                row["stats"] = json.loads(row["stats"])
+            return rows
+        if self._memory_conn is not None:
+            with self._memory_lock:
+                return query()
+        return query()
+
+    def get_batch_task(self, task_id: str) -> Optional[dict]:
+        rows = self.list_batch_tasks(limit=1, task_id=task_id)
+        return rows[0] if rows else None
+
     def task_start(self, task_id: str, trigger: str, mode: str, date_str: Optional[str] = None) -> None:
         try:
             sql = ("INSERT OR REPLACE INTO task_runs "
