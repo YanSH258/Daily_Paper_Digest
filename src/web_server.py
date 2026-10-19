@@ -1879,48 +1879,61 @@ def _reanalyze_article(ctx: WebContext, article_id: int, data: Optional[dict] = 
         lock.release()
 
 
-def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
+_zotero_lock = threading.Lock()
+
+
+def _sync_zotero_item(ctx: WebContext, client, article_id: int) -> dict[str, Any]:
     item = _get_article_detail(ctx, article_id)
     if item is None:
-        return {"ok": False, "error": "article not found"}, 404
-    if item.get("zotero_key"):
-        return {"ok": True, "key": item["zotero_key"], "already": True}, 200
-    try:
-        from integrations.zotero_client import ZoteroClient
-        client = ZoteroClient(ctx.config)
-        key = client.push_article(item)
-    except Exception as e:  # noqa: BLE001 - 推送失败原因需要回传前端
-        logger.error("Zotero 推送失败: %s", e, exc_info=True)
-        return {"ok": False, "error": f"推送失败: {e}"}, 500
-    ctx.db.update_article_fields(article_id, zotero_key=key)
-    return {"ok": True, "key": key}, 200
+        return {"ok": False, "id": article_id, "error": "article not found"}
+    result = client.sync_article(
+        item, save_key=lambda key: ctx.db.update_article_fields(article_id, zotero_key=key))
+    return {**result, "id": article_id}
+
+
+def _zotero_push(ctx: WebContext, article_id: int) -> tuple[dict[str, Any], int]:
+    with _zotero_lock:
+        if _get_article_detail(ctx, article_id) is None:
+            return {"ok": False, "error": "article not found"}, 404
+        try:
+            from integrations.zotero_client import ZoteroClient
+            client = ZoteroClient(copy.deepcopy(ctx.config))
+            result = _sync_zotero_item(ctx, client, article_id)
+            return result, 200 if result["ok"] else 500
+        except Exception:
+            logger.error("Zotero 推送失败", exc_info=True)
+            return {"ok": False, "error": "Zotero 推送失败，请检查连接后重试"}, 500
 
 
 def _zotero_batch(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    ids = [int(i) for i in (data.get("ids") or []) if str(i).isdigit()][:100]
-    if not ids:
-        return {"ok": False, "error": "ids 不能为空"}, 400
-    try:
-        from integrations.zotero_client import ZoteroClient
-        client = ZoteroClient(ctx.config)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)}, 400
-    pushed, skipped, failed = 0, 0, []
-    for aid in ids:
-        item = _get_article_detail(ctx, aid)
-        if item is None:
-            failed.append({"id": aid, "error": "not found"})
-            continue
-        if item.get("zotero_key"):
-            skipped += 1
-            continue
+    raw_ids = data.get("ids")
+    if (not isinstance(raw_ids, list) or not raw_ids or
+            any(isinstance(i, bool) or not str(i).isdigit() or int(i) <= 0 for i in raw_ids)):
+        return {"ok": False, "error": "ids 必须为非空的正整数列表"}, 400
+    ids = list(dict.fromkeys(int(i) for i in raw_ids))
+    if len(ids) > 100:
+        return {"ok": False, "error": "每批最多 100 篇，请分批推送", "limit": 100}, 400
+    with _zotero_lock:
         try:
-            key = client.push_article(item)
-            ctx.db.update_article_fields(aid, zotero_key=key)
-            pushed += 1
-        except Exception as e:  # noqa: BLE001
-            failed.append({"id": aid, "error": str(e)[:200]})
-    return {"ok": True, "pushed": pushed, "skipped": skipped, "failed": failed}, 200
+            from integrations.zotero_client import ZoteroClient
+            client = ZoteroClient(copy.deepcopy(ctx.config))
+        except Exception:
+            return {"ok": False, "error": "无法连接 Zotero，请检查配置"}, 400
+        pushed, skipped, failed, results = 0, 0, [], []
+        for aid in ids:
+            try:
+                result = _sync_zotero_item(ctx, client, aid)
+            except Exception:
+                result = {"ok": False, "id": aid, "error": "Zotero 推送失败，请重试"}
+            results.append(result)
+            if not result["ok"]:
+                failed.append(result)
+            elif result.get("already"):
+                skipped += 1
+            else:
+                pushed += 1
+        return {"ok": True, "pushed": pushed, "skipped": skipped, "failed": failed,
+                "results": results, "partial": any(r.get("warnings") or not r["ok"] for r in results)}, 200
 
 
 def _zotero_test(ctx: WebContext, data: Optional[dict[str, Any]] = None) -> tuple[dict[str, Any], int]:

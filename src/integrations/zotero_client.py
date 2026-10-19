@@ -11,12 +11,13 @@ zotero_client.py - Zotero Web API 封装（基于 pyzotero）
 - user_id：环境变量 ZOTERO_USER_ID 或 config.zotero.user_id；
   缺省时自动通过 GET https://api.zotero.org/keys/{key} 解析
 """
+import html
 import logging
 import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -136,13 +137,13 @@ class ZoteroClient:
         doi = doi.strip().lower()
         for attempt in range(2):
             try:
-                items = self.zot.items(q=doi, qmode="everything", limit=10)
+                items = self.zot.everything(self.zot.items(q=doi, qmode="everything", limit=100))
             except Exception as e:  # noqa: BLE001
                 # 查重失败时继续创建可能导致重复；上层应感知失败
                 raise ZoteroError(f"Zotero DOI 查重失败，已中止本次推送: {e}") from e
             for item in items:
                 data = item.get("data", {})
-                if str(data.get("doi", "")).strip().lower() == doi:
+                if str(data.get("DOI") or data.get("doi", "")).strip().lower() == doi:
                     return data.get("key")
             if attempt == 0:
                 import time
@@ -152,11 +153,69 @@ class ZoteroClient:
     # ── 推送 ────────────────────────────────────────────────────
     def push_article(self, article: dict, collection: Optional[str] = None) -> str:
         """推送单篇文章；已存在（按 DOI）则直接返回已有 key。"""
-        doi = (article.get("doi") or "").strip().lower()
-        existing = self.find_item_by_doi(doi)
-        if existing:
-            return existing
+        return self.sync_article(article, collection=collection)["key"]
 
+    def sync_article(self, article: dict, collection: Optional[str] = None,
+                     save_key: Optional[Callable[[str], bool]] = None) -> dict:
+        """先保存父条目标识，再按远端子条目补齐笔记/PDF；重试不重建父条目。"""
+        key = article.get("zotero_key") or self.find_item_by_doi(article.get("doi") or "")
+        already = bool(key)
+        if not key:
+            key = self._create_article(article, collection)
+        result = {"ok": True, "key": key, "already": already,
+                  "note": "disabled", "pdf": "disabled", "warnings": []}
+        if save_key is not None and not save_key(key):
+            return {**result, "ok": False, "error": f"Zotero 条目 {key} 已存在，但本地记录保存失败；请先恢复本地记录，避免重复创建",
+                    "retryable": bool(article.get("doi") or article.get("zotero_key"))}
+        try:
+            children = (self.zot.everything(self.zot.children(key))
+                        if already and (self.include_note or self.attach_oa_pdf) else [])
+        except Exception:
+            result["warnings"].append("无法核验远端附件，请重试补齐")
+            result.update(note="unknown", pdf="unknown")
+            return result
+        data = [child.get("data", {}) for child in children]
+        if self.include_note:
+            note_text = self._build_note(article)
+            if any(d.get("itemType") == "note" and
+                   (d.get("note") == note_text or any(t.get("tag") == "daily-paper-digest-note"
+                    for t in d.get("tags", []))) for d in data):
+                result["note"] = "present"
+            else:
+                try:
+                    note = self.zot.item_template("note")
+                    note.update(note=note_text, parentItem=key,
+                                tags=[{"tag": "daily-paper-digest-note"}])
+                    response = self.zot.create_items([note])
+                    if not (response.get("success") or {}).get("0"):
+                        raise ZoteroError("笔记创建未成功")
+                    result["note"] = "created"
+                except Exception:
+                    result["note"] = "failed"
+                    result["warnings"].append("笔记未完成，请重试补齐")
+        if self.attach_oa_pdf:
+            pdfs = [d for d in data if d.get("itemType") == "attachment" and
+                    d.get("contentType") == "application/pdf" and
+                    d.get("linkMode") == "imported_file"]
+            if any(d.get("md5") for d in pdfs):
+                result["pdf"] = "present"
+            else:
+                try:
+                    oa_url = self._resolve_pdf_url(article)
+                    if oa_url:
+                        pending = next((d for d in pdfs if d.get("title") == "OA PDF"), None)
+                        self._attach_pdf(key, oa_url, pending)
+                        result["pdf"] = "uploaded"
+                    else:
+                        result["pdf"] = "unavailable"
+                        result["warnings"].append("尚未找到开放获取 PDF，可稍后重试")
+                except Exception:
+                    result["pdf"] = "failed"
+                    result["warnings"].append("PDF 未完成，请重试补齐")
+        return result
+
+    def _create_article(self, article: dict, collection: Optional[str]) -> str:
+        doi = (article.get("doi") or "").strip().lower()
         template = self.zot.item_template("journalArticle")
         template["title"] = article.get("title") or "Untitled"
         source = article.get("journal") or ""
@@ -185,23 +244,6 @@ class ZoteroClient:
             raise ZoteroError(f"Zotero 创建条目失败: {resp.get('failed') or resp}")
         key = success["0"]
 
-        note_text = self._build_note(article)
-        if self.include_note and note_text:
-            try:
-                note = self.zot.item_template("note")
-                note["note"] = note_text
-                note["parentItem"] = key
-                self.zot.create_items([note])
-            except Exception as e:  # noqa: BLE001 - 笔记失败不影响条目
-                logger.warning("Zotero 附加笔记失败: %s", e)
-
-        if self.attach_oa_pdf:
-            oa_url = self._resolve_pdf_url(article)
-            if oa_url:
-                try:
-                    self._attach_pdf(key, oa_url)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Zotero 附 OA PDF 失败（条目已创建）: %s", e)
         return key
 
     def _article_tags(self, article: dict) -> list[str]:
@@ -217,11 +259,11 @@ class ZoteroClient:
 
     @staticmethod
     def _build_note(article: dict) -> str:
-        lines = [f"<p><b>推荐理由</b>：{article.get('relevance_reason') or '—'}</p>"]
+        lines = [f"<p><b>推荐理由</b>：{html.escape(str(article.get('relevance_reason') or '—'))}</p>"]
         score = article.get("relevance")
         if score is not None:
             lines.append(f"<p><b>相关性</b>：{float(score):.1f}/10"
-                         f"（{article.get('evidence_level') or 'UNKNOWN'} 依据）</p>")
+                         f"（{html.escape(str(article.get('evidence_level') or 'UNKNOWN'))} 依据）</p>")
         note = (article.get("note") or "").strip()
         if note:
             escaped = (note.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -272,7 +314,7 @@ class ZoteroClient:
                 logger.debug("Unpaywall OA 查询失败 (%s): %s", doi, e)
         return None
 
-    def _attach_pdf(self, item_key: str, pdf_url: str) -> None:
+    def _attach_pdf(self, item_key: str, pdf_url: str, pending: Optional[dict] = None) -> None:
         import requests
         resp = requests.get(pdf_url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
@@ -282,15 +324,17 @@ class ZoteroClient:
             f.write(resp.content)
             tmp_path = f.name
         try:
-            att = self.zot.item_template("attachment")
-            att["parentItem"] = item_key
-            att["linkMode"] = "imported_file"
-            att["title"] = "OA PDF"
-            created = self.zot.create_items([att])
-            att_key = (created.get("success") or {}).get("0")
-            if not att_key:
-                raise ZoteroError(f"创建附件条目失败: {created}")
-            att["key"] = att_key
-            self.zot.upload_attachment(att, tmp_path)
+            att = dict(pending) if pending else self.zot.item_template("attachment", linkmode="imported_file")
+            att.update(parentItem=item_key, linkMode="imported_file", title="OA PDF",
+                       contentType="application/pdf", filename=Path(tmp_path).name)
+            if not pending:
+                created = self.zot.create_items([att])
+                att_key = (created.get("success") or {}).get("0")
+                if not att_key:
+                    raise ZoteroError("创建附件条目失败")
+                att["key"] = att_key
+            response = self.zot.upload_attachments([att], item_key, basedir=str(Path(tmp_path).parent))
+            if response.get("failure") or not (response.get("success") or response.get("unchanged")):
+                raise ZoteroError("PDF 上传未成功")
         finally:
             Path(tmp_path).unlink(missing_ok=True)

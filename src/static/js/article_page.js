@@ -118,7 +118,7 @@ const Article = {
     // Zotero 状态
     const zBtn = document.getElementById("zoteroBtn");
     if (a.zotero_key) {
-      zBtn.textContent = "✓ 已在 Zotero";
+      zBtn.textContent = "检查 / 补齐 Zotero 附件";
       document.getElementById("zoteroNote").textContent = "条目 key: " + a.zotero_key;
     }
   },
@@ -187,8 +187,8 @@ const Article = {
       const resp = await API.post(`/api/articles/${this.id}/zotero`, {});
       if (resp.ok) {
         this.a.zotero_key = resp.key;
-        document.getElementById("zoteroBtn").textContent = resp.already ? "✓ 已在 Zotero" : "✓ 已推送";
-        document.getElementById("zoteroNote").textContent = "条目 key: " + resp.key;
+        document.getElementById("zoteroBtn").textContent = resp.warnings?.length ? "重试补齐 Zotero 附件" : "检查 / 补齐 Zotero 附件";
+        document.getElementById("zoteroNote").textContent = "条目 key: " + resp.key + (resp.warnings?.length ? "；" + resp.warnings.join("；") : "；笔记 / PDF 已核验（按设置启用）");
       } else alert(resp.error || "推送失败");
     } catch (e) { alert("推送失败: " + e.message); }
   },

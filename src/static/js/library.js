@@ -471,14 +471,32 @@ const Library = {
   },
 
   async batchPushZotero() {
-    if (!this.selection.size) return;
+    if (!this.selection.size || this.zoteroBusy) return;
     if (!confirm(`确定把选中的 ${this.selection.size} 篇推送到 Zotero 吗？`)) return;
+    const ids = [...this.selection];
+    const results = [];
+    this.zoteroBusy = true;
     try {
-      const resp = await API.post("/api/zotero/batch", { ids: [...this.selection] });
-      alert(`推送完成：成功 ${resp.pushed}，已存在 ${resp.skipped}` +
-            (resp.failed.length ? `，失败 ${resp.failed.length}` : ""));
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const resp = await API.post("/api/zotero/batch", { ids: ids.slice(offset, offset + 100) });
+        if (!resp.ok) throw new Error(resp.error || "推送失败");
+        results.push(...resp.results);
+        for (const result of resp.results) {
+          if (result.ok && !result.warnings?.length) this.selection.delete(result.id);
+        }
+      }
+      const failed = results.filter(r => !r.ok);
+      const incomplete = results.filter(r => r.ok && r.warnings?.length);
+      alert(`处理完成：条目成功 ${results.length - failed.length}，失败 ${failed.length}，待补齐 ${incomplete.length}` +
+        [...failed, ...incomplete].map(r => `\n文献 ${r.id}：${r.error || r.warnings.join("；")}`).join("") +
+        (failed.length || incomplete.length ? "\n未完成条目保留勾选，再次推送可重试。" : ""));
+    } catch (e) {
+      alert("推送中断: " + e.message + "。未完成条目保留勾选，可再次推送。");
+    } finally {
+      this.zoteroBusy = false;
+      this.renderBatchBar();
       this.load();
-    } catch (e) { alert("推送失败: " + e.message); }
+    }
   },
 
   async batchAddToTopic() {

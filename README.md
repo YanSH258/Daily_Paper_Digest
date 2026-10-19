@@ -81,6 +81,15 @@ PYTHONPATH="src:.deps" python src/web_server.py --config config/config.yaml --ho
 
 **Token 与访问地址**：Token 只在需要时配置。只监听本机（`--host 127.0.0.1`）时无需 Token；显式监听非本机地址时**必须**配置 `web.api_token` 或 `WEB_API_TOKEN`，否则拒绝启动。浏览器把 Token 存在 localStorage，而 localStorage 按**源**隔离——`http://localhost:8080` 与 `http://127.0.0.1:8080` 属于不同源，所以请固定用一个地址打开控制台，否则需要重新连接。Token 不匹配时页面会明确提示去「设置 → 输入服务端 Token」重新连接。
 
+### 选中文献推送 Zotero
+
+在「设置 → Zotero」配置凭据和目标 Collection 后，可从文献库勾选批量推送，或在单篇详情页推送。
+文献库自动按每批 100 篇处理；接口直接提交超过 100 篇会明确拒绝，不会截断。
+条目创建后先保存本地 Zotero key，再处理笔记和开放获取 PDF。页面分别提示失败和待补齐内容；
+批量操作保留未完成条目的勾选，再次推送会检查远端已有笔记和 PDF，仅补齐缺失部分。
+单篇详情页的「检查 / 补齐 Zotero 附件」也可用于重试。没有 OA PDF 时会明确提示，不能保证每篇都有附件。
+若提示远端条目已存在但本地记录保存失败，请保留提示中的 key；无 DOI 的条目应先恢复本地关联再重试，避免重复创建。
+
 ### 开发环境
 
 依赖清单已合并为单个 `requirements.txt`：上半段是运行时依赖（wheel 打包只声明这一段），下半段是开发/测试工具（pytest 等），生产部署可忽略下半段：
