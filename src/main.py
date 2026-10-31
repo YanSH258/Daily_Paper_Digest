@@ -49,6 +49,37 @@ LOG_DIR = resolve_against_root("data/logs")
 _logger_ready = False
 
 
+class DailyFileHandler(logging.FileHandler):
+    """按天滚动的日志处理器，保持 data/logs/YYYY-MM-DD.log 命名。
+
+    FileHandler 的文件名在打开时固定，长驻的 Web 进程跨天后仍会把
+    日志写进启动当天的文件；这里在写入前按记录时间检查日期，跨天时
+    切换到新日期的文件。emit 在 handler 锁内执行，切换是线程安全的。
+    """
+
+    def __init__(self, log_dir: Path, encoding: str = "utf-8") -> None:
+        self._daily_dir = Path(log_dir)
+        self._daily_day = datetime.now().strftime("%Y-%m-%d")
+        # 不用 delay：保持旧 FileHandler 的行为，setup_logging 即创建当天
+        # 日志文件（--init-config 等不产生日志记录的短命令也依赖此契约）。
+        super().__init__(
+            self._daily_dir / f"{self._daily_day}.log", encoding=encoding
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            day = time.strftime("%Y-%m-%d", time.localtime(record.created))
+            if day != self._daily_day:
+                self._daily_day = day
+                self.baseFilename = os.fspath(self._daily_dir / f"{day}.log")
+                if self.stream is not None:
+                    self.stream.close()
+                    self.stream = None
+        except Exception:  # noqa: BLE001 - 日志切换失败不影响调用方
+            self.handleError(record)
+        super().emit(record)
+
+
 def setup_logging(config_path: Optional[str] = None) -> None:
     """初始化日志（幂等）。在 CLI 与 Web 配置路径确定后调用。"""
     global _logger_ready, LOG_DIR
@@ -63,10 +94,7 @@ def setup_logging(config_path: Optional[str] = None) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(
-                LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log",
-                encoding="utf-8"
-            ),
+            DailyFileHandler(LOG_DIR, encoding="utf-8"),
         ],
     )
     _logger_ready = True
@@ -711,16 +739,20 @@ def run_once(config: dict, date_str: Optional[str] = None, task_id: Optional[str
                     )
         progress("abstract_backfill")
 
-        # ── Step 2.75: 标题自动翻译（免费接口，粗筛阅读用）────
+        # ── Step 2.75: 标题自动翻译（优先已配置 LLM 批量翻译，回退免费接口）────
         if eligible_new_articles:
-            from utils.translate import looks_chinese, translate_title
+            from utils.translate import looks_chinese, translate_title, translate_titles_llm
             t_email = config.get("unpaywall_email", "")
-            translated = 0
+            todo = []
             for a in eligible_new_articles[:80]:  # 单次任务上限，防止接口超时拖长任务
                 title = (a.get("title") or "").strip()
                 if not title or looks_chinese(title) or a.get("title_zh"):
                     continue
-                zh = translate_title(title, email=t_email, pause=0.3)
+                todo.append((a, title))
+            zh_map = translate_titles_llm([t for _, t in todo], config)
+            translated = 0
+            for a, title in todo:
+                zh = zh_map.get(title) or translate_title(title, email=t_email, pause=0.3)
                 if zh:
                     db.update_article_fields(a["id"], title_zh=zh)
                     a["title_zh"] = zh

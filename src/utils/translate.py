@@ -1,7 +1,9 @@
 """
-translate.py - 免费标题翻译（无需 LLM 额度）
+translate.py - 标题翻译
 
-默认 MyMemory（免密钥、有日配额）；可切换 LibreTranslate（可自建）。
+优先用已配置的 LLM（批量、一次调用）；LLM 未配置或失败时
+调用方可回退免费接口：默认 MyMemory（免密钥、有日配额），
+可切换 LibreTranslate（可自建）。
 仅用于短文本（论文标题），失败时调用方应跳过而不是阻断主流程。
 """
 from __future__ import annotations
@@ -81,3 +83,104 @@ def translate_title(title: str, provider: str = "mymemory", *,
     except Exception as e:  # noqa: BLE001
         logger.warning("标题翻译失败 (%s): %s", title[:60], e)
         return None
+
+
+# ──────────────────────────────────────────────
+# LLM 批量翻译（复用已配置的 LLM 供应商）
+# ──────────────────────────────────────────────
+_LLM_TIMEOUT_SECONDS = 60
+_LLM_CHUNK_TITLES = 40
+_NUM_PREFIX_RE = re.compile(r"^\s*(\d+)\s*[.、)）:：]\s*(.+)$")
+
+
+def llm_provider_cfg(config: dict) -> dict:
+    """取已配置 LLM 供应商的连接信息（与 analyzer 的配置约定一致）。
+
+    缺 api_key 或 base_url 时返回空 dict，表示 LLM 翻译不可用。
+    """
+    llm = (config or {}).get("llm") or {}
+    provider = str(llm.get("provider") or "deepseek").strip().lower()
+    pcfg = dict(llm.get(provider) or {})
+    if not pcfg.get("api_key") or not pcfg.get("base_url"):
+        return {}
+    pcfg.setdefault("model", "deepseek-flash")
+    return pcfg
+
+
+def _llm_client(pcfg: dict):
+    from openai import OpenAI
+
+    from core.analyzer import LLM_ACCEPT_ENCODING
+    return OpenAI(
+        api_key=pcfg["api_key"],
+        base_url=pcfg["base_url"],
+        max_retries=0,
+        timeout=_LLM_TIMEOUT_SECONDS,
+        default_headers={"Accept-Encoding": LLM_ACCEPT_ENCODING},
+    )
+
+
+def _llm_translate_chunk(client, model: str, titles: list[str]) -> list[str]:
+    """一次调用翻译一批标题，按输入顺序返回译文；未返回的条目为空串。"""
+    numbered = "\n".join(f"{i}. {t[:500]}" for i, t in enumerate(titles, 1))
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": (
+                "你是学术论文标题翻译引擎，把编号标题翻译成简体中文。"
+                "要求术语准确、简洁通顺，保留化学式、数字与材料符号。"
+                "只输出与输入编号一致的编号译文列表，不要输出任何其他内容。"
+            )},
+            {"role": "user", "content": numbered},
+        ],
+        temperature=0.2,
+    )
+    text = (completion.choices[0].message.content or "") if completion.choices else ""
+    out = [""] * len(titles)
+    for line in text.splitlines():
+        m = _NUM_PREFIX_RE.match(line.strip())
+        if not m:
+            continue
+        idx = int(m.group(1))
+        if 1 <= idx <= len(titles) and not out[idx - 1]:
+            out[idx - 1] = _clean_title(m.group(2))
+    return out
+
+
+def translate_titles_llm(titles: list[str], config: dict) -> dict[str, str]:
+    """用已配置的 LLM 批量翻译标题，返回 {入参标题: 中文译文}（仅含成功条目）。
+
+    LLM 未配置或调用失败时返回空 dict（或缺失对应条目），调用方应
+    回退到免费接口逐条翻译，而不是整体失败。
+    """
+    pcfg = llm_provider_cfg(config)
+    if not pcfg:
+        return {}
+    items: list[tuple[str, str]] = []  # (入参原标题, 清理后标题)
+    for t in titles:
+        c = _clean_title(t)
+        if c and not looks_chinese(c):
+            items.append((t, c))
+    if not items:
+        return {}
+    uniq = list(dict.fromkeys(c for _, c in items))
+    by_clean: dict[str, str] = {}
+    try:
+        client = _llm_client(pcfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LLM 翻译不可用，回退免费接口: %s", e)
+        return {}
+    for start in range(0, len(uniq), _LLM_CHUNK_TITLES):
+        chunk = uniq[start:start + _LLM_CHUNK_TITLES]
+        zh_list: list[str] = []
+        for attempt in (1, 2):
+            try:
+                zh_list = _llm_translate_chunk(client, pcfg["model"], chunk)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    logger.warning("LLM 批量翻译失败（%d 条，重试后仍失败）: %s", len(chunk), e)
+        for src, zh in zip(chunk, zh_list):
+            if zh:
+                by_clean[src] = zh
+    return {orig: by_clean[c] for orig, c in items if by_clean.get(c)}
