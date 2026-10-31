@@ -20,7 +20,7 @@ const SETTINGS = {
   tracking: { enabled: true, citation_check_days: 3, author_check_days: 3 },
   llm: { provider: 'deepseek', model: 'deepseek-chat', base_url: 'https://api.deepseek.com', providers: {} },
   openalex: { api_key_set: false, api_key_masked: '' },
-  web: { protect_read: false },
+  web: { protect_read: false, enable_scheduler: false },
   digest: { categories: true, category_limits_configured: false },
   topic_groups: [],
   relevance_threshold: 4,
@@ -51,6 +51,7 @@ function formStateFromSettings(c) {
     s_smtp_pass_clear: { checked: false },
     s_token: { value: '' },
     s_protect: { checked: !!(c.web && c.web.protect_read) },
+    s_sched_enable: { checked: !!(c.web && c.web.enable_scheduler) },
     s_zot_on: { checked: !!(c.zotero || {}).enabled },
     s_zot_uid: { value: (c.zotero || {}).user_id || '' },
     s_zot_key: { value: '' },
@@ -124,6 +125,16 @@ function makeContext({ settings = SETTINGS, provider = 'deepseek', model = 'deep
     assert.deepEqual(Object.keys(getPosted()).sort(), ['research_topics']);
     // payload 由 vm realm 构造，数组原型不同，需先转到宿主 realm 再比较
     assert.deepEqual(Array.from(getPosted()['research_topics']), ['cof', '除铀', '过氧化氢', '光催化']);
+  }
+
+  // 3b. 只切换定时调度开关：仅提交 web.enable_scheduler（后端据此启停调度线程）
+  {
+    const { ctx, getPosted } = makeContext({
+      overrides: { s_sched_enable: { checked: true } },
+    });
+    await ctx.Settings.save();
+    assert.deepEqual(Object.keys(getPosted()).sort(), ['web.enable_scheduler']);
+    assert.equal(getPosted()['web.enable_scheduler'], true);
   }
 
   // 4. 清空研究方向 + 确认：提交空数组（显式清空语义）

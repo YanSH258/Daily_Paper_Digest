@@ -184,6 +184,77 @@ class TestSettingsSave(unittest.TestCase):
         view = web_server._settings_view(ctx)
         self.assertTrue(view["openalex"]["api_key_set"])
 
+    def test_score_budget_save_and_view(self):
+        """每轮评分预算：保存落盘、运行时热更新、GET 回显。"""
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp, "processing:\n  max_score_articles_per_run: 100")
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"processing.max_score_articles_per_run": 400})
+        self.assertEqual(code, 200)
+        self.assertIn("processing.max_score_articles_per_run", payload["changed"])
+        self.assertEqual((ctx.config.get("processing") or {}).get("max_score_articles_per_run"), 400)
+        self.assertIn("max_score_articles_per_run: 400", open(cfg, encoding="utf-8").read())
+        view = web_server._settings_view(ctx)
+        self.assertEqual(view["processing"]["max_score_articles_per_run"], 400)
+
+    def test_score_budget_boundary_and_invalid(self):
+        """0/负数夹取到 1，超大值夹取到 5000，非数字 400。"""
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"processing.max_score_articles_per_run": 0})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config.get("processing") or {}).get("max_score_articles_per_run"), 1)
+        payload, code = web_server._save_settings(ctx, {"processing.max_score_articles_per_run": 99999})
+        self.assertEqual(code, 200)
+        self.assertEqual((ctx.config.get("processing") or {}).get("max_score_articles_per_run"), 5000)
+        payload, code = web_server._save_settings(ctx, {"processing.max_score_articles_per_run": "abc"})
+        self.assertEqual(code, 400)
+
+    def test_enable_scheduler_toggle_starts_and_stops_thread(self):
+        """设置页开关驱动调度线程：开启即启动、关闭即停止，且落盘与运行时同步。"""
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp, "web:\n  enable_scheduler: false")
+        ctx = self._ctx(cfg)
+        self.addCleanup(ctx.runner.stop_scheduler)
+        self.assertFalse(ctx.enable_scheduler)
+        self.assertIsNone(ctx.runner._scheduler_thread)
+
+        payload, code = web_server._save_settings(ctx, {"web.enable_scheduler": True})
+        self.assertEqual(code, 200)
+        self.assertIn("web.enable_scheduler", payload["changed"])
+        self.assertIn("enable_scheduler: true", open(cfg, encoding="utf-8").read())
+        self.assertTrue(ctx.enable_scheduler)          # 运行时热更新
+        self.assertTrue(web_server._settings_view(ctx)["web"]["enable_scheduler"])
+        self.assertIsNotNone(ctx.runner._scheduler_thread)
+        self.assertTrue(ctx.runner._scheduler_thread.is_alive())
+
+        payload, code = web_server._save_settings(ctx, {"web.enable_scheduler": False})
+        self.assertEqual(code, 200)
+        self.assertFalse(ctx.enable_scheduler)
+        self.assertIn("enable_scheduler: false", open(cfg, encoding="utf-8").read())
+        self.assertTrue(ctx.runner._scheduler_stop.is_set())  # 旧线程已通知退出
+        self.assertIsNone(ctx.runner._scheduler_thread)
+
+    def test_run_time_change_without_enable_starts_nothing(self):
+        """未开启定时调度时改运行时间：保存成功但不启动调度线程。"""
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"scheduler.run_time": "09:30"})
+        self.assertEqual(code, 200)
+        self.assertFalse(ctx.enable_scheduler)
+        self.assertIsNone(ctx.runner._scheduler_thread)
+
+    def test_enable_scheduler_requires_json_bool(self):
+        tmp = tempfile.mkdtemp()
+        cfg = _make_tmp_config(tmp)
+        before = open(cfg, encoding="utf-8").read()
+        ctx = self._ctx(cfg)
+        payload, code = web_server._save_settings(ctx, {"web.enable_scheduler": "yes"})
+        self.assertEqual(code, 400)
+        self.assertEqual(open(cfg, encoding="utf-8").read(), before)
+
     def test_invalid_config_not_written(self):
         tmp = tempfile.mkdtemp()
         cfg = _make_tmp_config(tmp)

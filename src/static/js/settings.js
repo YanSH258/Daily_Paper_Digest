@@ -30,6 +30,7 @@ const Settings = {
       "fetcher.use_browser": !!f.use_browser,
       "fetcher.max_articles_per_journal": Number(f.max_articles_per_journal ?? 100),
       "fetcher.date_filter_days": Number(f.date_filter_days ?? 3),
+      "processing.max_score_articles_per_run": Number((c.processing || {}).max_score_articles_per_run ?? 100),
       "output.email_enabled": !!out.email_enabled,
       "output.email_recipients": (out.email_recipients || []),
       "output.email_smtp_server": out.email_smtp_server || "",
@@ -40,6 +41,7 @@ const Settings = {
       "scheduler.run_time": sched.run_time || "08:00",
       "scheduler.timezone": sched.timezone || "UTC",
       "web.protect_read": !!(c.web && c.web.protect_read),
+      "web.enable_scheduler": !!(c.web && c.web.enable_scheduler),
       "zotero.enabled": !!zot.enabled,
       "zotero.user_id": zot.user_id || "",
       "zotero.collection": zot.collection || "",
@@ -94,6 +96,8 @@ const Settings = {
         ${this.fieldRow("浏览器渲染", `<label class="small"><input id="s_browser" type="checkbox" ${f.use_browser ? "checked" : ""} /> 启用</label>`)}
         ${this.fieldRow("每刊上限（篇）", `<input id="s_maxart" type="number" min="1" value="${API.esc(f.max_articles_per_journal ?? 100)}" />`)}
         ${this.fieldRow("日期过滤（天）", `<input id="s_datedays" type="number" min="0" value="${API.esc(f.date_filter_days ?? 3)}" />`)}
+        ${this.fieldRow("每轮评分预算（篇）", `<input id="s_scorebudget" type="number" min="1" max="5000" title="每轮任务最多评分的文章数；没评完的积压会在后续轮次继续处理，调大可加快清空速度" value="${API.esc((c.processing || {}).max_score_articles_per_run ?? 100)}" />`)}
+        <p class="small" style="margin:0 0 8px;">评分预算=每轮任务最多评多少篇（默认 100）。每天新进文章多时，积压会按这个额度逐轮消化；调大可当轮清空，模型调用量相应增加。</p>
       </div>
       <div class="card"><h3>推送</h3>
         ${this.fieldRow("邮件", `<label class="small"><input id="s_email" type="checkbox" ${out.email_enabled ? "checked" : ""} /> 启用</label>`)}
@@ -141,6 +145,7 @@ const Settings = {
         <div id="blockListBox" class="small"></div>
       </div>
       <div class="card"><h3>调度</h3>
+        ${this.fieldRow("定时调度", `<label class="small"><input id="s_sched_enable" type="checkbox" ${(c.web && c.web.enable_scheduler) ? "checked" : ""} /> 启用后，服务运行期间每天在下方时间自动执行采集评分（默认关闭；错过当次不补跑）</label>`)}
         ${this.fieldRow("每日运行时间", `<input id="s_runtime" value="${API.esc(sched.run_time || "08:00")}" placeholder="08:00" />`)}
         ${this.fieldRow("调度时区", `<input id="s_timezone" value="${API.esc(sched.timezone || "UTC")}" placeholder="例如 Asia/Shanghai" />`)}
         ${this.fieldRow("启用 API Token（可选）", `<input id="s_token" type="password" value="" placeholder="${c.web.api_token_set ? "已配置（留空保持不变）" : "本机自用可留空；需要时填写并保存"}" />
@@ -493,6 +498,7 @@ const Settings = {
       "fetcher.use_browser": chk("s_browser"),
       "fetcher.max_articles_per_journal": parseInt(val("s_maxart")) || 100,
       "fetcher.date_filter_days": parseInt(val("s_datedays")) || 0,
+      "processing.max_score_articles_per_run": parseInt(val("s_scorebudget")) || 100,
       "output.email_enabled": chk("s_email"),
       "output.email_recipients": val("s_recipients").split(",").map((s) => s.trim()).filter(Boolean),
       "output.feishu_enabled": chk("s_feishu"),
@@ -514,6 +520,7 @@ const Settings = {
     const newToken = val("s_token").trim();
     if (newToken) candidate["web.api_token"] = newToken;
     candidate["web.protect_read"] = chk("s_protect");
+    candidate["web.enable_scheduler"] = chk("s_sched_enable");
     candidate["zotero.enabled"] = chk("s_zot_on");
     candidate["zotero.user_id"] = val("s_zot_uid").trim();
     const zotKey = val("s_zot_key").trim();

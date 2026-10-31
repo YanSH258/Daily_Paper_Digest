@@ -251,6 +251,13 @@ class TaskRunner:
         thread.start()
         logger.info("已启动网页端调度线程: run_time=%s", run_time)
 
+    def stop_scheduler(self) -> None:
+        # 调度循环用 stop_event.wait(30) 轮询，置位后至多 30 秒自行退出；
+        # daemon 线程不阻塞进程，这里无需 join。
+        self._scheduler_stop.set()
+        self._scheduler_thread = None
+        logger.info("已停止网页端调度线程")
+
     def _scheduler_loop(self, run_time: str, timezone, stop_event: threading.Event) -> None:
         hour, minute = map(int, validate_scheduler_time(run_time).split(":"))
 
@@ -779,19 +786,26 @@ def _journal_metrics_reseed(ctx: WebContext) -> tuple[dict[str, Any], int]:
 
 
 def _batch_translate_titles(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """批量用免费接口翻译标题（默认 MyMemory）。
+    """批量翻译标题：默认走已配置的 LLM（一次批量调用），未配置时回退免费接口。
 
     传 ids：只翻译这些文章（适合「当前页」）；
     不传 ids：按全局高相关未译条目取 limit 条。
     """
-    from utils.translate import looks_chinese, translate_title
+    from utils.translate import (
+        looks_chinese,
+        llm_provider_cfg,
+        translate_title,
+        translate_titles_llm,
+    )
 
     try:
         limit = int(data.get("limit") or 30)
     except (TypeError, ValueError):
         limit = 30
     limit = max(1, min(limit, 100))
-    provider = str(data.get("provider") or "mymemory").strip().lower()
+    provider = str(data.get("provider") or "auto").strip().lower()
+    if provider == "auto":
+        provider = "llm" if llm_provider_cfg(ctx.config) else "mymemory"
     email = str(ctx.config.get("unpaywall_email") or "")
     libre_url = str(data.get("libre_url") or "")
     libre_key = str(data.get("libre_key") or "")
@@ -808,6 +822,7 @@ def _batch_translate_titles(ctx: WebContext, data: dict[str, Any]) -> tuple[dict
     translated = 0
     skipped = 0
     failed = 0
+    pending: list[tuple[int, str]] = []
     for row in rows:
         aid = row.get("id")
         title = (row.get("title") or "").strip()
@@ -822,15 +837,23 @@ def _batch_translate_titles(ctx: WebContext, data: dict[str, Any]) -> tuple[dict
             ctx.db.update_article_fields(aid, title_zh=title)
             skipped += 1
             continue
-        zh = translate_title(
-            title, provider=provider,
-            libre_url=libre_url, libre_key=libre_key, email=email, pause=0.4,
-        )
+        pending.append((aid, title))
+
+    # LLM 路径：一次批量调用；未译出的条目回退免费接口逐条补
+    free_provider = provider if provider in ("mymemory", "libretranslate") else "mymemory"
+    zh_map = translate_titles_llm([t for _, t in pending], ctx.config) if provider == "llm" else {}
+    for aid, title in pending:
+        zh = zh_map.get(title)
+        if not zh:
+            zh = translate_title(
+                title, provider=free_provider,
+                libre_url=libre_url, libre_key=libre_key, email=email, pause=0.4,
+            )
         if not zh:
             # 一次重试，缓解免费接口偶发失败
             time.sleep(1.2)
             zh = translate_title(
-                title, provider=provider,
+                title, provider=free_provider,
                 libre_url=libre_url, libre_key=libre_key, email=email, pause=0.2,
             )
         if zh:
@@ -998,7 +1021,9 @@ _SETTINGS_FIELDS = [
     "relevance_threshold", "research_topics",
     "fetcher.use_fulltext", "fetcher.use_browser",
     "fetcher.max_articles_per_journal", "fetcher.date_filter_days",
-    "scheduler.run_time", "scheduler.timezone", "web.api_token", "web.api_token_clear", "web.protect_read",
+    "processing.max_score_articles_per_run",
+    "scheduler.run_time", "scheduler.timezone",
+    "web.enable_scheduler", "web.api_token", "web.api_token_clear", "web.protect_read",
     "output.email_enabled", "output.email_recipients",
     "output.email_smtp_server", "output.email_smtp_port",
     "output.email_username", "output.email_password", "output.email_password_clear",
@@ -1055,6 +1080,10 @@ def _settings_view(ctx: WebContext) -> dict[str, Any]:
             "use_browser": fetcher.get("use_browser"),
             "max_articles_per_journal": fetcher.get("max_articles_per_journal"),
             "date_filter_days": fetcher.get("date_filter_days"),
+        },
+        "processing": {
+            "max_score_articles_per_run": (c.get("processing", {}) or {}).get(
+                "max_score_articles_per_run", 100),
         },
         "scheduler": {
             **(c.get("scheduler", {}) or {}),
@@ -1242,6 +1271,9 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     if value:  # 留空 = 保持不变
                         ensure(["openalex"])["api_key"] = str(value).strip()
                         changed.append(key)
+                elif key == "web.enable_scheduler":
+                    ensure(["web"])["enable_scheduler"] = parse_json_bool({key: value}, key)
+                    changed.append(key)
                 elif key == "web.protect_read":
                     ensure(["web"])["protect_read"] = parse_json_bool({key: value}, key)
                     changed.append(key)
@@ -1316,6 +1348,10 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
                     else:
                         node[sub] = parse_json_bool({key: value}, key)
                     changed.append(key)
+                elif key == "processing.max_score_articles_per_run":
+                    # 每轮评分预算：夹取到 1-5000，防止 0 停掉评分或超大值拖垮单轮任务
+                    ensure(["processing"])["max_score_articles_per_run"] = max(1, min(int(value), 5000))
+                    changed.append(key)
         except (ValueError, TypeError, RequestBodyError) as e:
             return {"ok": False, "error": f"字段值格式无效: {e}"}, 400
 
@@ -1353,10 +1389,17 @@ def _save_settings(ctx: WebContext, data: dict[str, Any]) -> tuple[dict[str, Any
         configure_topic_groups(ctx.config)
     except Exception:
         pass
-    if ("scheduler.run_time" in changed or "scheduler.timezone" in changed) and ctx.enable_scheduler:
+    if "web.enable_scheduler" in changed:
+        ctx.enable_scheduler = bool((ctx.config.get("web") or {}).get("enable_scheduler", False))
+    sched_touched = ("web.enable_scheduler" in changed
+                     or "scheduler.run_time" in changed or "scheduler.timezone" in changed)
+    if sched_touched and ctx.enable_scheduler:
         new_run_time = str((ctx.config.get("scheduler") or {}).get("run_time", "08:00"))
         ctx.runner.start_scheduler(run_time=new_run_time)
-        logger.info("scheduler 配置已变更，调度线程已按 %s 重启", new_run_time)
+        logger.info("调度配置已变更，调度线程已按 %s 启动/重启", new_run_time)
+    elif "web.enable_scheduler" in changed:
+        ctx.runner.stop_scheduler()
+        logger.info("网页端定时调度已关闭")
 
     return {"ok": True, "changed": changed}, 200
 
